@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '../lib/supabase'
+import { supabase } from '@/lib/supabase'
 import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
 import ProductSearch from '@/components/ProductSearch'
 import BillScanner from '@/components/BillScanner'
