@@ -11,10 +11,102 @@ export default function ReportsPage() {
   const [tab,      setTab]      = useState('sales')
   const [dateFrom, setDateFrom] = useState(monthStart())
   const [dateTo,   setDateTo]   = useState(todayStr())
-  const [data,     setData]     = useState(null)
+  const [data,     setData]     = useState([])
   const [loading,  setLoading]  = useState(false)
 
-  useEffect(() => { load() }, [tab, dateFrom, dateTo])
+  useEffect(() => {
+    let cancelled = false
+
+    async function run() {
+      setLoading(true)
+
+      try {
+        let result = []
+
+        if (tab === 'sales') {
+          const { data: bills } = await supabase
+            .from('bills')
+            .select('*, bill_items(gst_rate,base_amount,gst_amount,total)')
+            .gte('date', dateFrom)
+            .lte('date', dateTo)
+            .eq('bill_type', 'invoice')
+            .order('date')
+
+          result = bills || []
+        }
+
+        else if (tab === 'gst') {
+          const [{ data: sales }, { data: purch }] = await Promise.all([
+            supabase
+              .from('bill_items')
+              .select('gst_rate,base_amount,gst_amount')
+              .gte('created_at', dateFrom + 'T00:00:00')
+              .lte('created_at', dateTo + 'T23:59:59'),
+
+            supabase
+              .from('purchase_bill_items')
+              .select('gst_rate,base_amount:base_rate,gst_amount')
+              .gte('created_at', dateFrom + 'T00:00:00')
+              .lte('created_at', dateTo + 'T23:59:59'),
+          ])
+
+          result = {
+            sales: sales || [],
+            purchases: purch || [],
+          }
+        }
+
+        else if (tab === 'purchases') {
+          const { data: purch } = await supabase
+            .from('purchase_bills')
+            .select('*, suppliers(name)')
+            .gte('date', dateFrom)
+            .lte('date', dateTo)
+            .order('date')
+
+          result = purch || []
+        }
+
+        else if (tab === 'topproducts') {
+          const { data: items } = await supabase
+            .from('bill_items')
+            .select('product_name,quantity,total')
+            .gte('created_at', dateFrom + 'T00:00:00')
+            .lte('created_at', dateTo + 'T23:59:59')
+
+          const agg = {}
+
+          ;(items || []).forEach(i => {
+            if (!agg[i.product_name]) {
+              agg[i.product_name] = { qty: 0, amount: 0 }
+            }
+
+            agg[i.product_name].qty += parseFloat(i.quantity) || 0
+            agg[i.product_name].amount += parseFloat(i.total) || 0
+          })
+
+          result = Object.entries(agg)
+            .map(([name, v]) => ({ name, ...v }))
+            .sort((a, b) => b.amount - a.amount)
+            .slice(0, 30)
+        }
+
+        if (!cancelled) {
+          setData(result)
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false)
+        }
+      }
+    }
+
+    run()
+
+    return () => {
+      cancelled = true
+    }
+  }, [tab, dateFrom, dateTo])
 
   async function load() {
     setLoading(true)
@@ -282,9 +374,21 @@ export default function ReportsPage() {
 }
 
 function PurchaseSummary({ data }) {
-  const bills = data || []
-  const total  = bills.reduce((s, b) => s + (b.total || 0), 0)
-  const unpaid = bills.filter(b => b.payment_status !== 'paid').reduce((s, b) => s + ((b.total||0)-(b.paid_amount||0)), 0)
+  const bills = Array.isArray(data) ? data : []
+
+  const total = bills.reduce(
+    (sum, b) => sum + (Number(b.total) || 0),
+    0
+  )
+
+  const unpaid = bills
+    .filter(b => b.payment_status !== 'paid')
+    .reduce(
+      (sum, b) =>
+        sum +
+        ((Number(b.total) || 0) - (Number(b.paid_amount) || 0)),
+      0
+    )
 
   return (
     <>

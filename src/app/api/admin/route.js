@@ -24,7 +24,7 @@ async function verifySuperadmin(request) {
   const { data: { user } } = await anonClient.auth.getUser(token)
   if (!user) return null
 
-  const allowed = (process.env.SUPERADMIN_EMAILS || '').split(',').map(e => e.trim())
+  const allowed = (process.env.NEXT_PUBLIC_SUPERADMIN_EMAILS || '').split(',').map(e => e.trim())
   if (!allowed.includes(user.email)) return null
   return user
 }
