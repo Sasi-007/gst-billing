@@ -1,10 +1,10 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { useRouter, useParams } from 'next/navigation'
-import { supabase } from '../../../lib/supabase'
-import { GST_RATES } from '../../../lib/gst'
-import { useShop } from '../../../context/ShopContext'
+import { useRouter, useParams, useSearchParams } from 'next/navigation'
+import { supabase } from '@/lib/supabase'
+import { GST_RATES } from '@/lib/gst'
+import { useShop } from '@/context/ShopContext'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'dozen', 'box', 'pack', 'bottle', 'roll', 'strip', 'pair']
 
@@ -17,6 +17,7 @@ const blank = {
 export default function ProductFormPage() {
   const router = useRouter()
   const { id }  = useParams()
+  const searchParams = useSearchParams()
   const isNew   = id === 'new'
 
   const [form,      setForm]      = useState(blank)
@@ -39,6 +40,10 @@ export default function ProductFormPage() {
       supabase.from('products').select('*').eq('id', id).single().then(({ data }) => {
         if (data) setForm({ ...data, tags: (data.tags || []).join(', ') })
       })
+    } else {
+      // Pre-fill name from ?name= query param (set by ProductSearch "Add to Inventory" link)
+      const prefilledName = searchParams.get('name')
+      if (prefilledName) setForm(f => ({ ...f, name: prefilledName }))
     }
   }, [id, isNew])
 

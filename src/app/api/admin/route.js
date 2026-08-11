@@ -1,0 +1,120 @@
+import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
+
+// Server-side only — uses service role key to bypass RLS
+function getAdminClient() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY
+  if (!url || !key) return null
+  return createClient(url, key, { auth: { persistSession: false } })
+}
+
+// Verify caller is a superadmin
+async function verifySuperadmin(request) {
+  const authHeader = request.headers.get('authorization') || ''
+  const token = authHeader.replace('Bearer ', '').trim()
+  if (!token) return null
+
+  // Use anon client to verify the JWT
+  const anonClient = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
+    { auth: { persistSession: false } }
+  )
+  const { data: { user } } = await anonClient.auth.getUser(token)
+  if (!user) return null
+
+  const allowed = (process.env.SUPERADMIN_EMAILS || '').split(',').map(e => e.trim())
+  if (!allowed.includes(user.email)) return null
+  return user
+}
+
+export async function GET(request) {
+  const user = await verifySuperadmin(request)
+  if (!user) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
+  const admin = getAdminClient()
+  if (!admin) return NextResponse.json({ error: 'Service role key not configured' }, { status: 503 })
+
+  const { searchParams } = new URL(request.url)
+  const resource = searchParams.get('resource')
+
+  if (resource === 'shops') {
+    const { data: shops } = await admin
+      .from('shops')
+      .select('id,name,gstin,phone,city,state,plan,is_active,created_at,bill_counter,purchase_counter')
+      .order('created_at', { ascending: false })
+
+    // Attach owner email per shop
+    const { data: memberships } = await admin
+      .from('user_shops')
+      .select('shop_id,role,user_id')
+      .eq('role', 'owner')
+
+    // Get user emails from auth.users (admin API)
+    const { data: { users: authUsers } } = await admin.auth.admin.listUsers({ perPage: 1000 })
+    const emailMap = Object.fromEntries((authUsers || []).map(u => [u.id, u.email]))
+
+    const ownerMap = Object.fromEntries((memberships || []).map(m => [m.shop_id, emailMap[m.user_id]]))
+
+    const enriched = (shops || []).map(s => ({
+      ...s,
+      owner_email: ownerMap[s.id] || null,
+    }))
+
+    return NextResponse.json({ shops: enriched })
+  }
+
+  if (resource === 'users') {
+    const { data: { users } } = await admin.auth.admin.listUsers({ perPage: 1000 })
+    const { data: memberships } = await admin.from('user_shops').select('user_id,shop_id,role,shops(name)')
+    const memberMap = {}
+    ;(memberships || []).forEach(m => {
+      if (!memberMap[m.user_id]) memberMap[m.user_id] = []
+      memberMap[m.user_id].push({ shop: m.shops?.name, role: m.role })
+    })
+
+    return NextResponse.json({
+      users: (users || []).map(u => ({
+        id: u.id,
+        email: u.email,
+        created_at: u.created_at,
+        shops: memberMap[u.id] || [],
+      }))
+    })
+  }
+
+  return NextResponse.json({ error: 'Unknown resource' }, { status: 400 })
+}
+
+export async function POST(request) {
+  const user = await verifySuperadmin(request)
+  if (!user) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+
+  const admin = getAdminClient()
+  if (!admin) return NextResponse.json({ error: 'Service role key not configured' }, { status: 503 })
+
+  const body = await request.json().catch(() => ({}))
+  const { action } = body
+
+  if (action === 'toggle_shop') {
+    const { shop_id, is_active } = body
+    if (!shop_id) return NextResponse.json({ error: 'shop_id required' }, { status: 400 })
+    await admin.from('shops').update({ is_active }).eq('id', shop_id)
+    return NextResponse.json({ ok: true })
+  }
+
+  if (action === 'create_user') {
+    const { email, password } = body
+    if (!email || !password) return NextResponse.json({ error: 'email and password required' }, { status: 400 })
+    const { data, error } = await admin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+    })
+    if (error) return NextResponse.json({ error: error.message }, { status: 400 })
+    return NextResponse.json({ user: { id: data.user.id, email: data.user.email } })
+  }
+
+  return NextResponse.json({ error: 'Unknown action' }, { status: 400 })
+}

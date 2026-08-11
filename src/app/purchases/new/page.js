@@ -45,8 +45,8 @@ export default function NewPurchasePage() {
 
   useEffect(() => {
     supabase.from('suppliers').select('id,name').eq('is_active', true).order('name').then(({ data }) => setSuppliers(data || []))
-    supabase.from('settings').select('*').single().then(({ data }) => setSettings(data))
-  }, [])
+    supabase.from('shops').select('*').eq('id', shop?.id || '').single().then(({ data }) => setSettings(data))
+  }, [shop?.id])
 
   function showToast(msg, type = 'success') {
     setToast({ msg, type })
@@ -243,7 +243,7 @@ export default function NewPurchasePage() {
 
         {/* Items table */}
         <div className="flex-1 overflow-y-auto px-4 pt-3">
-          <table className="w-full bg-white border rounded-lg text-sm border-collapse">
+          <table className="w-full min-w-[600px] bg-white border rounded-lg text-sm border-collapse">
             <thead>
               <tr className="bg-gray-100 text-gray-600 text-xs">
                 <th className="px-2 py-2 text-left w-8">#</th>

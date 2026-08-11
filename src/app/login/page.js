@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '../../lib/supabase'
+import { supabase } from '@/lib/supabase'
 
 export default function LoginPage() {
   const [mode,     setMode]     = useState('login')   // 'login' | 'signup'
@@ -30,26 +30,17 @@ export default function LoginPage() {
       if (result.error) throw result.error
 
       if (mode === 'signup') {
-        // Check if email confirmation is required
-        const needsConfirm = !result.data.session
-        if (needsConfirm) {
+        // Email confirmation required — Supabase returns no session
+        if (!result.data.session) {
           setMessage('Check your email to confirm your account, then sign in.')
           setLoading(false)
           return
         }
       }
 
-      // Check if user already has a shop
-      const { data: membership } = await supabase
-        .from('user_shops')
-        .select('shop_id')
-        .limit(1)
-
-      if (!membership || membership.length === 0) {
-        router.replace('/onboarding')
-      } else {
-        router.replace('/')
-      }
+      // ShopContext's onAuthStateChange fires and handles redirect automatically.
+      // Small delay so the context can load shops before redirecting.
+      setTimeout(() => setLoading(false), 2000)
     } catch (err) {
       setError(err.message || 'Something went wrong. Please try again.')
       setLoading(false)

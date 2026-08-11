@@ -1,11 +1,12 @@
 'use client'
 
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { supabase } from '../../lib/supabase'
-import { calcItem, calcBillTotals, fmt, GST_RATES } from '../../lib/gst'
-import ProductSearch from '../../components/ProductSearch'
-import PrintTemplate from '../../components/PrintTemplate'
-import { useShop } from '../../context/ShopContext'
+import { createPortal } from 'react-dom'
+import { supabase } from '@/lib/supabase'
+import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
+import ProductSearch from '@/components/ProductSearch'
+import PrintTemplate from '@/components/PrintTemplate'
+import { useShop } from '@/context/ShopContext'
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit', 'Cheque']
 
@@ -49,19 +50,20 @@ export default function BillingPage() {
   const [payMode,     setPayMode]     = useState('Cash')
   const [paidAmt,     setPaidAmt]     = useState('')
   const [notes,       setNotes]       = useState('')
-  const [settings,    setSettings]    = useState(null)
 
   const [searchOpen,  setSearchOpen]  = useState(false)
   const [activeRow,   setActiveRow]   = useState(0)
   const [printData,   setPrintData]   = useState(null)
   const [saving,      setSaving]      = useState(false)
-  const [toast,       setToast]       = useState(null)    // { msg, type }
+  const [toast,       setToast]       = useState(null)
+  const [mounted,     setMounted]     = useState(false)
+
+  useEffect(() => setMounted(true), [])
 
   const { shop } = useShop()
 
-  // ── Load shop settings + pick up quotation redirect flag ─────────────────
+  // ── Pick up quotation redirect flag from sessionStorage ─────────────────
   useEffect(() => {
-    supabase.from('settings').select('*').single().then(({ data }) => setSettings(data))
     const type = sessionStorage.getItem('defaultBillType')
     if (type) { setBillType(type); sessionStorage.removeItem('defaultBillType') }
   }, [])
@@ -72,9 +74,9 @@ export default function BillingPage() {
     setTimeout(() => setToast(null), 3000)
   }
 
-  // ── Item calculation ───────────────────────────────────────────────────────
+  // ── Item calculation — runs for any item that has rate set ─────────────────
   function recalc(item) {
-    if (!item.product_id) return item
+    if (!parseFloat(item.rate) && !parseFloat(item.quantity)) return item
     const c = calcItem(
       parseFloat(item.rate)         || 0,
       parseFloat(item.quantity)     || 0,
@@ -126,6 +128,29 @@ export default function BillingPage() {
     focusId(`qty-${activeRow}`)
   }
 
+  // ── Free-text item (not in inventory) ────────────────────────────────────
+  function handleFreeTextItem(name) {
+    setItems(prev => {
+      const next = [...prev]
+      next[activeRow] = {
+        ...next[activeRow],
+        product_id:   null,
+        product_name: name,
+        unit:         'pcs',
+        quantity:     1,
+        rate:         '',
+        gst_rate:     0,
+        base_amount:  0,
+        gst_amount:   0,
+        discount_amount: 0,
+        total:        0,
+      }
+      return next
+    })
+    setSearchOpen(false)
+    focusId(`rate-${activeRow}`)  // focus rate — user must enter price manually
+  }
+
   // ── Row actions ────────────────────────────────────────────────────────────
   function addRow() {
     const idx = items.length
@@ -163,9 +188,10 @@ export default function BillingPage() {
       // Generate bill number
       let finalNo = billNo.trim()
       if (!finalNo) {
-        const { data: no } = await supabase.rpc('get_next_bill_no', {
+        if (!shop?.id) throw new Error('Shop not loaded. Please refresh.')
+      const { data: no } = await supabase.rpc('get_next_bill_no', {
           p_shop_id: shop.id,
-          p_prefix: settings?.bill_prefix || shop?.bill_prefix || 'INV',
+          p_prefix:  shop.bill_prefix || 'INV',
         })
         finalNo = no || `INV-${Date.now()}`
         setBillNo(finalNo)
@@ -222,7 +248,7 @@ export default function BillingPage() {
       showToast(`✓ ${finalNo} saved`)
 
       if (withPrint) {
-        setPrintData({ bill: { ...billRow, id: saved.id }, items: filledItems, settings, totals })
+        setPrintData({ bill: { ...billRow, id: saved.id }, items: filledItems, shop, totals })
         setTimeout(() => window.print(), 200)
       }
     } catch (err) {
@@ -260,17 +286,24 @@ export default function BillingPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchOpen, activeRow, items, settings, filledItems, totals, billNo, billType, billDate, payMode, paidAmt, notes, customer])
+  }, [searchOpen, activeRow])
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
     <>
-      {/* Print template (hidden on screen) */}
-      {printData && <PrintTemplate data={printData} />}
+      {/* PrintTemplate portaled to document.body — escapes the no-print parent */}
+      {printData && mounted && createPortal(
+        <PrintTemplate data={printData} />,
+        document.body
+      )}
 
       {/* Product search modal */}
       {searchOpen && (
-        <ProductSearch onSelect={handleProductSelect} onClose={() => setSearchOpen(false)} />
+        <ProductSearch
+          onSelect={handleProductSelect}
+          onAddFreeText={handleFreeTextItem}
+          onClose={() => setSearchOpen(false)}
+        />
       )}
 
       {/* Toast notification */}
@@ -350,7 +383,7 @@ export default function BillingPage() {
         {/* ── Bill items table ─────────────────────────────────────────── */}
         <div className="flex-1 overflow-y-auto px-4 pt-3">
           <div className="table-scroll">
-          <table className="w-full bg-white border rounded-lg text-sm border-collapse overflow-hidden billing-table">
+          <table className="w-full min-w-[640px] bg-white border rounded-lg text-sm border-collapse billing-table">
             <thead>
               <tr className="bg-gray-100 text-gray-600 text-xs">
                 <th className="px-2 py-2 text-left w-8">#</th>

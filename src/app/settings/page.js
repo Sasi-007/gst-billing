@@ -1,7 +1,8 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { supabase } from '../../lib/supabase'
+import { supabase } from '@/lib/supabase'
+import { useShop } from '@/context/ShopContext'
 
 const STATES = [
   'Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh','Goa','Gujarat',
@@ -12,29 +13,47 @@ const STATES = [
 ]
 
 export default function SettingsPage() {
+  const { shop, setShop } = useShop()
   const [form,   setForm]   = useState({
-    shop_name:'', address:'', city:'', state:'Tamil Nadu', state_code:'33',
+    name:'', address:'', city:'', state:'Tamil Nadu', state_code:'33',
     pincode:'', phone:'', email:'', gstin:'', footer_text:'Thank you for your business!',
     bill_prefix:'INV', purchase_prefix:'PUR', logo_url:'',
   })
   const [saving, setSaving] = useState(false)
   const [saved,  setSaved]  = useState(false)
-  const [id,     setId]     = useState(null)
 
+  // Load current shop data into form
   useEffect(() => {
-    supabase.from('settings').select('*').single().then(({ data }) => {
-      if (data) { setId(data.id); setForm(f => ({ ...f, ...data })) }
-    })
-  }, [])
+    if (shop?.id) {
+      setForm(f => ({ ...f, ...shop }))
+    }
+  }, [shop?.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   function set(k, v) { setForm(f => ({ ...f, [k]: v })) }
 
   async function save(e) {
     e.preventDefault()
+    if (!shop?.id) return
     setSaving(true)
-    const payload = { ...form, updated_at: new Date().toISOString() }
-    if (id) await supabase.from('settings').update(payload).eq('id', id)
-    else    await supabase.from('settings').insert(payload)
+    const payload = {
+      name:             form.name,
+      address:          form.address          || null,
+      city:             form.city             || null,
+      state:            form.state,
+      state_code:       form.state_code       || null,
+      pincode:          form.pincode          || null,
+      phone:            form.phone            || null,
+      email:            form.email            || null,
+      gstin:            form.gstin            || null,
+      footer_text:      form.footer_text      || null,
+      bill_prefix:      form.bill_prefix      || 'INV',
+      purchase_prefix:  form.purchase_prefix  || 'PUR',
+      logo_url:         form.logo_url         || null,
+      updated_at:       new Date().toISOString(),
+    }
+    const { data: updated } = await supabase
+      .from('shops').update(payload).eq('id', shop.id).select().single()
+    if (updated) setShop({ ...shop, ...updated })  // reflect in context immediately
     setSaved(true)
     setTimeout(() => setSaved(false), 3000)
     setSaving(false)
@@ -64,7 +83,7 @@ export default function SettingsPage() {
           <div className="grid grid-cols-2 gap-3">
             <div className="col-span-2">
               <label className="block text-xs font-medium text-gray-600 mb-1">Shop Name *</label>
-              <input required value={form.shop_name} onChange={e => set('shop_name', e.target.value)}
+              <input required value={form.name} onChange={e => set('name', e.target.value)}
                 className="w-full border rounded-lg px-3 py-2 text-sm font-medium" />
             </div>
             <div className="col-span-2">{f('Address', 'address')}</div>

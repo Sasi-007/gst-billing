@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { useEffect, useState } from 'react'
-import { useShop } from '../context/ShopContext'
+import { useShop } from '@/context/ShopContext'
 
 const NAV = [
   { href: '/',          icon: '📊', label: 'Dashboard',  key: 'h' },
@@ -14,6 +14,7 @@ const NAV = [
   { href: '/suppliers', icon: '🏪', label: 'Suppliers',  key: 's' },
   { href: '/reports',   icon: '📈', label: 'Reports',    key: 'r' },
   { href: '/settings',  icon: '⚙️', label: 'Settings',   key: null },
+  { href: '/superadmin',icon: '🛡️', label: 'Admin',       key: null },
 ]
 
 const MOBILE_NAV = [
@@ -27,7 +28,7 @@ const MOBILE_NAV = [
 export default function Sidebar() {
   const pathname = usePathname()
   const router   = useRouter()
-  const { shop, allShops, switchShop, signOut } = useShop()
+  const { shop, user, allShops, loading, switchShop, signOut } = useShop()
   const [showShops, setShowShops] = useState(false)
 
   useEffect(() => {
@@ -41,7 +42,8 @@ export default function Sidebar() {
   }, [router])
 
   const isPublicPage = ['/login', '/onboarding'].some(p => pathname.startsWith(p))
-  if (isPublicPage) return null
+  // AppShell handles public pages — sidebar never renders there
+  if (isPublicPage || loading || !user) return null
 
   return (
     <>

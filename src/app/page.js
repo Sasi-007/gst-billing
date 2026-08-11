@@ -1,27 +1,28 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { supabase } from '../lib/supabase'
-import { fmt } from '../lib/gst'
+import { supabase } from '@/lib/supabase'
+import { fmt } from '@/lib/gst'
 import Link from 'next/link'
+import { useShop } from '@/context/ShopContext'
 
 function todayStr() { return new Date().toISOString().slice(0, 10) }
 function monthStart() { const d = new Date(); d.setDate(1); return d.toISOString().slice(0, 10) }
 
 export default function DashboardPage() {
+  const { shop, loading: shopLoading } = useShop()
   const [stats,      setStats]      = useState({ todaySales:0, monthSales:0, todayBills:0, monthBills:0 })
   const [lowStock,   setLowStock]   = useState([])
   const [recentBills,setRecentBills]= useState([])
-  const [settings,   setSettings]   = useState(null)
   const [loading,    setLoading]    = useState(true)
 
   useEffect(() => {
+    if (!shop?.id) return   // wait until shop is loaded
     async function load() {
-      const today = todayStr()
+      const today  = todayStr()
       const mStart = monthStart()
 
-      const [settRes, todayRes, monthRes, stockRes, billsRes] = await Promise.all([
-        supabase.from('settings').select('*').single(),
+      const [todayRes, monthRes, stockRes, billsRes] = await Promise.all([
         supabase.from('bills').select('total').gte('date', today).eq('bill_type','invoice'),
         supabase.from('bills').select('total').gte('date', mStart).eq('bill_type','invoice'),
         supabase.from('products')
@@ -37,8 +38,6 @@ export default function DashboardPage() {
           .limit(8),
       ])
 
-      setSettings(settRes.data)
-
       const todaySales = (todayRes.data || []).reduce((s, b) => s + (b.total || 0), 0)
       const monthSales = (monthRes.data || []).reduce((s, b) => s + (b.total || 0), 0)
       setStats({
@@ -51,17 +50,17 @@ export default function DashboardPage() {
       setLoading(false)
     }
     load()
-  }, [])
+  }, [shop?.id])
 
-  if (loading) return (
-    <div className="flex items-center justify-center h-full text-gray-400">Loading…</div>
+  if (shopLoading || loading) return (
+    <div className="flex items-center justify-center h-full text-gray-400 py-16">Loading…</div>
   )
 
   return (
     <div className="p-4">
       {/* Greeting */}
       <div className="mb-4">
-        <h1 className="text-xl font-bold text-gray-900">{settings?.shop_name || 'Dashboard'}</h1>
+        <h1 className="text-xl font-bold text-gray-900">{shop?.name || 'Dashboard'}</h1>
         <p className="text-sm text-gray-500">
           {new Date().toLocaleDateString('en-IN', { weekday:'long', day:'numeric', month:'long', year:'numeric' })}
         </p>

@@ -1,8 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { supabase } from '../../lib/supabase'
-import { fmt } from '../../lib/gst'
+import { supabase } from '@/lib/supabase'
+import { fmt } from '@/lib/gst'
 import Link from 'next/link'
 
 export default function InventoryPage() {
@@ -99,7 +99,7 @@ export default function InventoryPage() {
         <div className="text-center text-gray-400 py-10">No products found</div>
       ) : (
         <div className="overflow-x-auto rounded-lg border bg-white">
-          <table className="w-full text-sm">
+          <table className="w-full min-w-[900px] text-sm">
             <thead>
               <tr className="bg-gray-50 text-gray-600 text-xs border-b">
                 {['Product','Brand','Barcode','Cat','Unit','Purchase','MRP','Selling','GST%','Stock','Supplier',''].map(h => (

@@ -1,8 +1,8 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { supabase } from '../../lib/supabase'
-import { fmt } from '../../lib/gst'
+import { supabase } from '@/lib/supabase'
+import { fmt } from '@/lib/gst'
 import Link from 'next/link'
 
 export default function PurchasesPage() {
@@ -73,7 +73,7 @@ export default function PurchasesPage() {
         <div className="text-center text-gray-400 py-10">No purchases in this period</div>
       ) : (
         <div className="bg-white rounded-xl border overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full min-w-[700px] text-sm">
             <thead>
               <tr className="bg-gray-50 text-gray-600 text-xs border-b">
                 {['Bill No','Date','Supplier','Sup. Invoice','Subtotal','GST','Total','Paid','Status',''].map(h => (

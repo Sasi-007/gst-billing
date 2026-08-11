@@ -2,7 +2,8 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '../../lib/supabase'
+import { supabase } from '@/lib/supabase'
+import { useShop } from '@/context/ShopContext'
 
 const STATES = [
   'Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh','Goa',
@@ -28,6 +29,7 @@ export default function OnboardingPage() {
   const [saving, setSaving] = useState(false)
   const [error,  setError]  = useState('')
   const router = useRouter()
+  const { refreshShops } = useShop()
 
   function set(k, v) { setForm(f => ({ ...f, [k]: v })) }
 
@@ -61,7 +63,9 @@ export default function OnboardingPage() {
       }).eq('id', shopId)
 
       setStep(2)
-      setTimeout(() => router.replace('/'), 1500)
+      // Reload shop context so the new shop becomes active, then navigate
+      await refreshShops()
+      setTimeout(() => router.replace('/'), 800)
     } catch (err) {
       setError(err.message || 'Could not create shop. Please try again.')
       setSaving(false)

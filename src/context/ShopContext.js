@@ -1,7 +1,7 @@
 'use client'
 
-import { createContext, useContext, useState, useEffect } from 'react'
-import { useRouter, usePathname } from 'next/navigation'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
+import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '../lib/supabase'
 
 const ShopContext = createContext(null)
@@ -9,18 +9,37 @@ const ShopContext = createContext(null)
 const PUBLIC_PATHS = ['/login', '/onboarding']
 
 export function ShopProvider({ children }) {
-  const [shop,     setShop]     = useState(null)
-  const [user,     setUser]     = useState(null)
+  const [shop, setShop] = useState(null)
+  const [user, setUser] = useState(null)
   const [allShops, setAllShops] = useState([])
-  const [loading,  setLoading]  = useState(true)
-  const router   = useRouter()
+  const [loading, setLoading] = useState(true)
+
+  const router = useRouter()
   const pathname = usePathname()
 
-  useEffect(() => {
-    loadSession()
+  // Prevent duplicate initial loading
+  const initialised = useRef(false)
 
-    // Listen for auth state changes (login / logout)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+  useEffect(() => {
+    let mounted = true
+
+    async function initialise() {
+      if (initialised.current) return
+      initialised.current = true
+
+      await loadSession()
+    }
+
+    initialise()
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      if (!mounted) return
+
+      // INITIAL_SESSION is already handled by loadSession()
+      if (event === 'INITIAL_SESSION') return
+
       if (session?.user) {
         setUser(session.user)
         loadShops(session.user.id)
@@ -31,72 +50,168 @@ export function ShopProvider({ children }) {
         setLoading(false)
       }
     })
-    return () => subscription.unsubscribe()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
+
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Redirect based on auth state
+  // Redirect based on authentication/shop state
   useEffect(() => {
     if (loading) return
-    const isPublic = PUBLIC_PATHS.some(p => pathname.startsWith(p))
 
+    const isPublic = PUBLIC_PATHS.some((path) =>
+      pathname.startsWith(path)
+    )
+
+    const isApi = pathname.startsWith('/api')
+
+    // Never redirect API routes
+    if (isApi) return
+
+    // Not logged in
     if (!user && !isPublic) {
       router.replace('/login')
       return
     }
-    if (user && !shop && !pathname.startsWith('/onboarding') && !isPublic) {
+
+    // Logged in but no shop yet
+    if (
+      user &&
+      !shop &&
+      !pathname.startsWith('/onboarding') &&
+      !isPublic
+    ) {
       router.replace('/onboarding')
       return
     }
+
+    // Logged in and has shop, but currently on login/onboarding
     if (user && shop && isPublic) {
       router.replace('/')
     }
   }, [loading, user, shop, pathname, router])
 
   async function loadSession() {
-    const { data: { session } } = await supabase.auth.getSession()
+    const {
+      data: { session },
+    } = await supabase.auth.getSession()
+
     if (session?.user) {
       setUser(session.user)
       await loadShops(session.user.id)
     } else {
+      setUser(null)
+      setShop(null)
+      setAllShops([])
       setLoading(false)
     }
   }
 
   async function loadShops(userId) {
-    const { data } = await supabase
+    setLoading(true)
+
+    const { data, error } = await supabase
       .from('user_shops')
       .select('role, shops(*)')
       .eq('user_id', userId)
 
-    const shops = (data || []).map(r => ({ ...r.shops, role: r.role }))
+    if (error) {
+      console.error('Error loading shops:', error)
+      setAllShops([])
+      setShop(null)
+      setLoading(false)
+      return
+    }
+
+    const shops = (data || [])
+      .filter((row) => row.shops)
+      .map((row) => ({
+        ...row.shops,
+        role: row.role,
+      }))
+
     setAllShops(shops)
 
     if (shops.length > 0) {
-      // Restore last active shop from localStorage
-      const lastId = typeof window !== 'undefined' && localStorage.getItem('activeShopId')
-      const active = shops.find(s => s.id === lastId) || shops[0]
+      const lastId =
+        typeof window !== 'undefined'
+          ? localStorage.getItem('activeShopId')
+          : null
+
+      const active =
+        shops.find((s) => s.id === lastId) || shops[0]
+
       setShop(active)
+
+      // Make sure a valid shop is persisted
+      if (typeof window !== 'undefined') {
+        localStorage.setItem('activeShopId', active.id)
+      }
+    } else {
+      setShop(null)
+
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('activeShopId')
+      }
     }
+
     setLoading(false)
   }
 
+  // Call after onboarding creates a new shop
+  async function refreshShops() {
+    const {
+      data: { session },
+    } = await supabase.auth.getSession()
+
+    if (session?.user) {
+      await loadShops(session.user.id)
+    }
+  }
+
   function switchShop(shopId) {
-    const target = allShops.find(s => s.id === shopId)
-    if (target) {
-      setShop(target)
-      if (typeof window !== 'undefined') localStorage.setItem('activeShopId', shopId)
+    const target = allShops.find((s) => s.id === shopId)
+
+    if (!target) return
+
+    setShop(target)
+
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('activeShopId', shopId)
     }
   }
 
   async function signOut() {
     await supabase.auth.signOut()
-    if (typeof window !== 'undefined') localStorage.removeItem('activeShopId')
+
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('activeShopId')
+    }
+
+    setUser(null)
+    setShop(null)
+    setAllShops([])
+
     router.replace('/login')
   }
 
   return (
-    <ShopContext.Provider value={{ shop, user, allShops, loading, setShop, switchShop, signOut }}>
+    <ShopContext.Provider
+      value={{
+        shop,
+        user,
+        allShops,
+        loading,
+        setShop,
+        switchShop,
+        signOut,
+        refreshShops,
+      }}
+    >
       {children}
     </ShopContext.Provider>
   )
@@ -104,6 +219,10 @@ export function ShopProvider({ children }) {
 
 export function useShop() {
   const ctx = useContext(ShopContext)
-  if (!ctx) throw new Error('useShop must be used inside ShopProvider')
+
+  if (!ctx) {
+    throw new Error('useShop must be used inside ShopProvider')
+  }
+
   return ctx
 }

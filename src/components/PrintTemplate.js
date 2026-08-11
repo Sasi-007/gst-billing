@@ -1,14 +1,17 @@
 'use client'
 
-import { fmt, numToWords } from '../lib/gst'
+import { fmt, numToWords } from '@/lib/gst'
 
 /**
  * Hidden on screen (print-only).  window.print() reveals it.
  */
 export default function PrintTemplate({ data }) {
   if (!data) return null
-  const { bill, items, settings, totals } = data
-  const billItems = items.filter(i => i.product_id && i.product_name)
+  const { bill, items, totals } = data
+  // Accept either `shop` (new multi-tenant) or `settings` (legacy)
+  const s = data.shop || data.settings || {}
+  // Include both inventory-linked items and free-text line items
+  const billItems = items.filter(i => i.product_name)
 
   const isInvoice = bill.bill_type === 'invoice'
   const title =
@@ -26,14 +29,14 @@ export default function PrintTemplate({ data }) {
         {/* ── Header ──────────────────────────────────── */}
         <div className="inv-header">
           <div className="inv-shop">
-            <h1>{settings?.shop_name || 'My Shop'}</h1>
-            {settings?.address && <p>{settings.address}</p>}
-            {(settings?.city || settings?.state) && (
-              <p>{[settings.city, settings.state, settings.pincode].filter(Boolean).join(', ')}</p>
+            <h1>{s?.name || s?.shop_name || 'My Shop'}</h1>
+            {s?.address && <p>{s.address}</p>}
+            {(s?.city || s?.state) && (
+              <p>{[s?.city, s?.state, s?.pincode].filter(Boolean).join(', ')}</p>
             )}
-            {settings?.phone && <p>Ph: {settings.phone}</p>}
-            {settings?.email && <p>Email: {settings.email}</p>}
-            {settings?.gstin && <p>GSTIN: <strong>{settings.gstin}</strong></p>}
+            {s?.phone && <p>Ph: {s.phone}</p>}
+            {s?.email && <p>Email: {s.email}</p>}
+            {s?.gstin && <p>GSTIN: <strong>{s.gstin}</strong></p>}
           </div>
 
           <div className="inv-meta">
@@ -167,10 +170,11 @@ export default function PrintTemplate({ data }) {
 
         {/* Footer */}
         <div className="inv-footer">
-          <div>{settings?.footer_text || 'Thank you for your business!'}</div>
+          <div>{s?.footer_text || 'Thank you for your business!'}</div>
           <div className="inv-sig">Authorised Signatory</div>
         </div>
       </div>
     </div>
   )
 }
+
