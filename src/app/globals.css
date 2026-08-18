@@ -1,0 +1,262 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Screen helpers ─────────────────────────────── */
+
+.print-only {
+  display: none !important;
+}
+
+kbd {
+  @apply bg-gray-700 text-white text-xs px-1.5 py-0.5 rounded font-mono;
+}
+
+/* ── Mobile ─────────────────────────────────────── */
+
+@media (max-width: 767px) {
+  .shortcuts-bar {
+    display: none !important;
+  }
+
+  /* Hide HSN column */
+  .billing-table th:nth-child(3),
+  .billing-table td:nth-child(3) {
+    display: none;
+  }
+
+  /* Hide Discount % column */
+  .billing-table th:nth-child(8),
+  .billing-table td:nth-child(8) {
+    display: none;
+  }
+}
+
+/* ── Responsive table wrapper ───────────────────── */
+
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ── Safe-area for iPhone bottom bar notch ──────── */
+
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* ── Print layout ───────────────────────────────── */
+
+@media print {
+  * {
+    box-sizing: border-box;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  body {
+    background: white;
+    margin: 0;
+    padding: 0;
+    font-family: Arial, sans-serif;
+    font-size: 12px;
+    color: #000;
+  }
+
+  /* ── Invoice wrapper ── */
+
+  .invoice {
+    width: 100%;
+    max-width: 780px;
+    margin: 0 auto;
+    padding: 10mm;
+  }
+
+  .invoice .inv-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 2px solid #000;
+    padding-bottom: 8px;
+    margin-bottom: 8px;
+  }
+
+  .invoice .inv-shop h1 {
+    font-size: 18px;
+    font-weight: bold;
+    margin: 0 0 3px;
+  }
+
+  .invoice .inv-shop p {
+    margin: 2px 0;
+    font-size: 11px;
+  }
+
+  .invoice .inv-meta h2 {
+    font-size: 15px;
+    font-weight: bold;
+    text-align: right;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border: 2px solid #000;
+    padding: 3px 8px;
+    margin-bottom: 6px;
+  }
+
+  .invoice .inv-meta table {
+    margin-left: auto;
+  }
+
+  .invoice .inv-meta td {
+    padding: 1px 5px;
+    font-size: 11px;
+  }
+
+  .invoice .inv-meta td:first-child {
+    color: #555;
+  }
+
+  .invoice .inv-customer {
+    background: #f4f4f4;
+    border: 1px solid #ccc;
+    padding: 5px 10px;
+    margin-bottom: 8px;
+    font-size: 11px;
+  }
+
+  /* ── Items table ── */
+
+  .invoice .inv-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-bottom: 8px;
+  }
+
+  .invoice .inv-table th {
+    background: #222;
+    color: #fff;
+    padding: 4px 6px;
+    text-align: left;
+    font-size: 10px;
+    white-space: nowrap;
+  }
+
+  .invoice .inv-table td {
+    padding: 3px 6px;
+    border-bottom: 1px solid #e5e5e5;
+    font-size: 11px;
+  }
+
+  .invoice .inv-table tr:nth-child(even) td {
+    background: #fafafa;
+  }
+
+  .invoice .inv-table .tc {
+    text-align: center;
+  }
+
+  .invoice .inv-table .tr {
+    text-align: right;
+  }
+
+  /* ── Totals section ── */
+
+  .invoice .inv-totals {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 6px;
+  }
+
+  .invoice .inv-tax-summary {
+    flex: 1;
+  }
+
+  .invoice .inv-tax-summary strong {
+    font-size: 11px;
+    display: block;
+    margin-bottom: 3px;
+  }
+
+  .invoice .inv-tax-summary table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10px;
+  }
+
+  .invoice .inv-tax-summary th,
+  .invoice .inv-tax-summary td {
+    border: 1px solid #ccc;
+    padding: 2px 5px;
+    text-align: right;
+  }
+
+  .invoice .inv-tax-summary th:first-child,
+  .invoice .inv-tax-summary td:first-child {
+    text-align: center;
+  }
+
+  .invoice .inv-amount-box {
+    min-width: 200px;
+  }
+
+  .invoice .inv-amount-box .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+    border-bottom: 1px solid #eee;
+    font-size: 11px;
+  }
+
+  .invoice .inv-amount-box .row.grand {
+    font-size: 14px;
+    font-weight: bold;
+    border-top: 2px solid #000;
+    border-bottom: 2px solid #000;
+    padding: 3px 0;
+  }
+
+  .invoice .inv-words {
+    font-style: italic;
+    font-size: 10px;
+    background: #f9f9f9;
+    border-left: 3px solid #333;
+    padding: 3px 8px;
+    margin: 6px 0;
+  }
+
+  .invoice .inv-notes {
+    font-size: 10px;
+    color: #555;
+    margin-top: 4px;
+  }
+
+  .invoice .inv-footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 16px;
+    padding-top: 8px;
+    border-top: 1px solid #ccc;
+    font-size: 10px;
+  }
+
+  .invoice .inv-sig {
+    text-align: right;
+    border-top: 1px solid #000;
+    padding-top: 3px;
+    min-width: 120px;
+    margin-top: 28px;
+    font-size: 10px;
+  }
+
+  @page {
+    margin: 10mm;
+    size: A4 portrait;
+  }
+}
