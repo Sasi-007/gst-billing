@@ -168,13 +168,7 @@ export default function PrintTemplate({ data }) {
 
         {bill.notes && <div className="inv-notes">Note: {bill.notes}</div>}
 
-        {/* Footer */}
-        <div className="inv-footer">
-          <div>{s?.footer_text || 'Thank you for your business!'}</div>
-          <div className="inv-sig">Authorised Signatory</div>
-        </div>
       </div>
     </div>
   )
 }
-

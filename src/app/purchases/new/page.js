@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
 import ProductSearch from '@/components/ProductSearch'
@@ -25,6 +25,7 @@ function focusId(id) {
 
 export default function NewPurchasePage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
 
   const [items,      setItems]     = useState([emptyItem()])
   const [suppId,     setSuppId]    = useState('')
@@ -42,11 +43,67 @@ export default function NewPurchasePage() {
   const [activeRow,  setActiveRow]  = useState(0)
   const [saving,     setSaving]     = useState(false)
   const [toast,      setToast]      = useState(null)
+  const [editPurchaseId, setEditPurchaseId] = useState(null)
 
   useEffect(() => {
     supabase.from('suppliers').select('id,name').eq('is_active', true).order('name').then(({ data }) => setSuppliers(data || []))
     supabase.from('shops').select('*').eq('id', shop?.id || '').single().then(({ data }) => setSettings(data))
   }, [shop?.id])
+
+  useEffect(() => {
+    const editId = searchParams.get('editId')
+    if (!editId || !shop?.id) return
+
+    let cancelled = false
+    async function loadForEdit() {
+      const [{ data: b, error: bErr }, { data: lines, error: lErr }] = await Promise.all([
+        supabase
+          .from('purchase_bills')
+          .select('*')
+          .eq('id', editId)
+          .eq('shop_id', shop.id)
+          .single(),
+        supabase
+          .from('purchase_bill_items')
+          .select('id,product_id,product_name,hsn_code,unit,quantity,rate,gst_rate,gst_amount,total,sl_no')
+          .eq('purchase_bill_id', editId)
+          .eq('shop_id', shop.id)
+          .order('sl_no'),
+      ])
+
+      if (cancelled) return
+      if (bErr) { showToast('Load failed: ' + bErr.message, 'error'); return }
+      if (lErr) { showToast('Load failed: ' + lErr.message, 'error'); return }
+
+      setEditPurchaseId(editId)
+      setSuppId(b.supplier_id || '')
+      setSuppInv(b.supplier_invoice_no || '')
+      setDate(b.date || new Date().toISOString().slice(0, 10))
+      setPayMode(b.payment_mode ? b.payment_mode.charAt(0).toUpperCase() + b.payment_mode.slice(1) : 'Credit')
+      setPaidAmt(String(b.paid_amount ?? ''))
+      setNotes(b.notes || '')
+
+      const loaded = (lines || []).map((it) => ({
+        _id: uid(),
+        product_id: it.product_id || null,
+        product_name: it.product_name || '',
+        hsn_code: it.hsn_code || '',
+        unit: it.unit || 'pcs',
+        quantity: it.quantity ?? 1,
+        rate: it.rate ?? 0,
+        gst_rate: it.gst_rate ?? 0,
+        base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
+        gst_amount: it.gst_amount ?? 0,
+        total: it.total ?? 0,
+      }))
+      setItems(loaded.length ? loaded : [emptyItem()])
+      setActiveRow(0)
+    }
+
+    loadForEdit()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, shop?.id])
 
   function showToast(msg, type = 'success') {
     setToast({ msg, type })
@@ -54,7 +111,7 @@ export default function NewPurchasePage() {
   }
 
   function recalc(item) {
-    if (!item.product_id) return item
+    if (!item.product_id && !item.product_name) return item
     const c = calcItem(parseFloat(item.rate) || 0, parseFloat(item.quantity) || 0, parseFloat(item.gst_rate) || 0, 0)
     return { ...item, ...c }
   }
@@ -81,6 +138,27 @@ export default function NewPurchasePage() {
     focusId(`qty-${activeRow}`)
   }
 
+  function handleFreeTextItem(name) {
+    setItems(prev => {
+      const n = [...prev]
+      n[activeRow] = {
+        ...n[activeRow],
+        product_id:   null,
+        product_name: name,
+        unit:         'pcs',
+        quantity:     1,
+        rate:         '',
+        gst_rate:     0,
+        base_amount:  0,
+        gst_amount:   0,
+        total:        0,
+      }
+      return n
+    })
+    setSearchOpen(false)
+    focusId(`rate-${activeRow}`)
+  }
+
   function addRow() {
     const idx = items.length
     setItems(prev => [...prev, emptyItem()])
@@ -94,7 +172,7 @@ export default function NewPurchasePage() {
     setActiveRow(Math.max(0, i - 1))
   }
 
-  const filledItems = items.filter(i => i.product_id)
+  const filledItems = items.filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
   const totals = calcBillTotals(filledItems)
 
   // ── AI scan apply ─────────────────────────────────────────────────────────
@@ -122,13 +200,27 @@ export default function NewPurchasePage() {
     if (filledItems.length === 0) { showToast('Add at least one item', 'error'); return }
     setSaving(true)
     try {
-      const { data: no } = await supabase.rpc('get_next_purchase_no', {
-        p_shop_id: shop.id,
-        p_prefix: settings?.purchase_prefix || shop?.purchase_prefix || 'PUR',
-      })
+      let no = ''
+      if (!editPurchaseId) {
+        const { data: generatedNo } = await supabase.rpc('get_next_purchase_no', {
+          p_shop_id: shop.id,
+          p_prefix: settings?.purchase_prefix || shop?.purchase_prefix || 'PUR',
+        })
+        const prefix = settings?.purchase_prefix || shop?.purchase_prefix || 'PUR'
+        no = generatedNo || `${prefix}-${Date.now()}`
+      } else {
+        const { data: current } = await supabase
+          .from('purchase_bills')
+          .select('bill_no')
+          .eq('id', editPurchaseId)
+          .eq('shop_id', shop.id)
+          .single()
+        no = current?.bill_no || no
+      }
+      if (!no) throw new Error('Purchase number could not be generated')
       const paid = parseFloat(paidAmt) || 0
 
-      const { data: saved, error: err } = await supabase.from('purchase_bills').insert({
+      const purchaseRow = {
         shop_id:            shop.id,
         bill_no:            no,
         supplier_id: suppId || null,
@@ -141,14 +233,35 @@ export default function NewPurchasePage() {
         payment_mode: payMode.toLowerCase(),
         payment_status: paid >= totals.total ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
         notes: notes || null,
-      }).select().single()
+      }
 
-      if (err) throw err
+      let purchaseId = editPurchaseId
+      if (editPurchaseId) {
+        const { error: updErr } = await supabase
+          .from('purchase_bills')
+          .update(purchaseRow)
+          .eq('id', editPurchaseId)
+          .eq('shop_id', shop.id)
+        if (updErr) throw updErr
+      } else {
+        const { data: saved, error: err } = await supabase.from('purchase_bills').insert(purchaseRow).select().single()
+        if (err) throw err
+        purchaseId = saved.id
+      }
+
+      if (editPurchaseId) {
+        const { error: delErr } = await supabase
+          .from('purchase_bill_items')
+          .delete()
+          .eq('purchase_bill_id', editPurchaseId)
+          .eq('shop_id', shop.id)
+        if (delErr) throw delErr
+      }
 
       await supabase.from('purchase_bill_items').insert(
         filledItems.map((item, i) => ({
           shop_id:         shop.id,
-          purchase_bill_id: saved.id,
+          purchase_bill_id: purchaseId,
           product_id: item.product_id,
           sl_no: i + 1,
           product_name: item.product_name,
@@ -163,8 +276,8 @@ export default function NewPurchasePage() {
         }))
       )
 
-      showToast(`✓ ${no} saved`)
-      setTimeout(() => router.push('/purchases'), 1000)
+      showToast(editPurchaseId ? `✓ ${no} updated` : `✓ ${no} saved`)
+      setTimeout(() => router.push(`/purchases/${purchaseId}`), 700)
     } catch (err) {
       showToast('Error: ' + err.message, 'error')
     } finally {
@@ -190,7 +303,7 @@ export default function NewPurchasePage() {
 
   return (
     <>
-      {searchOpen && <ProductSearch onSelect={handleProductSelect} onClose={() => setSearchOpen(false)} />}
+      {searchOpen && <ProductSearch onSelect={handleProductSelect} onAddFreeText={handleFreeTextItem} onClose={() => setSearchOpen(false)} />}
       {toast && (
         <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow text-white text-sm font-medium ${
           toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'
@@ -202,7 +315,7 @@ export default function NewPurchasePage() {
         <div className="bg-white border-b px-4 py-2 flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-3">
             <button onClick={() => router.back()} className="text-gray-500 text-sm hover:text-gray-700">← Back</button>
-            <h1 className="text-lg font-bold">New Purchase Entry</h1>
+            <h1 className="text-lg font-bold">{editPurchaseId ? 'Edit Purchase Entry' : 'New Purchase Entry'}</h1>
           </div>
           <div className="flex items-center gap-2 text-sm">
             <span className="text-gray-500">Date</span>
@@ -330,7 +443,7 @@ export default function NewPurchasePage() {
               </div>
               <button onClick={handleSave} disabled={saving}
                 className="px-4 py-2 bg-blue-600 text-white rounded font-medium hover:bg-blue-700 disabled:opacity-50 text-sm">
-                {saving ? 'Saving…' : 'F8: Save Purchase'}
+                {saving ? 'Saving…' : editPurchaseId ? 'F8: Update Purchase' : 'F8: Save Purchase'}
               </button>
             </div>
           </div>

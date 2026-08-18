@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom'
+import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
 import ProductSearch from '@/components/ProductSearch'
@@ -42,6 +44,7 @@ function focusId(id) {
 }
 
 export default function BillingPage() {
+  const searchParams = useSearchParams()
   const [items,       setItems]       = useState([emptyItem()])
   const [customer,    setCustomer]    = useState({ name:'', phone:'', gstin:'', address:'' })
   const [billDate,    setBillDate]    = useState(new Date().toISOString().slice(0,10))
@@ -57,10 +60,102 @@ export default function BillingPage() {
   const [saving,      setSaving]      = useState(false)
   const [toast,       setToast]       = useState(null)
   const [mounted,     setMounted]     = useState(false)
+  const [view,        setView]        = useState('form') // 'form' | 'history'
+  const [editBillId,   setEditBillId] = useState(null)
+  const [historyBills, setHistoryBills] = useState([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+  const [historySearch, setHistorySearch] = useState('')
 
   useEffect(() => setMounted(true), [])
 
   const { shop } = useShop()
+
+  // ── Load history when switching to history view ────────────────────────────
+  useEffect(() => {
+    if (view !== 'history' || !shop?.id) return
+    setHistoryLoading(true)
+    let q = supabase
+      .from('bills')
+      .select('id,bill_no,date,customer_name,total,payment_status,bill_type')
+      .eq('shop_id', shop.id)
+      .eq('bill_type', billType)
+      .order('created_at', { ascending: false })
+      .limit(50)
+    const term = historySearch.trim()
+    if (term) {
+      q = q.or(`bill_no.ilike.%${term}%,customer_name.ilike.%${term}%`)
+    }
+    q.then(({ data }) => {
+        setHistoryBills(data || [])
+        setHistoryLoading(false)
+      })
+  }, [view, billType, historySearch, shop?.id])
+
+  // ── Load existing bill into form when ?editId= is provided ───────────────────
+  useEffect(() => {
+    const id = searchParams.get('editId')
+    if (!id || !shop?.id) return
+
+    let cancelled = false
+    async function loadForEdit() {
+      const [{ data: b, error: bErr }, { data: lines, error: lErr }] = await Promise.all([
+        supabase
+          .from('bills')
+          .select('*')
+          .eq('id', id)
+          .eq('shop_id', shop.id)
+          .single(),
+        supabase
+          .from('bill_items')
+          .select('id,product_id,product_name,hsn_code,unit,quantity,mrp,rate,gst_rate,discount_pct,base_rate,gst_amount,discount_amount,total,sl_no')
+          .eq('bill_id', id)
+          .eq('shop_id', shop.id)
+          .order('sl_no'),
+      ])
+
+      if (cancelled) return
+      if (bErr) { showToast('Load failed: ' + bErr.message, 'error'); return }
+      if (lErr) { showToast('Load failed: ' + lErr.message, 'error'); return }
+
+      setEditBillId(id)
+      setView('form')
+      setBillType(b.bill_type || 'invoice')
+      setBillNo(b.bill_no || '')
+      setBillDate(b.date || new Date().toISOString().slice(0, 10))
+      setCustomer({
+        name: b.customer_name || '',
+        phone: b.customer_phone || '',
+        gstin: b.customer_gstin || '',
+        address: b.customer_address || '',
+      })
+      setPayMode(b.payment_mode ? b.payment_mode.charAt(0).toUpperCase() + b.payment_mode.slice(1) : 'Cash')
+      setPaidAmt(String(b.paid_amount ?? ''))
+      setNotes(b.notes || '')
+
+      const loaded = (lines || []).map((it) => ({
+        _id: uid(),
+        product_id: it.product_id || null,
+        product_name: it.product_name || '',
+        hsn_code: it.hsn_code || '',
+        unit: it.unit || 'pcs',
+        quantity: it.quantity ?? 1,
+        mrp: it.mrp ?? 0,
+        rate: it.rate ?? 0,
+        gst_rate: it.gst_rate ?? 0,
+        discount_pct: it.discount_pct ?? 0,
+        base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
+        gst_amount: it.gst_amount ?? 0,
+        discount_amount: it.discount_amount ?? 0,
+        total: it.total ?? 0,
+      }))
+      setItems(loaded.length ? loaded : [emptyItem()])
+      setActiveRow(0)
+    }
+
+    loadForEdit()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, shop?.id])
 
   // ── Pick up quotation redirect flag from sessionStorage ─────────────────
   useEffect(() => {
@@ -95,7 +190,8 @@ export default function BillingPage() {
   }
 
   // ── Derived totals ─────────────────────────────────────────────────────────
-  const filledItems = items.filter(i => i.product_id)
+  // Include free-text items (no product_id) that have a name and rate entered
+  const filledItems = items.filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
   const totals      = calcBillTotals(filledItems)
 
   // ── Open search for a row ──────────────────────────────────────────────────
@@ -120,6 +216,8 @@ export default function BillingPage() {
         gst_rate:     product.gst_rate || 0,
         quantity:     1,
         discount_pct: '',
+        stock_qty:    product.stock_qty,
+        min_stock:    product.min_stock || 0,
       }
       next[activeRow] = recalc(item)
       return next
@@ -168,6 +266,7 @@ export default function BillingPage() {
   // ── New bill ───────────────────────────────────────────────────────────────
   function handleNewBill() {
     if (filledItems.length > 0 && !window.confirm('Clear current bill and start new?')) return
+    setEditBillId(null)
     setItems([emptyItem()])
     setCustomer({ name:'', phone:'', gstin:'', address:'' })
     setBillDate(new Date().toISOString().slice(0,10))
@@ -185,15 +284,19 @@ export default function BillingPage() {
     setSaving(true)
 
     try {
-      // Generate bill number
+      // Generate bill number with type-appropriate prefix
       let finalNo = billNo.trim()
       if (!finalNo) {
         if (!shop?.id) throw new Error('Shop not loaded. Please refresh.')
-      const { data: no } = await supabase.rpc('get_next_bill_no', {
+        const prefix =
+          billType === 'quotation' ? (shop.quotation_prefix || 'QUO')
+          : billType === 'estimate' ? (shop.estimate_prefix || 'EST')
+          : (shop.bill_prefix || 'INV')
+        const { data: no } = await supabase.rpc('get_next_bill_no', {
           p_shop_id: shop.id,
-          p_prefix:  shop.bill_prefix || 'INV',
+          p_prefix:  prefix,
         })
-        finalNo = no || `INV-${Date.now()}`
+        finalNo = no || `${prefix}-${Date.now()}`
         setBillNo(finalNo)
       }
 
@@ -220,12 +323,23 @@ export default function BillingPage() {
         notes:            notes || null,
       }
 
-      const { data: saved, error: billErr } = await supabase.from('bills').insert(billRow).select().single()
-      if (billErr) throw billErr
+      let savedId = editBillId
+      if (editBillId) {
+        const { error: updErr } = await supabase
+          .from('bills')
+          .update(billRow)
+          .eq('id', editBillId)
+          .eq('shop_id', shop.id)
+        if (updErr) throw updErr
+      } else {
+        const { data: saved, error: billErr } = await supabase.from('bills').insert(billRow).select().single()
+        if (billErr) throw billErr
+        savedId = saved.id
+      }
 
       const lineItems = filledItems.map((item, i) => ({
         shop_id:         shop.id,
-        bill_id:         saved.id,
+        bill_id:         savedId,
         product_id:      item.product_id,
         sl_no:           i + 1,
         product_name:    item.product_name,
@@ -242,13 +356,22 @@ export default function BillingPage() {
         total:           item.total        || 0,
       }))
 
+      if (editBillId) {
+        const { error: delErr } = await supabase
+          .from('bill_items')
+          .delete()
+          .eq('bill_id', editBillId)
+          .eq('shop_id', shop.id)
+        if (delErr) throw delErr
+      }
+
       const { error: itemErr } = await supabase.from('bill_items').insert(lineItems)
       if (itemErr) throw itemErr
 
-      showToast(`✓ ${finalNo} saved`)
+      showToast(editBillId ? `✓ ${finalNo} updated` : `✓ ${finalNo} saved`)
 
       if (withPrint) {
-        setPrintData({ bill: { ...billRow, id: saved.id }, items: filledItems, shop, totals })
+        setPrintData({ bill: { ...billRow, id: savedId }, items: filledItems, shop, totals })
         setTimeout(() => window.print(), 200)
       }
     } catch (err) {
@@ -322,7 +445,7 @@ export default function BillingPage() {
           <div className="flex items-center gap-2">
             <select
               value={billType}
-              onChange={e => setBillType(e.target.value)}
+              onChange={e => { setBillType(e.target.value); setView('form') }}
               className="border rounded px-2 py-1 text-sm font-semibold"
             >
               <option value="invoice">Tax Invoice</option>
@@ -331,25 +454,45 @@ export default function BillingPage() {
             </select>
           </div>
 
-          <div className="flex items-center gap-2 ml-auto text-sm">
-            <label className="text-gray-500">Bill No</label>
-            <input
-              value={billNo}
-              onChange={e => setBillNo(e.target.value)}
-              placeholder="Auto"
-              className="border rounded px-2 py-1 w-28 font-mono text-sm"
-            />
-            <label className="text-gray-500 ml-2">Date</label>
-            <input
-              type="date"
-              value={billDate}
-              onChange={e => setBillDate(e.target.value)}
-              className="border rounded px-2 py-1 text-sm"
-            />
+          {/* New / History tabs */}
+          <div className="flex gap-1">
+            <button
+              onClick={() => setView('form')}
+              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${view === 'form' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >New</button>
+            <button
+              onClick={() => setView('history')}
+              className={`px-3 py-1 rounded text-sm font-medium transition-colors ${view === 'history' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >History</button>
           </div>
+
+          {view === 'form' && (
+            <div className="flex items-center gap-2 ml-auto text-sm">
+              {editBillId && (
+                <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-xs font-medium">
+                  Editing Existing Bill
+                </span>
+              )}
+              <label className="text-gray-500">Bill No</label>
+              <input
+                value={billNo}
+                onChange={e => setBillNo(e.target.value)}
+                placeholder="Auto"
+                className="border rounded px-2 py-1 w-28 font-mono text-sm"
+              />
+              <label className="text-gray-500 ml-2">Date</label>
+              <input
+                type="date"
+                value={billDate}
+                onChange={e => setBillDate(e.target.value)}
+                className="border rounded px-2 py-1 text-sm"
+              />
+            </div>
+          )}
         </div>
 
         {/* ── Shortcut strip (desktop only) ──────────────────────────── */}
+        {view === 'form' && (
         <div className="shortcuts-bar bg-blue-700 text-white text-xs px-4 py-1 flex flex-wrap gap-4 flex-shrink-0 no-print">
           <span><kbd>F2</kbd> New</span>
           <span><kbd>F3</kbd> or <kbd>/</kbd> Search product</span>
@@ -359,25 +502,86 @@ export default function BillingPage() {
           <span><kbd>Ctrl+D</kbd> Delete row</span>
           <span><kbd>↑↓ Enter</kbd> Pick item in search</span>
         </div>
+        )}
 
-        {/* ── Customer row ────────────────────────────────────────────── */}
-        <div className="bg-white border-b px-4 py-2 flex flex-wrap gap-3 flex-shrink-0">
-          {[
-            { label:'Customer', key:'name',    ph:'Name (optional)', cls:'w-40' },
-            { label:'Phone',    key:'phone',   ph:'Phone',           cls:'w-32' },
-            { label:'GSTIN',    key:'gstin',   ph:'Customer GSTIN',  cls:'w-40 font-mono uppercase' },
-            { label:'Address',  key:'address', ph:'Address',         cls:'w-48' },
-          ].map(f => (
-            <div key={f.key} className="flex items-center gap-1">
-              <span className="text-xs text-gray-400 whitespace-nowrap">{f.label}:</span>
+        {/* ── History view ─────────────────────────────────────────── */}
+        {view === 'history' && (
+          <div className="flex-1 overflow-y-auto p-4">
+            <div className="mb-3">
               <input
-                value={customer[f.key]}
-                onChange={e => setCustomer(c => ({ ...c, [f.key]: e.target.value }))}
-                placeholder={f.ph}
-                className={`border rounded px-2 py-1 text-sm ${f.cls}`}
+                value={historySearch}
+                onChange={e => setHistorySearch(e.target.value)}
+                placeholder={`Search ${billType} by bill no or customer`}
+                className="w-full max-w-md border rounded-lg px-3 py-2 text-sm"
               />
             </div>
-          ))}
+            {historyLoading ? (
+              <div className="text-center text-gray-400 py-10">Loading…</div>
+            ) : historyBills.length === 0 ? (
+              <div className="text-center text-gray-400 py-10">No {billType}s found</div>
+            ) : (
+              <div className="bg-white rounded-xl border overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-gray-50 text-xs text-gray-500 border-b">
+                      {['Date','Bill No','Customer','Total','Status'].map(h => (
+                        <th key={h} className="px-3 py-2 text-left">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {historyBills.map(b => (
+                      <tr key={b.id} className="border-b hover:bg-gray-50">
+                        <td className="px-3 py-2">{new Date(b.date+'T00:00:00').toLocaleDateString('en-IN')}</td>
+                        <td className="px-3 py-2 font-mono font-medium">
+                          <Link href={`/billing/${b.id}`} className="text-blue-700 hover:underline">
+                            {b.bill_no}
+                          </Link>
+                        </td>
+                        <td className="px-3 py-2 text-gray-600">{b.customer_name || '—'}</td>
+                        <td className="px-3 py-2 font-medium text-right">₹{Number(b.total).toFixed(2)}</td>
+                        <td className="px-3 py-2">
+                          <span className={`px-1.5 py-0.5 rounded text-xs ${
+                            b.payment_status === 'paid' ? 'bg-green-100 text-green-700'
+                            : b.payment_status === 'partial' ? 'bg-yellow-100 text-yellow-700'
+                            : 'bg-gray-100 text-gray-600'
+                          }`}>{b.payment_status || 'draft'}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Customer row, items, footer (form view only) ─────────── */}
+        {view === 'form' && (<>
+        {/* ── Customer row ────────────────────────────────────────────── */}
+        <div className="bg-white border-b px-4 py-2 flex flex-wrap gap-3 flex-shrink-0">
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 whitespace-nowrap">Customer:</span>
+            <input value={customer.name} onChange={e => setCustomer(c => ({ ...c, name: e.target.value }))}
+              placeholder="Name (optional)" className="border rounded px-2 py-1 text-sm w-40" />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 whitespace-nowrap">Phone:</span>
+            <input value={customer.phone} onChange={e => setCustomer(c => ({ ...c, phone: e.target.value }))}
+              placeholder="Phone" className="border rounded px-2 py-1 text-sm w-32" />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 whitespace-nowrap">GSTIN:</span>
+            <input value={customer.gstin}
+              onChange={e => setCustomer(c => ({ ...c, gstin: e.target.value.toUpperCase().slice(0, 15) }))}
+              placeholder="Customer GSTIN" maxLength={15}
+              className="border rounded px-2 py-1 text-sm w-40 font-mono uppercase" />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-xs text-gray-400 whitespace-nowrap">Address:</span>
+            <input value={customer.address} onChange={e => setCustomer(c => ({ ...c, address: e.target.value }))}
+              placeholder="Address" className="border rounded px-2 py-1 text-sm w-48" />
+          </div>
         </div>
 
         {/* ── Bill items table ─────────────────────────────────────────── */}
@@ -424,6 +628,14 @@ export default function BillingPage() {
                     >
                       {item.product_name || 'Press F3 or / to search product…'}
                     </button>
+                    {/* Low / out-of-stock warning */}
+                    {item.stock_qty !== undefined && item.stock_qty !== null && (
+                      item.stock_qty <= 0
+                        ? <div className="text-xs text-red-500 leading-tight mt-0.5">⚠ Out of stock</div>
+                        : item.min_stock > 0 && item.stock_qty <= item.min_stock
+                          ? <div className="text-xs text-yellow-600 leading-tight mt-0.5">⚡ Low stock ({item.stock_qty} left)</div>
+                          : null
+                    )}
                   </td>
 
                   {/* HSN */}
@@ -638,6 +850,7 @@ export default function BillingPage() {
             </div>
           </div>
         </div>
+        </>)}
       </div>
     </>
   )

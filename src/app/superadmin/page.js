@@ -8,19 +8,41 @@ import { fmt } from '@/lib/gst'
 const SUPERADMIN_EMAILS = process.env.NEXT_PUBLIC_SUPERADMIN_EMAILS || ''
 
 async function adminFetch(path, options = {}) {
-  const { data: { session } } = await supabase.auth.getSession()
-  const token = session?.access_token
-  if (!token) throw new Error('Not authenticated')
+  async function doFetch(token) {
+    return fetch(path, {
+      ...options,
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+      },
+    })
+  }
 
-  const res = await fetch(path, {
-    ...options,
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
-  })
-  const json = await res.json()
+  const { data: { session } } = await supabase.auth.getSession()
+  let token = session?.access_token
+  if (!token) {
+    const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
+    if (refreshErr || !refreshed?.session?.access_token) {
+      throw new Error('Not authenticated')
+    }
+    token = refreshed.session.access_token
+  }
+
+  let res = await doFetch(token)
+  let json = await res.json()
+
+  // Token may be expired; try one refresh + retry.
+  if (!res.ok && String(json?.error || '').includes('Session expired')) {
+    const { data: refreshed, error: refreshErr } = await supabase.auth.refreshSession()
+    if (refreshErr || !refreshed?.session?.access_token) {
+      throw new Error('Session expired. Please sign in again.')
+    }
+    token = refreshed.session.access_token
+    res = await doFetch(token)
+    json = await res.json()
+  }
+
   if (!res.ok) throw new Error(json.error || 'Request failed')
   return json
 }
@@ -32,6 +54,7 @@ export default function SuperadminPage() {
   const [users,   setUsers]   = useState([])
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState('')
+  const [authBlocked, setAuthBlocked] = useState(false)
   const [toast,   setToast]   = useState('')
 
   // New user form
@@ -42,7 +65,7 @@ export default function SuperadminPage() {
   const isSuperadmin = user && SUPERADMIN_EMAILS.split(',').map(e => e.trim()).includes(user.email)
 
   const loadData = useCallback(async () => {
-    if (!isSuperadmin) return
+    if (!isSuperadmin || authBlocked) return
     setLoading(true)
     setError('')
     try {
@@ -54,13 +77,21 @@ export default function SuperadminPage() {
         setUsers(data.users || [])
       }
     } catch (err) {
+      if (
+        String(err.message || '').includes('Forbidden:') ||
+        String(err.message || '').includes('TLS certificate issue')
+      ) {
+        setAuthBlocked(true)
+      }
       setError(err.message)
     } finally {
       setLoading(false)
     }
-  }, [tab, isSuperadmin])
+  }, [tab, isSuperadmin, authBlocked])
 
-  useEffect(() => { loadData() }, [loadData])
+  useEffect(() => {
+    if (!shopLoading) loadData()
+  }, [loadData, shopLoading])
 
   function showToast(msg) {
     setToast(msg)
@@ -125,7 +156,7 @@ export default function SuperadminPage() {
           <h1 className="text-xl font-bold">Superadmin Panel</h1>
           <p className="text-xs text-gray-500 mt-0.5">Logged in as <strong>{user.email}</strong></p>
         </div>
-        <button onClick={loadData}
+        <button onClick={() => { setAuthBlocked(false); loadData() }}
           className="px-3 py-1.5 bg-gray-200 text-gray-700 rounded-lg text-sm hover:bg-gray-300">
           ↻ Refresh
         </button>
@@ -139,6 +170,12 @@ export default function SuperadminPage() {
       {error && (
         <div className="mb-3 p-3 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg">
           ⚠ {error}
+          {error.includes('Forbidden:') && (
+            <p className="mt-1 text-xs">
+              Try signing out and signing in again. If it persists, confirm this email is in{' '}
+              <code>NEXT_PUBLIC_SUPERADMIN_EMAILS</code> and restart dev server.
+            </p>
+          )}
           {error.includes('Service role') && (
             <p className="mt-1 text-xs">
               Add <code>SUPABASE_SERVICE_ROLE_KEY</code> to your <code>.env.local</code>.

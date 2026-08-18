@@ -25,27 +25,44 @@ export default function ProductFormPage() {
   const [suppliers, setSuppliers] = useState([])
   const [saving,    setSaving]    = useState(false)
   const [error,     setError]     = useState('')
+  const [newCatName, setNewCatName] = useState('')
+  const [addingCat,  setAddingCat]  = useState(false)
   const { shop } = useShop()
 
+  function loadCats() {
+    supabase.from('categories').select('*').order('name').then(({ data }) => setCats(data || []))
+  }
+
   useEffect(() => {
-    Promise.all([
-      supabase.from('categories').select('*').order('name'),
-      supabase.from('suppliers').select('id,name').eq('is_active',true).order('name'),
-    ]).then(([c, s]) => {
-      setCats(c.data || [])
-      setSuppliers(s.data || [])
-    })
+    loadCats()
+    supabase.from('suppliers').select('id,name').eq('is_active',true).order('name').then(({ data }) => setSuppliers(data || []))
 
     if (!isNew) {
       supabase.from('products').select('*').eq('id', id).single().then(({ data }) => {
         if (data) setForm({ ...data, tags: (data.tags || []).join(', ') })
       })
     } else {
-      // Pre-fill name from ?name= query param (set by ProductSearch "Add to Inventory" link)
       const prefilledName = searchParams.get('name')
       if (prefilledName) setForm(f => ({ ...f, name: prefilledName }))
     }
   }, [id, isNew])
+
+  async function addCategory() {
+    const name = newCatName.trim()
+    if (!name) return
+    setAddingCat(true)
+    const { data, error: err } = await supabase
+      .from('categories')
+      .insert({ name, shop_id: shop?.id })
+      .select()
+      .single()
+    setAddingCat(false)
+    if (!err && data) {
+      setNewCatName('')
+      loadCats()
+      set('category_id', data.id)
+    }
+  }
 
   function set(k, v) {
     setForm(f => {
@@ -123,11 +140,26 @@ export default function ProductFormPage() {
           {/* Category */}
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
-            <select value={form.category_id} onChange={e => set('category_id', e.target.value)}
-              className="w-full border rounded-lg px-3 py-2 text-sm">
-              <option value="">— Select —</option>
-              {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
+            <div className="flex gap-1">
+              <select value={form.category_id} onChange={e => set('category_id', e.target.value)}
+                className="flex-1 border rounded-lg px-3 py-2 text-sm">
+                <option value="">— Select —</option>
+                {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+            <div className="flex gap-1 mt-1">
+              <input
+                value={newCatName}
+                onChange={e => setNewCatName(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addCategory())}
+                placeholder="+ New category name"
+                className="flex-1 border rounded-lg px-2 py-1 text-xs"
+              />
+              <button type="button" onClick={addCategory} disabled={addingCat || !newCatName.trim()}
+                className="px-2 py-1 bg-blue-600 text-white rounded-lg text-xs disabled:opacity-50">
+                {addingCat ? '…' : 'Add'}
+              </button>
+            </div>
           </div>
 
           {/* Unit */}

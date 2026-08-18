@@ -32,7 +32,7 @@ export default function DashboardPage() {
           .order('stock_qty')
           .limit(10),
         supabase.from('bills')
-          .select('bill_no,date,customer_name,total,payment_status,payment_mode')
+          .select('id,bill_no,date,customer_name,total,payment_status,payment_mode')
           .eq('bill_type', 'invoice')
           .order('created_at', { ascending: false })
           .limit(8),
@@ -145,8 +145,12 @@ export default function DashboardPage() {
             {recentBills.length === 0 ? (
               <tr><td colSpan={6} className="px-4 py-4 text-center text-gray-400">No bills yet</td></tr>
             ) : recentBills.map(b => (
-              <tr key={b.bill_no} className="border-b hover:bg-gray-50">
-                <td className="px-4 py-2 font-mono font-medium text-blue-700">{b.bill_no}</td>
+              <tr key={b.id} className="border-b hover:bg-gray-50">
+                <td className="px-4 py-2 font-mono font-medium">
+                  <Link href={`/billing/${b.id}`} className="text-blue-700 hover:underline">
+                    {b.bill_no}
+                  </Link>
+                </td>
                 <td className="px-4 py-2">{new Date(b.date+'T00:00:00').toLocaleDateString('en-IN')}</td>
                 <td className="px-4 py-2 text-gray-600">{b.customer_name || 'Walk-in'}</td>
                 <td className="px-4 py-2 font-medium">{fmt(b.total)}</td>

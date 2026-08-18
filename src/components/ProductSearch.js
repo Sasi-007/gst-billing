@@ -35,7 +35,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
       // OR: search_text (computed), name, barcode — name is fallback if search_text not yet built
       const { data, error } = await supabase
         .from('products')
-        .select('id,name,brand,barcode,unit,mrp,selling_price,gst_rate,stock_qty,hsn_code')
+        .select('id,name,brand,barcode,unit,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code')
         .or(`search_text.ilike.%${q}%,name.ilike.%${q}%,barcode.ilike.%${q}%`)
         .eq('is_active', true)
         .order('name')

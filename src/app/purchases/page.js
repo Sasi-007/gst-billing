@@ -84,7 +84,11 @@ export default function PurchasesPage() {
             <tbody>
               {bills.map(b => (
                 <tr key={b.id} className="border-b hover:bg-gray-50">
-                  <td className="px-3 py-2 font-mono font-medium text-blue-700">{b.bill_no}</td>
+                  <td className="px-3 py-2 font-mono font-medium">
+                    <Link href={`/purchases/${b.id}`} className="text-blue-700 hover:underline">
+                      {b.bill_no}
+                    </Link>
+                  </td>
                   <td className="px-3 py-2 whitespace-nowrap">{new Date(b.date+'T00:00:00').toLocaleDateString('en-IN')}</td>
                   <td className="px-3 py-2">{b.suppliers?.name || '—'}</td>
                   <td className="px-3 py-2 text-gray-500 text-xs">{b.supplier_invoice_no || '—'}</td>

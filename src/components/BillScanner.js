@@ -7,9 +7,10 @@ const MAX_MB   = 5
 
 /**
  * Upload a vendor invoice image → AI extracts line items → call onApply(result).
- * All errors are surfaced in the UI; onApply is only called with valid data.
+ * Collapsible to avoid covering the items table.
  */
 export default function BillScanner({ onApply }) {
+  const [open,     setOpen]     = useState(false)
   const [file,     setFile]     = useState(null)
   const [preview,  setPreview]  = useState(null)
   const [scanning, setScanning] = useState(false)
@@ -102,23 +103,32 @@ export default function BillScanner({ onApply }) {
   }, [])
 
   return (
-    <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-4">
+    <div className="bg-amber-50 border border-amber-200 rounded-xl mb-4">
 
-      {/* Header */}
-      <div className="flex items-center justify-between mb-3">
+      {/* Collapsible header */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-2.5 text-left"
+      >
         <div className="flex items-center gap-2">
-          <span className="text-xl">🤖</span>
+          <span className="text-lg">🤖</span>
           <div>
             <p className="font-semibold text-sm text-gray-800">AI Bill Scanner</p>
             <p className="text-xs text-gray-500">Upload vendor invoice → auto-fill purchase items</p>
           </div>
         </div>
+        <span className="text-gray-400 text-sm">{open ? '▲' : '▼'}</span>
+      </button>
+
+      {open && (
+      <div className="px-4 pb-4 border-t border-amber-200 pt-3">
+        {/* Clear button */}
         {(file || result) && (
-          <button onClick={() => reset(true)} className="text-xs text-gray-400 hover:text-gray-700 leading-none">
-            ✕ Clear
-          </button>
+          <div className="flex justify-end mb-2">
+            <button onClick={() => reset(true)} className="text-xs text-gray-400 hover:text-gray-700">✕ Clear</button>
+          </div>
         )}
-      </div>
 
       {/* Drop zone (shown before file selected) */}
       {!file && (
@@ -236,6 +246,8 @@ export default function BillScanner({ onApply }) {
           ✓ {result.items.length} item{result.items.length !== 1 ? 's' : ''} applied.
           &nbsp;Review and edit the form below before saving.
         </div>
+      )}
+      </div>
       )}
     </div>
   )

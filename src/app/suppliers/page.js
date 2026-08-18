@@ -123,7 +123,12 @@ export default function SuppliersPage() {
             {f('Contact Person', 'contact_person')}
             {f('Phone', 'phone', { type: 'tel' })}
             {f('Email', 'email', { type: 'email' })}
-            {f('GSTIN', 'gstin', { className: 'w-full border rounded px-2 py-1.5 text-sm font-mono uppercase' })}
+            <div>
+              <label className="block text-xs text-gray-500 mb-0.5">GSTIN</label>
+              <input value={form.gstin ?? ''} maxLength={15}
+                onChange={e => setForm(p => ({ ...p, gstin: e.target.value.toUpperCase().slice(0, 15) }))}
+                className="w-full border rounded px-2 py-1.5 text-sm font-mono uppercase" />
+            </div>
             {f('Address', 'address')}
             {f('City', 'city')}
             {f('State', 'state')}
