@@ -6,23 +6,9 @@ import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
-import { todayStr } from '@/lib/finance'
 import ProductSearch from '@/components/ProductSearch'
 import PrintTemplate from '@/components/PrintTemplate'
 import { useShop } from '@/context/ShopContext'
-import {
-  applyLocalStockDelta,
-  applyLocalStockDeltaMap,
-  clearBillingDraft,
-  enqueuePendingBill,
-  listPendingBills,
-  loadBillingDraft,
-  makeTempBillNo,
-  removePendingBill,
-  saveBillingDraft,
-  saveProductSnapshot,
-  updatePendingBill,
-} from '@/lib/offlineBilling'
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit', 'Cheque']
 
@@ -38,7 +24,6 @@ function emptyItem() {
     unit:           'pcs',
     quantity:       '',
     mrp:            0,
-    purchase_price: '',
     rate:           '',
     gst_rate:       0,
     discount_pct:   '',
@@ -58,71 +43,11 @@ function focusId(id) {
   }, 30)
 }
 
-function getProfitPreview(item) {
-  const purchasePrice = parseFloat(item.purchase_price)
-  const quantity = parseFloat(item.quantity)
-  const total = parseFloat(item.total)
-
-  if (!Number.isFinite(purchasePrice) || purchasePrice <= 0 || !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(total) || total <= 0) {
-    return null
-  }
-
-  const effectiveSellingPrice = total / quantity
-  const profitPerUnit = effectiveSellingPrice - purchasePrice
-  const totalProfit = profitPerUnit * quantity
-  const marginPct = (profitPerUnit / purchasePrice) * 100
-
-  return {
-    totalProfit,
-    marginPct,
-    purchasePrice,
-    isLoss: totalProfit < 0,
-  }
-}
-
-function getBillProfitSummary(items) {
-  return items.reduce((acc, item) => {
-    const preview = getProfitPreview(item)
-    if (!preview) return acc
-    acc.totalProfit += preview.totalProfit
-    acc.totalCost += preview.purchasePrice * (parseFloat(item.quantity) || 0)
-    return acc
-  }, { totalProfit: 0, totalCost: 0 })
-}
-
-function buildQuantityMap(items) {
-  return (items || []).reduce((map, item) => {
-    if (!item?.product_id) return map
-    const qty = parseFloat(item.quantity) || 0
-    map[item.product_id] = (map[item.product_id] || 0) + qty
-    return map
-  }, {})
-}
-
-function getBillPrefix(shop, billType) {
-  if (!shop) return 'OFF'
-  return billType === 'quotation'
-    ? (shop.quotation_prefix || 'QUO')
-    : billType === 'estimate'
-      ? (shop.estimate_prefix || 'EST')
-      : (shop.bill_prefix || 'INV')
-}
-
-function isNetworkError(error) {
-  const message = String(error?.message || '')
-  return (
-    message.includes('Failed to fetch') ||
-    message.includes('NetworkError') ||
-    message.includes('fetch') ||
-    message.includes('offline')
-  )
-}
-
 export default function BillingPage() {
   const searchParams = useSearchParams()
   const [items,       setItems]       = useState([emptyItem()])
   const [customer,    setCustomer]    = useState({ name:'', phone:'', gstin:'', address:'' })
-  const [billDate,    setBillDate]    = useState(todayStr())
+  const [billDate,    setBillDate]    = useState(new Date().toISOString().slice(0,10))
   const [billNo,      setBillNo]      = useState('')
   const [billType,    setBillType]    = useState('invoice')
   const [payMode,     setPayMode]     = useState('Cash')
@@ -140,211 +65,10 @@ export default function BillingPage() {
   const [historyBills, setHistoryBills] = useState([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historySearch, setHistorySearch] = useState('')
-  const [conversionSource, setConversionSource] = useState(null)
-  const [isOffline, setIsOffline] = useState(false)
-  const draftLoadedRef = useRef(false)
-  const syncInProgressRef = useRef(false)
 
   useEffect(() => setMounted(true), [])
 
-  useEffect(() => {
-    const updateOnlineState = () => setIsOffline(typeof navigator !== 'undefined' ? !navigator.onLine : false)
-    updateOnlineState()
-    window.addEventListener('online', updateOnlineState)
-    window.addEventListener('offline', updateOnlineState)
-    return () => {
-      window.removeEventListener('online', updateOnlineState)
-      window.removeEventListener('offline', updateOnlineState)
-    }
-  }, [])
-
   const { shop } = useShop()
-
-  useEffect(() => {
-    if (!shop?.id) return
-    if (searchParams.get('editId') || searchParams.get('convertFrom')) {
-      draftLoadedRef.current = true
-      return
-    }
-
-    let cancelled = false
-    async function restoreDraft() {
-      try {
-        const draft = await loadBillingDraft(shop.id)
-        if (cancelled || !draft) return
-        setItems(draft.items?.length ? draft.items : [emptyItem()])
-        setCustomer(draft.customer || { name:'', phone:'', gstin:'', address:'' })
-        setBillDate(draft.billDate || todayStr())
-        setBillNo(draft.billNo || '')
-        setBillType(draft.billType || 'invoice')
-        setPayMode(draft.payMode || 'Cash')
-        setPaidAmt(draft.paidAmt || '')
-        setNotes(draft.notes || '')
-        setConversionSource(draft.conversionSource || null)
-        showToast('Restored unsaved bill draft')
-      } catch (error) {
-        console.warn('Draft restore failed:', error)
-      } finally {
-        draftLoadedRef.current = true
-      }
-    }
-
-    restoreDraft()
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shop?.id])
-
-  useEffect(() => {
-    if (!shop?.id || !draftLoadedRef.current) return
-    saveBillingDraft(shop.id, {
-      items,
-      customer,
-      billDate,
-      billNo,
-      billType,
-      payMode,
-      paidAmt,
-      notes,
-      conversionSource,
-    })
-  }, [shop?.id, items, customer, billDate, billNo, billType, payMode, paidAmt, notes, conversionSource])
-
-  useEffect(() => {
-    if (!shop?.id || !mounted || !navigator.onLine) return
-
-    let cancelled = false
-    async function syncProducts() {
-      try {
-        const { data, error } = await supabase
-          .from('products')
-          .select('id,name,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,search_text')
-          .eq('shop_id', shop.id)
-          .eq('is_active', true)
-        if (error) return
-        if (cancelled) return
-        await saveProductSnapshot(shop.id, data || [])
-      } catch (err) {
-        console.warn('Product snapshot sync failed:', err)
-      }
-    }
-
-    syncProducts()
-    return () => { cancelled = true }
-  }, [mounted, shop?.id])
-
-  useEffect(() => {
-    if (!shop?.id || !mounted) return
-
-    let cancelled = false
-    async function syncQueue() {
-      if (!navigator.onLine || syncInProgressRef.current) return
-      syncInProgressRef.current = true
-      try {
-        const queue = await listPendingBills(shop.id)
-        for (const record of queue) {
-          if (cancelled) return
-          await updatePendingBill(record.id, { status: 'syncing' })
-
-          const billRow = { ...record.billRow }
-          const lineItems = record.lineItems || []
-          if (!billRow.bill_no || String(billRow.bill_no).startsWith('OFF-')) {
-            const prefix = getBillPrefix(shop, billRow.bill_type)
-            try {
-              const { data: no, error: noErr } = await supabase.rpc('get_next_bill_no', {
-                p_shop_id: shop.id,
-                p_prefix: prefix,
-              })
-              if (noErr) throw noErr
-              billRow.bill_no = no || makeTempBillNo(prefix)
-            } catch {
-              billRow.bill_no = billRow.bill_no || makeTempBillNo(prefix)
-            }
-          }
-
-          const { data: saved, error: billErr } = await supabase
-            .from('bills')
-            .insert(billRow)
-            .select()
-            .single()
-          if (billErr) throw billErr
-
-          const syncedLineItems = lineItems.map((item, index) => ({
-            shop_id: shop.id,
-            bill_id: saved.id,
-            product_id: item.product_id,
-            sl_no: index + 1,
-            product_name: item.product_name,
-            hsn_code: item.hsn_code || null,
-            unit: item.unit,
-            quantity: parseFloat(item.quantity) || 1,
-            mrp: item.mrp,
-            cost_price: parseFloat(item.purchase_price) || 0,
-            rate: parseFloat(item.rate) || 0,
-            base_rate: (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
-            gst_rate: item.gst_rate || 0,
-            gst_amount: item.gst_amount || 0,
-            discount_pct: parseFloat(item.discount_pct) || 0,
-            discount_amount: item.discount_amount || 0,
-            total: item.total || 0,
-          }))
-
-          const { error: itemsErr } = await supabase.from('bill_items').insert(syncedLineItems)
-          if (itemsErr) throw itemsErr
-
-          if (billRow.bill_type === 'invoice' && syncedLineItems.length > 0) {
-            for (const item of syncedLineItems) {
-              if (!item.product_id) continue
-              const { data: productRow, error: productErr } = await supabase
-                .from('products')
-                .select('id,stock_qty')
-                .eq('id', item.product_id)
-                .eq('shop_id', shop.id)
-                .single()
-              if (productErr) throw productErr
-
-              const nextStock = Number(productRow.stock_qty || 0) - Number(item.quantity || 0)
-              const { error: stockErr } = await supabase
-                .from('products')
-                .update({ stock_qty: nextStock })
-                .eq('id', item.product_id)
-                .eq('shop_id', shop.id)
-              if (stockErr) throw stockErr
-            }
-          }
-
-          if (record.conversionSourceId) {
-            const { error: sourceItemsErr } = await supabase
-              .from('bill_items')
-              .delete()
-              .eq('bill_id', record.conversionSourceId)
-              .eq('shop_id', shop.id)
-            if (sourceItemsErr) throw sourceItemsErr
-
-            const { error: sourceBillErr } = await supabase
-              .from('bills')
-              .delete()
-              .eq('id', record.conversionSourceId)
-              .eq('shop_id', shop.id)
-            if (sourceBillErr) throw sourceBillErr
-          }
-
-          await removePendingBill(record.id)
-          await clearBillingDraft(shop.id)
-        }
-      } catch (error) {
-        console.warn('Queue sync failed:', error)
-      } finally {
-        syncInProgressRef.current = false
-      }
-    }
-
-    syncQueue()
-    window.addEventListener('online', syncQueue)
-    return () => {
-      cancelled = true
-      window.removeEventListener('online', syncQueue)
-    }
-  }, [mounted, shop?.id])
 
   // ── Load history when switching to history view ────────────────────────────
   useEffect(() => {
@@ -383,7 +107,7 @@ export default function BillingPage() {
           .single(),
         supabase
           .from('bill_items')
-          .select('id,product_id,product_name,hsn_code,unit,quantity,mrp,cost_price,rate,gst_rate,discount_pct,base_rate,gst_amount,discount_amount,total,sl_no')
+          .select('id,product_id,product_name,hsn_code,unit,quantity,mrp,rate,gst_rate,discount_pct,base_rate,gst_amount,discount_amount,total,sl_no')
           .eq('bill_id', id)
           .eq('shop_id', shop.id)
           .order('sl_no'),
@@ -393,27 +117,11 @@ export default function BillingPage() {
       if (bErr) { showToast('Load failed: ' + bErr.message, 'error'); return }
       if (lErr) { showToast('Load failed: ' + lErr.message, 'error'); return }
 
-      const productIds = [...new Set((lines || []).map((it) => it.product_id).filter(Boolean))]
-      let productPricingMap = new Map()
-      if (productIds.length > 0) {
-        const { data: productRows, error: productErr } = await supabase
-          .from('products')
-          .select('id,purchase_price,stock_qty,min_stock')
-          .eq('shop_id', shop.id)
-          .in('id', productIds)
-
-        if (cancelled) return
-        if (productErr) { showToast('Load failed: ' + productErr.message, 'error'); return }
-        productPricingMap = new Map((productRows || []).map((product) => [product.id, product]))
-      }
-
       setEditBillId(id)
-      setConversionSource(null)
       setView('form')
       setBillType(b.bill_type || 'invoice')
-      setConversionSource(null)
       setBillNo(b.bill_no || '')
-      setBillDate(b.date || todayStr())
+      setBillDate(b.date || new Date().toISOString().slice(0, 10))
       setCustomer({
         name: b.customer_name || '',
         phone: b.customer_phone || '',
@@ -424,82 +132,6 @@ export default function BillingPage() {
       setPaidAmt(String(b.paid_amount ?? ''))
       setNotes(b.notes || '')
 
-      const loaded = (lines || []).map((it) => {
-        const product = it.product_id ? productPricingMap.get(it.product_id) : null
-        return {
-          _id: uid(),
-          product_id: it.product_id || null,
-          product_name: it.product_name || '',
-          hsn_code: it.hsn_code || '',
-          unit: it.unit || 'pcs',
-          quantity: it.quantity ?? 1,
-          mrp: it.mrp ?? 0,
-          purchase_price: it.cost_price ?? product?.purchase_price ?? '',
-          rate: it.rate ?? 0,
-          gst_rate: it.gst_rate ?? 0,
-          discount_pct: it.discount_pct ?? 0,
-          base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
-          gst_amount: it.gst_amount ?? 0,
-          discount_amount: it.discount_amount ?? 0,
-          total: it.total ?? 0,
-          stock_qty: product?.stock_qty,
-          min_stock: product?.min_stock || 0,
-        }
-      })
-      setItems(loaded.length ? loaded : [emptyItem()])
-      setActiveRow(0)
-    }
-
-    loadForEdit()
-    return () => { cancelled = true }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, shop?.id])
-
-  useEffect(() => {
-    const id = searchParams.get('convertFrom')
-    if (!id || !shop?.id) return
-
-    let cancelled = false
-    async function loadForConvert() {
-      const [{ data: b, error: bErr }, { data: lines, error: lErr }] = await Promise.all([
-        supabase
-          .from('bills')
-          .select('*')
-          .eq('id', id)
-          .eq('shop_id', shop.id)
-          .single(),
-        supabase
-          .from('bill_items')
-          .select('id,product_id,product_name,hsn_code,unit,quantity,mrp,cost_price,rate,gst_rate,discount_pct,base_rate,gst_amount,discount_amount,total,sl_no')
-          .eq('bill_id', id)
-          .eq('shop_id', shop.id)
-          .order('sl_no'),
-      ])
-
-      if (cancelled) return
-      if (bErr) { showToast('Load failed: ' + bErr.message, 'error'); return }
-      if (lErr) { showToast('Load failed: ' + lErr.message, 'error'); return }
-      if (b.bill_type === 'invoice') {
-        showToast('Selected bill is already an invoice', 'error')
-        return
-      }
-
-      setConversionSource({ id: b.id, billNo: b.bill_no })
-      setEditBillId(null)
-      setView('form')
-      setBillType('invoice')
-      setBillNo('')
-      setBillDate(todayStr())
-      setCustomer({
-        name: b.customer_name || '',
-        phone: b.customer_phone || '',
-        gstin: b.customer_gstin || '',
-        address: b.customer_address || '',
-      })
-      setPayMode('Cash')
-      setPaidAmt('')
-      setNotes(b.notes ? `${b.notes} | Converted from ${b.bill_no}` : `Converted from ${b.bill_no}`)
-
       const loaded = (lines || []).map((it) => ({
         _id: uid(),
         product_id: it.product_id || null,
@@ -508,7 +140,6 @@ export default function BillingPage() {
         unit: it.unit || 'pcs',
         quantity: it.quantity ?? 1,
         mrp: it.mrp ?? 0,
-        purchase_price: it.cost_price ?? '',
         rate: it.rate ?? 0,
         gst_rate: it.gst_rate ?? 0,
         discount_pct: it.discount_pct ?? 0,
@@ -521,7 +152,7 @@ export default function BillingPage() {
       setActiveRow(0)
     }
 
-    loadForConvert()
+    loadForEdit()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, shop?.id])
@@ -562,7 +193,6 @@ export default function BillingPage() {
   // Include free-text items (no product_id) that have a name and rate entered
   const filledItems = items.filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
   const totals      = calcBillTotals(filledItems)
-  const profitSummary = getBillProfitSummary(filledItems)
 
   // ── Open search for a row ──────────────────────────────────────────────────
   const openSearch = useCallback((rowIdx) => {
@@ -582,7 +212,6 @@ export default function BillingPage() {
         hsn_code:     product.hsn_code || '',
         unit:         product.unit     || 'pcs',
         mrp:          product.mrp      || rate,
-        purchase_price: product.purchase_price || 0,
         rate,
         gst_rate:     product.gst_rate || 0,
         quantity:     1,
@@ -607,7 +236,6 @@ export default function BillingPage() {
         product_name: name,
         unit:         'pcs',
         quantity:     1,
-        purchase_price: '',
         rate:         '',
         gst_rate:     0,
         base_amount:  0,
@@ -635,24 +263,18 @@ export default function BillingPage() {
     setActiveRow(Math.max(0, index - 1))
   }
 
-  function resetBillForm() {
+  // ── New bill ───────────────────────────────────────────────────────────────
+  function handleNewBill() {
+    if (filledItems.length > 0 && !window.confirm('Clear current bill and start new?')) return
     setEditBillId(null)
     setItems([emptyItem()])
     setCustomer({ name:'', phone:'', gstin:'', address:'' })
-    setBillDate(todayStr())
+    setBillDate(new Date().toISOString().slice(0,10))
     setBillNo('')
     setPaidAmt('')
     setNotes('')
     setActiveRow(0)
     setPrintData(null)
-    setSearchOpen(false)
-    setConversionSource(null)
-  }
-
-  // ── New bill ───────────────────────────────────────────────────────────────
-  function handleNewBill() {
-    if (filledItems.length > 0 && !window.confirm('Clear current bill and start new?')) return
-    resetBillForm()
     setTimeout(() => openSearch(0), 60)
   }
 
@@ -676,8 +298,6 @@ export default function BillingPage() {
         })
         finalNo = no || `${prefix}-${Date.now()}`
         setBillNo(finalNo)
-      } else if (!navigator.onLine) {
-        setBillNo(finalNo || makeTempBillNo(getBillPrefix(shop, billType)))
       }
 
       const paid = parseFloat(paidAmt) || totals.total
@@ -703,56 +323,6 @@ export default function BillingPage() {
         notes:            notes || null,
       }
 
-      const lineItems = filledItems.map((item, i) => ({
-        shop_id:         shop.id,
-        product_id:      item.product_id,
-        sl_no:           i + 1,
-        product_name:    item.product_name,
-        hsn_code:        item.hsn_code || null,
-        unit:            item.unit,
-        quantity:        parseFloat(item.quantity)     || 1,
-        mrp:             item.mrp,
-        cost_price:      parseFloat(item.purchase_price) || 0,
-        rate:            parseFloat(item.rate)         || 0,
-        base_rate:       (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
-        gst_rate:        item.gst_rate     || 0,
-        gst_amount:      item.gst_amount   || 0,
-        discount_pct:    parseFloat(item.discount_pct) || 0,
-        discount_amount: item.discount_amount || 0,
-        total:           item.total        || 0,
-      }))
-
-      const isOfflineSave = !navigator.onLine
-      if (isOfflineSave) {
-        if (editBillId) {
-          throw new Error('Editing bills offline is not available yet')
-        }
-
-        const queuedBill = await enqueuePendingBill(shop.id, {
-          billRow,
-          lineItems,
-          conversionSourceId: conversionSource?.id || null,
-        })
-
-        await applyLocalStockDelta(shop.id, lineItems)
-        await clearBillingDraft(shop.id)
-
-        showToast(`✓ ${finalNo} saved offline. It will sync when internet returns.`)
-
-        if (withPrint) {
-          const clearAfterPrint = () => {
-            setPrintData(null)
-            resetBillForm()
-          }
-          window.addEventListener('afterprint', clearAfterPrint, { once: true })
-          setPrintData({ bill: { ...billRow, id: queuedBill.id }, items: filledItems, shop, totals })
-          setTimeout(() => window.print(), 200)
-        } else {
-          resetBillForm()
-        }
-        return
-      }
-
       let savedId = editBillId
       if (editBillId) {
         const { error: updErr } = await supabase
@@ -767,53 +337,24 @@ export default function BillingPage() {
         savedId = saved.id
       }
 
-      const newImpactMap = billType === 'invoice' ? buildQuantityMap(lineItems) : {}
-      let oldImpactMap = {}
-      if (editBillId) {
-        const [{ data: oldBill, error: oldBillErr }, { data: oldItems, error: oldItemsErr }] = await Promise.all([
-          supabase
-            .from('bills')
-            .select('bill_type')
-            .eq('id', editBillId)
-            .eq('shop_id', shop.id)
-            .single(),
-          supabase
-            .from('bill_items')
-            .select('product_id,quantity')
-            .eq('bill_id', editBillId)
-            .eq('shop_id', shop.id),
-        ])
-        if (oldBillErr) throw oldBillErr
-        if (oldItemsErr) throw oldItemsErr
-        oldImpactMap = oldBill?.bill_type === 'invoice' ? buildQuantityMap(oldItems || []) : {}
-      }
-
-      const stockDeltaMap = {}
-      const productIds = new Set([...Object.keys(oldImpactMap), ...Object.keys(newImpactMap)])
-      productIds.forEach((productId) => {
-        const oldQty = Number(oldImpactMap[productId] || 0)
-        const newQty = Number(newImpactMap[productId] || 0)
-        const delta = oldQty - newQty
-        if (delta) stockDeltaMap[productId] = delta
-      })
-
-      for (const [productId, delta] of Object.entries(stockDeltaMap)) {
-        const { data: productRow, error: productErr } = await supabase
-          .from('products')
-          .select('id,stock_qty')
-          .eq('id', productId)
-          .eq('shop_id', shop.id)
-          .single()
-        if (productErr) throw productErr
-
-        const nextStock = Number(productRow.stock_qty || 0) + Number(delta || 0)
-        const { error: stockErr } = await supabase
-          .from('products')
-          .update({ stock_qty: nextStock })
-          .eq('id', productId)
-          .eq('shop_id', shop.id)
-        if (stockErr) throw stockErr
-      }
+      const lineItems = filledItems.map((item, i) => ({
+        shop_id:         shop.id,
+        bill_id:         savedId,
+        product_id:      item.product_id,
+        sl_no:           i + 1,
+        product_name:    item.product_name,
+        hsn_code:        item.hsn_code || null,
+        unit:            item.unit,
+        quantity:        parseFloat(item.quantity)     || 1,
+        mrp:             item.mrp,
+        rate:            parseFloat(item.rate)         || 0,
+        base_rate:       (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
+        gst_rate:        item.gst_rate     || 0,
+        gst_amount:      item.gst_amount   || 0,
+        discount_pct:    parseFloat(item.discount_pct) || 0,
+        discount_amount: item.discount_amount || 0,
+        total:           item.total        || 0,
+      }))
 
       if (editBillId) {
         const { error: delErr } = await supabase
@@ -824,41 +365,14 @@ export default function BillingPage() {
         if (delErr) throw delErr
       }
 
-      const savedLineItems = lineItems.map((item) => ({ ...item, bill_id: savedId }))
-      const { error: itemErr } = await supabase.from('bill_items').insert(savedLineItems)
+      const { error: itemErr } = await supabase.from('bill_items').insert(lineItems)
       if (itemErr) throw itemErr
 
-      await applyLocalStockDeltaMap(shop.id, stockDeltaMap)
-
-      if (conversionSource?.id && billType === 'invoice') {
-        const { error: sourceItemsErr } = await supabase
-          .from('bill_items')
-          .delete()
-          .eq('bill_id', conversionSource.id)
-          .eq('shop_id', shop.id)
-        if (sourceItemsErr) throw sourceItemsErr
-
-        const { error: sourceBillErr } = await supabase
-          .from('bills')
-          .delete()
-          .eq('id', conversionSource.id)
-          .eq('shop_id', shop.id)
-        if (sourceBillErr) throw sourceBillErr
-      }
-
       showToast(editBillId ? `✓ ${finalNo} updated` : `✓ ${finalNo} saved`)
-      await clearBillingDraft(shop.id)
 
       if (withPrint) {
-        const clearAfterPrint = () => {
-          setPrintData(null)
-          resetBillForm()
-        }
-        window.addEventListener('afterprint', clearAfterPrint, { once: true })
         setPrintData({ bill: { ...billRow, id: savedId }, items: filledItems, shop, totals })
         setTimeout(() => window.print(), 200)
-      } else {
-        resetBillForm()
       }
     } catch (err) {
       console.error(err)
@@ -990,12 +504,6 @@ export default function BillingPage() {
         </div>
         )}
 
-        {view === 'form' && isOffline && (
-          <div className="px-4 py-1 text-xs bg-amber-50 text-amber-700 border-b border-amber-200">
-            Offline mode: bills save locally and sync automatically when internet returns.
-          </div>
-        )}
-
         {/* ── History view ─────────────────────────────────────────── */}
         {view === 'history' && (
           <div className="flex-1 overflow-y-auto p-4">
@@ -1016,7 +524,7 @@ export default function BillingPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-50 text-xs text-gray-500 border-b">
-                          {['Date','Bill No','Customer','Total','Status','Action'].map(h => (
+                      {['Date','Bill No','Customer','Total','Status'].map(h => (
                         <th key={h} className="px-3 py-2 text-left">{h}</th>
                       ))}
                     </tr>
@@ -1039,18 +547,6 @@ export default function BillingPage() {
                             : 'bg-gray-100 text-gray-600'
                           }`}>{b.payment_status || 'draft'}</span>
                         </td>
-                        <td className="px-3 py-2">
-                          {b.bill_type !== 'invoice' ? (
-                            <Link
-                              href={`/billing?convertFrom=${b.id}`}
-                              className="text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
-                            >
-                              Convert to Invoice
-                            </Link>
-                          ) : (
-                            <span className="text-xs text-gray-400">—</span>
-                          )}
-                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1063,25 +559,25 @@ export default function BillingPage() {
         {/* ── Customer row, items, footer (form view only) ─────────── */}
         {view === 'form' && (<>
         {/* ── Customer row ────────────────────────────────────────────── */}
-        <div className="bg-white border-b px-4 py-2 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 flex-shrink-0">
-          <div className="flex items-center gap-1 min-w-0">
+        <div className="bg-white border-b px-4 py-2 flex flex-wrap gap-3 flex-shrink-0">
+          <div className="flex items-center gap-1">
             <span className="text-xs text-gray-400 whitespace-nowrap">Customer:</span>
             <input value={customer.name} onChange={e => setCustomer(c => ({ ...c, name: e.target.value }))}
               placeholder="Name (optional)" className="border rounded px-2 py-1 text-sm w-40" />
           </div>
-          <div className="flex items-center gap-1 min-w-0">
+          <div className="flex items-center gap-1">
             <span className="text-xs text-gray-400 whitespace-nowrap">Phone:</span>
             <input value={customer.phone} onChange={e => setCustomer(c => ({ ...c, phone: e.target.value }))}
               placeholder="Phone" className="border rounded px-2 py-1 text-sm w-32" />
           </div>
-          <div className="flex items-center gap-1 min-w-0">
+          <div className="flex items-center gap-1">
             <span className="text-xs text-gray-400 whitespace-nowrap">GSTIN:</span>
             <input value={customer.gstin}
               onChange={e => setCustomer(c => ({ ...c, gstin: e.target.value.toUpperCase().slice(0, 15) }))}
               placeholder="Customer GSTIN" maxLength={15}
               className="border rounded px-2 py-1 text-sm w-40 font-mono uppercase" />
           </div>
-          <div className="flex items-center gap-1 min-w-0">
+          <div className="flex items-center gap-1">
             <span className="text-xs text-gray-400 whitespace-nowrap">Address:</span>
             <input value={customer.address} onChange={e => setCustomer(c => ({ ...c, address: e.target.value }))}
               placeholder="Address" className="border rounded px-2 py-1 text-sm w-48" />
@@ -1091,7 +587,7 @@ export default function BillingPage() {
         {/* ── Bill items table ─────────────────────────────────────────── */}
         <div className="flex-1 overflow-y-auto px-4 pt-3">
           <div className="table-scroll">
-          <table className="w-full min-w-[560px] md:min-w-[640px] bg-white border rounded-lg text-sm border-collapse billing-table">
+          <table className="w-full min-w-[640px] bg-white border rounded-lg text-sm border-collapse billing-table">
             <thead>
               <tr className="bg-gray-100 text-gray-600 text-xs">
                 <th className="px-2 py-2 text-left w-8">#</th>
@@ -1107,9 +603,7 @@ export default function BillingPage() {
               </tr>
             </thead>
             <tbody>
-              {items.map((item, i) => {
-                const profitPreview = getProfitPreview(item)
-                return (
+              {items.map((item, i) => (
                 <tr
                   key={item._id}
                   onClick={() => setActiveRow(i)}
@@ -1232,14 +726,6 @@ export default function BillingPage() {
                   {/* Amount */}
                   <td className="px-2 py-1 text-right font-medium">
                     {item.total > 0 ? fmt(item.total) : '—'}
-                    {profitPreview && (
-                      <div className={`mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold leading-tight ${profitPreview.isLoss ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
-                        <span>Cost {fmt(profitPreview.purchasePrice)}</span>
-                        <span>·</span>
-                        <span>{profitPreview.isLoss ? 'Loss' : 'Profit'} {fmt(Math.abs(profitPreview.totalProfit))}</span>
-                        <span>({profitPreview.marginPct.toFixed(1)}%)</span>
-                      </div>
-                    )}
                   </td>
 
                   {/* Delete */}
@@ -1254,8 +740,7 @@ export default function BillingPage() {
                     </button>
                   </td>
                 </tr>
-                )
-              })}
+              ))}
             </tbody>
           </table>
 
@@ -1327,7 +812,7 @@ export default function BillingPage() {
           </div>
 
           {/* Right: totals box */}
-          <div className="w-full md:w-64 bg-gray-50 border rounded-lg px-4 py-3 space-y-1 text-sm">
+          <div className="w-64 bg-gray-50 border rounded-lg px-4 py-3 space-y-1 text-sm">
             <div className="flex justify-between">
               <span className="text-gray-500">Subtotal (excl. GST)</span>
               <span>{fmt(totals.subtotal)}</span>
@@ -1353,15 +838,6 @@ export default function BillingPage() {
             <div className="flex justify-between font-bold text-lg border-t pt-2 mt-1">
               <span>Total</span>
               <span className="text-blue-700">{fmt(totals.total)}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-gray-500">Estimated Profit</span>
-              <span className={profitSummary.totalProfit >= 0 ? 'text-emerald-700 font-semibold' : 'text-red-600 font-semibold'}>
-                {fmt(profitSummary.totalProfit)}
-              </span>
-            </div>
-            <div className="text-[11px] text-gray-400">
-              Per-line profit is based on stored purchase cost for each selected product.
             </div>
             {paidAmt && parseFloat(paidAmt) < totals.total && (
               <div className="flex justify-between text-orange-600 text-xs">

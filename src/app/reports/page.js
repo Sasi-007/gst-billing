@@ -1,15 +1,13 @@
-﻿'use client'
+'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { supabase } from '../../lib/supabase'
 import { fmt } from '../../lib/gst'
-import { calculateCreditBalance, formatSettlementLabel, groupCreditEntriesByAccount } from '../../lib/credits'
-import { monthStartStr, todayStr } from '../../lib/finance'
-import { readPageCache, writePageCache } from '../../lib/pageCache'
-import LoadingPlaceholder from '../../components/LoadingPlaceholder'
-import { usePageLoadingState } from '../../context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
+
+function todayStr() { return new Date().toISOString().slice(0, 10) }
+function monthStart() { const d = new Date(); d.setDate(1); return d.toISOString().slice(0, 10) }
 
 // ── Sales Summary ──────────────────────────────────────────────────────────
 function SalesSummary({ data, searchTerm }) {
@@ -185,256 +183,139 @@ function TopProducts({ data }) {
   )
 }
 
-function CreditSummary({ data, searchTerm }) {
-  const accounts = Array.isArray(data?.accounts) ? data.accounts : []
-  const allEntriesByAccount = groupCreditEntriesByAccount(data?.allEntries || [])
-  const periodEntriesByAccount = groupCreditEntriesByAccount(data?.periodEntries || [])
-  const term = (searchTerm || '').trim().toLowerCase()
-
-  const visible = accounts
-    .map((account) => {
-      const currentBalance = calculateCreditBalance(account, allEntriesByAccount[account.id] || [])
-      const periodEntries = periodEntriesByAccount[account.id] || []
-      const increased = periodEntries.reduce(
-        (sum, entry) => sum + (entry.direction === 'increase' ? Number(entry.amount || 0) : 0),
-        0
-      )
-      const decreased = periodEntries.reduce(
-        (sum, entry) => sum + (entry.direction === 'decrease' ? Number(entry.amount || 0) : 0),
-        0
-      )
-
-      return {
-        ...account,
-        currentBalance,
-        periodEntriesCount: periodEntries.length,
-        periodIncreased: increased,
-        periodDecreased: decreased,
-      }
-    })
-    .filter((account) => {
-      if (!term) return true
-      return (
-        String(account.party_name || '').toLowerCase().includes(term) ||
-        String(account.phone || '').toLowerCase().includes(term)
-      )
-    })
-    .sort((a, b) => Math.abs(b.currentBalance) - Math.abs(a.currentBalance))
-
-  const receivable = visible
-    .filter((account) => account.relation_type === 'borrower')
-    .reduce((sum, account) => sum + Math.max(0, account.currentBalance), 0)
-  const payable = visible
-    .filter((account) => account.relation_type === 'lender')
-    .reduce((sum, account) => sum + Math.max(0, account.currentBalance), 0)
-  const periodIn = visible.reduce((sum, account) => sum + account.periodIncreased, 0)
-  const periodOut = visible.reduce((sum, account) => sum + account.periodDecreased, 0)
-  const customerAccounts = visible.filter((account) => account.relation_type === 'borrower')
-  const supplierAccounts = visible.filter((account) => account.relation_type === 'lender')
-
-  return (
-    <>
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-        {[
-          { label: 'Credit Accounts', value: visible.length, cls: 'text-gray-700' },
-          { label: 'To Collect', value: fmt(receivable), cls: 'text-cyan-700' },
-          { label: 'To Pay', value: fmt(payable), cls: 'text-purple-700' },
-          { label: 'Period Entries', value: visible.reduce((sum, account) => sum + account.periodEntriesCount, 0), cls: 'text-orange-700' },
-        ].map((card) => (
-          <div key={card.label} className="bg-white border rounded-lg p-3">
-            <div className="text-xs text-gray-500">{card.label}</div>
-            <div className={`text-xl font-bold mt-1 ${card.cls}`}>{card.value}</div>
-          </div>
-        ))}
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <div className="bg-cyan-50 border rounded-lg p-3">
-          <div className="text-xs text-cyan-700">Period Increase</div>
-          <div className="text-lg font-bold text-cyan-800 mt-1">{fmt(periodIn)}</div>
-        </div>
-        <div className="bg-green-50 border rounded-lg p-3">
-          <div className="text-xs text-green-700">Period Collection / Repayment</div>
-          <div className="text-lg font-bold text-green-800 mt-1">{fmt(periodOut)}</div>
-        </div>
-      </div>
-
-      {visible.length === 0 ? (
-        <div className="bg-white rounded-xl border p-8 text-center text-gray-400">No credit accounts found for this selection</div>
-      ) : (
-        <div className="space-y-4">
-          <CreditReportSection
-            title="Customers who owe us"
-            subtitle="Shop gave credit and needs to collect back"
-            accounts={customerAccounts}
-            amountClassName="text-cyan-700"
-            inLabel="Credit Given"
-            outLabel="Collected"
-          />
-          <CreditReportSection
-            title="Suppliers / agencies we owe"
-            subtitle="Shop took credit and needs to repay"
-            accounts={supplierAccounts}
-            amountClassName="text-purple-700"
-            inLabel="Borrowed More"
-            outLabel="Repaid"
-          />
-          <div className="text-right">
-            <Link href="/credits" className="text-xs text-blue-600 hover:underline">Open Credit Book</Link>
-          </div>
-        </div>
-      )}
-    </>
-  )
-}
-
-function CreditReportSection({ title, subtitle, accounts, amountClassName, inLabel, outLabel }) {
-  return (
-    <div className="bg-white rounded-xl border overflow-x-auto">
-      <div className="px-4 py-3 border-b">
-        <div className="text-sm font-medium text-gray-700">{title}</div>
-        <div className="text-xs text-gray-400 mt-0.5">{subtitle}</div>
-      </div>
-      {accounts.length === 0 ? (
-        <div className="p-6 text-sm text-gray-400 text-center">No accounts in this section</div>
-      ) : (
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="bg-gray-50 text-xs text-gray-500 border-b">
-              {['Party', 'Phone', 'Settlement', 'Current Balance', inLabel, outLabel, 'Entries', 'Status'].map((h) => (
-                <th key={h} className={`px-3 py-2 ${['Current Balance', inLabel, outLabel, 'Entries'].includes(h) ? 'text-right' : 'text-left'}`}>{h}</th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {accounts.map((account) => (
-              <tr key={account.id} className="border-b hover:bg-gray-50">
-                <td className="px-3 py-1.5 font-medium text-gray-900">{account.party_name}</td>
-                <td className="px-3 py-1.5 text-gray-500">{account.phone || '—'}</td>
-                <td className="px-3 py-1.5 text-gray-500">{formatSettlementLabel(account.settlement_cycle, account.settlement_day)}</td>
-                <td className={`px-3 py-1.5 text-right font-semibold ${amountClassName}`}>{fmt(account.currentBalance)}</td>
-                <td className="px-3 py-1.5 text-right text-cyan-700">{fmt(account.periodIncreased)}</td>
-                <td className="px-3 py-1.5 text-right text-green-700">{fmt(account.periodDecreased)}</td>
-                <td className="px-3 py-1.5 text-right">{account.periodEntriesCount}</td>
-                <td className="px-3 py-1.5">
-                  <span className={`px-1.5 py-0.5 rounded text-xs ${account.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
-                    {account.is_active ? 'Active' : 'Archived'}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      )}
-    </div>
-  )
-}
-
 const TABS = [
   { key:'sales',       label:'Sales Report' },
   { key:'gst',         label:'GST Summary' },
   { key:'purchases',   label:'Purchase Report' },
-  { key:'credits',     label:'Credit Report' },
   { key:'topproducts', label:'Top Products' },
 ]
-
-async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
-  if (tab === 'sales') {
-    const { data } = await supabase.from('bills').select('*').eq('shop_id', shopId).eq('bill_type', 'invoice').gte('date', dateFrom).lte('date', dateTo).order('date')
-    return data || []
-  }
-  if (tab === 'purchases') {
-    const { data } = await supabase.from('purchase_bills').select('*, suppliers(name)').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo).order('date')
-    return data || []
-  }
-  if (tab === 'credits') {
-    const [{ data: accounts }, { data: entries }] = await Promise.all([
-      supabase.from('credit_accounts').select('*').eq('shop_id', shopId).order('party_name'),
-      supabase.from('credit_entries').select('id,account_id,amount,direction,entry_date').eq('shop_id', shopId),
-    ])
-    const allEntries = entries || []
-    return { accounts: accounts || [], allEntries, periodEntries: allEntries.filter(e => e.entry_date >= dateFrom && e.entry_date <= dateTo) }
-  }
-  if (tab === 'gst') {
-    const [{ data: salesBills }, { data: purchaseBills }] = await Promise.all([
-      supabase.from('bills').select('id').eq('shop_id', shopId).eq('bill_type', 'invoice').gte('date', dateFrom).lte('date', dateTo),
-      supabase.from('purchase_bills').select('id').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo),
-    ])
-    const salesBillIds = (salesBills || []).map(b => b.id)
-    const purchaseBillIds = (purchaseBills || []).map(b => b.id)
-    const [{ data: sales }, { data: purchases }] = await Promise.all([
-      salesBillIds.length ? supabase.from('bill_items').select('gst_rate,base_rate,quantity,gst_amount').in('bill_id', salesBillIds) : Promise.resolve({ data: [] }),
-      purchaseBillIds.length ? supabase.from('purchase_bill_items').select('gst_rate,base_rate,quantity,gst_amount').in('purchase_bill_id', purchaseBillIds) : Promise.resolve({ data: [] }),
-    ])
-    return { sales: sales || [], purchases: purchases || [] }
-  }
-  if (tab === 'topproducts') {
-    const { data: bills } = await supabase.from('bills').select('id').eq('shop_id', shopId).eq('bill_type', 'invoice').gte('date', dateFrom).lte('date', dateTo)
-    const billIds = (bills || []).map(b => b.id)
-    const { data: items } = billIds.length ? await supabase.from('bill_items').select('product_name,quantity,total').in('bill_id', billIds) : { data: [] }
-    const aggregate = {}
-    ;(items || []).forEach(item => {
-      if (!item.product_name) return
-      if (!aggregate[item.product_name]) aggregate[item.product_name] = { qty: 0, amount: 0 }
-      aggregate[item.product_name].qty += parseFloat(item.quantity) || 0
-      aggregate[item.product_name].amount += parseFloat(item.total) || 0
-    })
-    return Object.entries(aggregate).map(([name, value]) => ({ name, ...value })).sort((a, b) => b.amount - a.amount).slice(0, 30)
-  }
-  return []
-}
-function emptyDataForTab(tab) {
-  if (tab === 'gst') return { sales: [], purchases: [] }
-  if (tab === 'credits') return { accounts: [], allEntries: [], periodEntries: [] }
-  return []
-}
 
 export default function ReportsPage() {
   const { shop, loading: shopLoading } = useShop()
   const [tab,      setTab]      = useState('sales')
-  const [dateFrom, setDateFrom] = useState(monthStartStr())
+  const [dateFrom, setDateFrom] = useState(monthStart())
   const [dateTo,   setDateTo]   = useState(todayStr())
   const [search,   setSearch]   = useState('')
-  const [liveTick, setLiveTick] = useState(0)
-  const loadedLiveTickRef = useRef(0)
-  const cacheKey = shop?.id ? `reports:${shop.id}:${tab}:${dateFrom}:${dateTo}` : ''
-  const initialCache = readPageCache(cacheKey)
-  const [data,     setData]     = useState(() => initialCache?.data || emptyDataForTab('sales'))
-  const [loading,  setLoading]  = useState(() => !initialCache)
-  usePageLoadingState('reports-page', loading)
+  const [data,     setData]     = useState([])
+  const [loading,  setLoading]  = useState(false)
 
   useEffect(() => {
     if (!shop?.id) return
     let cancelled = false
 
     async function run() {
-      const shouldForceFresh = liveTick !== loadedLiveTickRef.current
-      const cached = shouldForceFresh ? null : readPageCache(cacheKey)
-      if (cached?.data) {
-        setData(cached.data)
-        setLoading(false)
-      } else {
-        setData(emptyDataForTab(tab))
-        setLoading(true)
-      }
+      setLoading(true)
 
       try {
-        const result = await fetchReportsDirect({
-          shopId: shop.id,
-          tab,
-          dateFrom,
-          dateTo,
-        })
+        let result = []
 
-        writePageCache(cacheKey, { data: result })
-        loadedLiveTickRef.current = liveTick
+        if (tab === 'sales') {
+          const { data: bills, error } = await supabase
+            .from('bills')
+            .select('*')
+            .eq('shop_id', shop.id)
+            .gte('date', dateFrom)
+            .lte('date', dateTo)
+            .eq('bill_type', 'invoice')
+            .order('date')
+
+          if (error) throw error
+          result = bills || []
+        }
+
+        else if (tab === 'gst') {
+          const [{ data: salesBills, error: salesBillsErr }, { data: purchBills, error: purchBillsErr }] = await Promise.all([
+            supabase
+              .from('bills')
+              .select('id')
+              .eq('shop_id', shop.id)
+              .eq('bill_type', 'invoice')
+              .gte('date', dateFrom)
+              .lte('date', dateTo),
+            supabase
+              .from('purchase_bills')
+              .select('id')
+              .eq('shop_id', shop.id)
+              .gte('date', dateFrom)
+              .lte('date', dateTo),
+          ])
+
+          if (salesBillsErr) throw salesBillsErr
+          if (purchBillsErr) throw purchBillsErr
+
+          const salesBillIds = (salesBills || []).map(b => b.id)
+          const purchaseBillIds = (purchBills || []).map(b => b.id)
+
+          const [{ data: sales, error: salesErr }, { data: purch, error: purchErr }] = await Promise.all([
+            salesBillIds.length
+              ? supabase.from('bill_items').select('gst_rate,base_rate,quantity,gst_amount').in('bill_id', salesBillIds)
+              : Promise.resolve({ data: [], error: null }),
+            purchaseBillIds.length
+              ? supabase.from('purchase_bill_items').select('gst_rate,base_rate,quantity,gst_amount').in('purchase_bill_id', purchaseBillIds)
+              : Promise.resolve({ data: [], error: null }),
+          ])
+
+          if (salesErr) throw salesErr
+          if (purchErr) throw purchErr
+
+          result = {
+            sales: sales || [],
+            purchases: purch || [],
+          }
+        }
+
+        else if (tab === 'purchases') {
+          const { data: purch, error } = await supabase
+            .from('purchase_bills')
+            .select('*, suppliers(name)')
+            .eq('shop_id', shop.id)
+            .gte('date', dateFrom)
+            .lte('date', dateTo)
+            .order('date')
+
+          if (error) throw error
+          result = purch || []
+        }
+
+        else if (tab === 'topproducts') {
+          const { data: bills, error: billsErr } = await supabase
+            .from('bills')
+            .select('id')
+            .eq('shop_id', shop.id)
+            .eq('bill_type', 'invoice')
+            .gte('date', dateFrom)
+            .lte('date', dateTo)
+
+          if (billsErr) throw billsErr
+
+          const billIds = (bills || []).map(b => b.id)
+          const { data: items, error: itemsErr } = billIds.length
+            ? await supabase
+              .from('bill_items')
+              .select('product_name,quantity,total')
+              .in('bill_id', billIds)
+            : { data: [], error: null }
+
+          if (itemsErr) throw itemsErr
+
+          const agg = {}
+          ;(items || []).forEach(i => {
+            if (!i.product_name) return
+            if (!agg[i.product_name]) agg[i.product_name] = { qty: 0, amount: 0 }
+            agg[i.product_name].qty    += parseFloat(i.quantity) || 0
+            agg[i.product_name].amount += parseFloat(i.total)    || 0
+          })
+
+          result = Object.entries(agg)
+            .map(([name, v]) => ({ name, ...v }))
+            .sort((a, b) => b.amount - a.amount)
+            .slice(0, 30)
+        }
+
         if (!cancelled) setData(result)
       } catch (err) {
         console.error('Reports load failed:', err)
-        loadedLiveTickRef.current = liveTick
-        if (!cancelled) {
-          setData(emptyDataForTab(tab))
-        }
+        if (!cancelled) setData(tab === 'gst' ? { sales: [], purchases: [] } : [])
       } finally {
         if (!cancelled) setLoading(false)
       }
@@ -442,29 +323,7 @@ export default function ReportsPage() {
 
     run()
     return () => { cancelled = true }
-  }, [cacheKey, dateFrom, dateTo, liveTick, shop?.id, tab])
-
-  useEffect(() => {
-    if (!shop?.id) return
-
-    const tables = ['bills', 'bill_items', 'purchase_bills', 'purchase_bill_items', 'credit_accounts', 'credit_entries']
-    const channel = supabase.channel(`reports-live:${shop.id}`)
-    tables.forEach((table) => {
-      channel.on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table,
-        filter: `shop_id=eq.${shop.id}`,
-      }, () => {
-        setLiveTick((tick) => tick + 1)
-      })
-    })
-
-    channel.subscribe()
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [shop?.id])
+  }, [tab, dateFrom, dateTo, shop?.id])
 
   return (
     <div className="p-4">
@@ -479,7 +338,7 @@ export default function ReportsPage() {
           className="border rounded-lg px-3 py-2 text-sm" />
         {[
           { label:'Today',      from: todayStr(),   to: todayStr() },
-          { label:'This Month', from: monthStartStr(), to: todayStr() },
+          { label:'This Month', from: monthStart(), to: todayStr() },
         ].map(p => (
           <button key={p.label}
             onClick={() => { setDateFrom(p.from); setDateTo(p.to) }}
@@ -501,31 +360,24 @@ export default function ReportsPage() {
         ))}
       </div>
 
-      {(tab === 'sales' || tab === 'purchases' || tab === 'credits') && (
+      {(tab === 'sales' || tab === 'purchases') && (
         <div className="mb-4">
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder={
-              tab === 'sales'
-                ? 'Search invoice by bill no or customer'
-                : tab === 'purchases'
-                  ? 'Search purchase by bill no or supplier'
-                  : 'Search credit account by party or phone'
-            }
+            placeholder={tab === 'sales' ? 'Search invoice by bill no or customer' : 'Search purchase by bill no or supplier'}
             className="w-full max-w-md border rounded-lg px-3 py-2 text-sm"
           />
         </div>
       )}
 
       {(shopLoading || loading) ? (
-        <LoadingPlaceholder label="Loading reports" rows={4} fullPage />
+        <div className="text-center text-gray-400 py-10">Loading…</div>
       ) : (
         <>
           {tab === 'sales'       && <SalesSummary data={data} searchTerm={search} />}
           {tab === 'gst'         && <GSTSummary data={data} />}
           {tab === 'purchases'   && <PurchaseSummary data={data} searchTerm={search} />}
-          {tab === 'credits'     && <CreditSummary data={data} searchTerm={search} />}
           {tab === 'topproducts' && <TopProducts data={data} />}
         </>
       )}

@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useShop } from '@/context/ShopContext'
+import { fmt } from '@/lib/gst'
 
 const SUPERADMIN_EMAILS = process.env.NEXT_PUBLIC_SUPERADMIN_EMAILS || ''
 
@@ -55,7 +56,6 @@ export default function SuperadminPage() {
   const [error,   setError]   = useState('')
   const [authBlocked, setAuthBlocked] = useState(false)
   const [toast,   setToast]   = useState('')
-  const [resettingShopId, setResettingShopId] = useState('')
 
   // New user form
   const [newEmail,    setNewEmail]    = useState('')
@@ -123,29 +123,6 @@ export default function SuperadminPage() {
       loadData()
     } catch (err) { setError(err.message) }
     finally { setCreating(false) }
-  }
-
-  async function resetShopData(shop) {
-    const typed = window.prompt(`Type RESET to clear all business data for "${shop.name}" and restart counters from 1 on next bill.`)
-    if (typed !== 'RESET') {
-      if (typed !== null) setError('Reset cancelled: you must type RESET exactly.')
-      return
-    }
-
-    setError('')
-    setResettingShopId(shop.id)
-    try {
-      await adminFetch('/api/admin', {
-        method: 'POST',
-        body: JSON.stringify({ action: 'reset_shop_data', shop_id: shop.id, confirmation: 'RESET' }),
-      })
-      showToast(`${shop.name} reset completed`)
-      loadData()
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setResettingShopId('')
-    }
   }
 
   // ── Access guard ─────────────────────────────────────────────────────────
@@ -268,22 +245,10 @@ export default function SuperadminPage() {
                         }`}>{s.is_active ? 'Active' : 'Disabled'}</span>
                       </td>
                       <td className="px-3 py-2 text-right">
-                        <div className="flex items-center justify-end gap-3">
-                          <button
-                            onClick={() => toggleShop(s.id, s.is_active)}
-                            className={`text-xs hover:underline ${s.is_active ? 'text-red-500' : 'text-green-600'}`}
-                          >
-                            {s.is_active ? 'Disable' : 'Enable'}
-                          </button>
-                          <button
-                            onClick={() => resetShopData(s)}
-                            disabled={resettingShopId === s.id}
-                            className="text-xs text-red-700 hover:underline disabled:opacity-50"
-                            title="Clear this company's data only and reset counters"
-                          >
-                            {resettingShopId === s.id ? 'Resetting…' : 'Reset FY Data'}
-                          </button>
-                        </div>
+                        <button onClick={() => toggleShop(s.id, s.is_active)}
+                          className={`text-xs hover:underline ${s.is_active ? 'text-red-500' : 'text-green-600'}`}>
+                          {s.is_active ? 'Disable' : 'Enable'}
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -292,9 +257,6 @@ export default function SuperadminPage() {
               <div className="px-3 py-2 text-xs text-gray-400">{shops.length} shops total</div>
             </div>
           )}
-          <div className="mt-3 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-            Reset FY Data clears only the selected company data (sales, purchases, products, categories, suppliers, credits, finance, bank entries) and resets counters. It does not delete users or other companies.
-          </div>
         </div>
       )}
 

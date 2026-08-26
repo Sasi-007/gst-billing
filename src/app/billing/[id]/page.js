@@ -144,11 +144,6 @@ export default function BillDetailsPage() {
             <button onClick={handlePrint} className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">
               Print
             </button>
-            {bill.bill_type !== 'invoice' && (
-              <Link href={`/billing?convertFrom=${bill.id}`} className="px-3 py-1.5 text-xs bg-cyan-600 text-white rounded hover:bg-cyan-700">
-                Convert to Invoice
-              </Link>
-            )}
             <Link href={`/billing?editId=${bill.id}`} className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded hover:bg-amber-600">
               Edit
             </Link>

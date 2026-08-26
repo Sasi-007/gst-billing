@@ -177,7 +177,6 @@ CREATE TABLE IF NOT EXISTS bill_items (
   -- Qty & Pricing
   quantity        DECIMAL(10,3) NOT NULL DEFAULT 1,
   mrp             DECIMAL(10,2) DEFAULT 0,
-  cost_price      DECIMAL(10,2) DEFAULT 0,            -- purchase-cost snapshot for profit reporting
   rate            DECIMAL(10,2) NOT NULL DEFAULT 0,   -- selling rate (GST-inclusive)
   base_rate       DECIMAL(10,2) DEFAULT 0,            -- rate excl. GST
   gst_rate        DECIMAL(5,2)  DEFAULT 0,
@@ -240,7 +239,6 @@ CREATE TABLE IF NOT EXISTS purchase_bill_items (
   -- Qty & Pricing
   quantity          DECIMAL(10,3) NOT NULL DEFAULT 1,
   rate              DECIMAL(10,2) NOT NULL DEFAULT 0,   -- purchase rate (GST-inclusive)
-  mrp               DECIMAL(10,2) DEFAULT 0,            -- supplier MRP snapshot for this bill
   base_rate         DECIMAL(10,2) DEFAULT 0,
   gst_rate          DECIMAL(5,2)  DEFAULT 0,
   gst_amount        DECIMAL(10,2) DEFAULT 0,
@@ -251,138 +249,6 @@ CREATE TABLE IF NOT EXISTS purchase_bill_items (
 
 CREATE INDEX IF NOT EXISTS idx_purchase_items_bill    ON purchase_bill_items (purchase_bill_id);
 CREATE INDEX IF NOT EXISTS idx_purchase_items_product ON purchase_bill_items (product_id);
-
--- ============================================================
--- FINANCE
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS expenses (
-  id            UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  shop_id       UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-  expense_date  DATE NOT NULL DEFAULT CURRENT_DATE,
-  title         TEXT NOT NULL,
-  category      TEXT,
-  amount        DECIMAL(12,2) NOT NULL CHECK (amount > 0),
-  payment_mode  TEXT DEFAULT 'cash'
-                 CHECK (payment_mode IN ('cash','upi','card','bank','cheque','credit')),
-  bank_account_id UUID REFERENCES bank_accounts(id) ON DELETE SET NULL,
-  notes         TEXT,
-  is_active     BOOLEAN DEFAULT TRUE,
-  created_at    TIMESTAMPTZ DEFAULT NOW(),
-  updated_at    TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_expenses_shop_date ON expenses (shop_id, expense_date DESC);
-
-CREATE TABLE IF NOT EXISTS investments (
-  id               UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  shop_id          UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-  investment_date  DATE NOT NULL DEFAULT CURRENT_DATE,
-  source_name      TEXT NOT NULL DEFAULT 'Owner',
-  amount           DECIMAL(12,2) NOT NULL CHECK (amount > 0),
-  payment_mode     TEXT DEFAULT 'bank'
-                    CHECK (payment_mode IN ('cash','upi','card','bank','cheque')),
-  bank_account_id  UUID REFERENCES bank_accounts(id) ON DELETE SET NULL,
-  reference_note   TEXT,
-  notes            TEXT,
-  is_active        BOOLEAN DEFAULT TRUE,
-  created_at       TIMESTAMPTZ DEFAULT NOW(),
-  updated_at       TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_investments_shop_date ON investments (shop_id, investment_date DESC);
-
-CREATE TABLE IF NOT EXISTS bank_accounts (
-  id                   UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  shop_id              UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-  account_name         TEXT NOT NULL,
-  bank_name            TEXT,
-  account_type         TEXT NOT NULL DEFAULT 'bank'
-                         CHECK (account_type IN ('bank','cash','wallet','upi')),
-  opening_balance      DECIMAL(12,2) NOT NULL DEFAULT 0,
-  account_number_last4 TEXT,
-  notes                TEXT,
-  is_active            BOOLEAN DEFAULT TRUE,
-  created_at           TIMESTAMPTZ DEFAULT NOW(),
-  updated_at           TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_bank_accounts_shop ON bank_accounts (shop_id, account_name);
-
-CREATE TABLE IF NOT EXISTS bank_transactions (
-  id                UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  shop_id           UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-  account_id        UUID NOT NULL REFERENCES bank_accounts(id) ON DELETE CASCADE,
-  transaction_date  DATE NOT NULL DEFAULT CURRENT_DATE,
-  direction         TEXT NOT NULL CHECK (direction IN ('in','out')),
-  entry_type        TEXT NOT NULL DEFAULT 'other'
-                     CHECK (entry_type IN ('deposit','withdrawal','expense','investment','drawing','sale_receipt','purchase_payment','other')),
-  amount            DECIMAL(12,2) NOT NULL CHECK (amount > 0),
-  reference_note    TEXT,
-  notes             TEXT,
-  source_table      TEXT,
-  source_id         UUID,
-  is_active         BOOLEAN DEFAULT TRUE,
-  created_at        TIMESTAMPTZ DEFAULT NOW(),
-  updated_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_bank_transactions_shop_date ON bank_transactions (shop_id, transaction_date DESC);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_bank_transactions_source_unique
-  ON bank_transactions (shop_id, source_table, source_id);
-
-CREATE TABLE IF NOT EXISTS owner_drawings (
-  id               UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  shop_id          UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-  drawing_date     DATE NOT NULL DEFAULT CURRENT_DATE,
-  title            TEXT NOT NULL DEFAULT 'Owner withdrawal',
-  amount           DECIMAL(12,2) NOT NULL CHECK (amount > 0),
-  payment_mode     TEXT DEFAULT 'cash'
-                    CHECK (payment_mode IN ('cash','upi','card','bank','cheque')),
-  bank_account_id  UUID REFERENCES bank_accounts(id) ON DELETE SET NULL,
-  notes            TEXT,
-  is_active        BOOLEAN DEFAULT TRUE,
-  created_at       TIMESTAMPTZ DEFAULT NOW(),
-  updated_at       TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_owner_drawings_shop_date ON owner_drawings (shop_id, drawing_date DESC);
-
--- ============================================================
--- CREDIT LEDGER
--- ============================================================
-
-CREATE TABLE IF NOT EXISTS credit_accounts (
-  id                UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  shop_id           UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-  party_name        TEXT NOT NULL,
-  phone             TEXT,
-  relation_type     TEXT NOT NULL DEFAULT 'borrower'
-                      CHECK (relation_type IN ('borrower','lender')),
-  settlement_cycle  TEXT NOT NULL DEFAULT 'daily'
-                      CHECK (settlement_cycle IN ('daily','weekly','monthly')),
-  settlement_day    INTEGER CHECK (settlement_day IS NULL OR settlement_day BETWEEN 1 AND 31),
-  opening_balance   DECIMAL(12,2) DEFAULT 0,
-  notes             TEXT,
-  is_active         BOOLEAN DEFAULT TRUE,
-  created_at        TIMESTAMPTZ DEFAULT NOW(),
-  updated_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS credit_entries (
-  id                UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
-  shop_id           UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
-  account_id        UUID NOT NULL REFERENCES credit_accounts(id) ON DELETE CASCADE,
-  entry_date        DATE NOT NULL DEFAULT CURRENT_DATE,
-  direction         TEXT NOT NULL CHECK (direction IN ('increase','decrease')),
-  amount            DECIMAL(12,2) NOT NULL CHECK (amount > 0),
-  reference_note    TEXT,
-  created_at        TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE INDEX IF NOT EXISTS idx_credit_accounts_shop ON credit_accounts (shop_id, party_name);
-CREATE INDEX IF NOT EXISTS idx_credit_entries_shop_account ON credit_entries (shop_id, account_id, entry_date DESC);
 
 -- ============================================================
 -- FUNCTIONS & TRIGGERS
@@ -396,7 +262,6 @@ BEGIN
     COALESCE(NEW.name,'')    || ' ' ||
     COALESCE(NEW.brand,'')   || ' ' ||
     COALESCE(NEW.barcode,'') || ' ' ||
-    COALESCE(NEW.hsn_code,'') || ' ' ||
     array_to_string(COALESCE(NEW.tags,'{}'), ' ')
   );
   RETURN NEW;
@@ -405,7 +270,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_product_search ON products;
 CREATE TRIGGER trg_product_search
-  BEFORE INSERT OR UPDATE OF name, brand, barcode, hsn_code, tags
+  BEFORE INSERT OR UPDATE OF name, brand, barcode, tags
   ON products FOR EACH ROW EXECUTE FUNCTION fn_update_search_text();
 
 -- ── 2. Adjust stock when bill item is inserted/deleted ───────
@@ -438,7 +303,6 @@ BEGIN
     UPDATE products
     SET stock_qty      = stock_qty + NEW.quantity,
         purchase_price = NEW.rate,
-        mrp            = COALESCE(NULLIF(NEW.mrp, 0), mrp),
         updated_at     = NOW()
     WHERE id = NEW.product_id;
   ELSIF TG_OP = 'DELETE' AND OLD.product_id IS NOT NULL THEN
@@ -464,10 +328,6 @@ $$;
 DROP TRIGGER IF EXISTS trg_shops_updated ON shops;
 CREATE TRIGGER trg_shops_updated
   BEFORE UPDATE ON shops FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
-
-DROP TRIGGER IF EXISTS trg_credit_accounts_updated ON credit_accounts;
-CREATE TRIGGER trg_credit_accounts_updated
-  BEFORE UPDATE ON credit_accounts FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
 
 -- ── 5. Generate next bill number (per shop) ──────────────────
 CREATE OR REPLACE FUNCTION get_next_bill_no(p_shop_id UUID, p_prefix TEXT)
@@ -546,13 +406,6 @@ ALTER TABLE bills               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bill_items          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE purchase_bills      ENABLE ROW LEVEL SECURITY;
 ALTER TABLE purchase_bill_items ENABLE ROW LEVEL SECURITY;
-ALTER TABLE credit_accounts     ENABLE ROW LEVEL SECURITY;
-ALTER TABLE credit_entries      ENABLE ROW LEVEL SECURITY;
-ALTER TABLE expenses            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE investments         ENABLE ROW LEVEL SECURITY;
-ALTER TABLE bank_accounts       ENABLE ROW LEVEL SECURITY;
-ALTER TABLE bank_transactions   ENABLE ROW LEVEL SECURITY;
-ALTER TABLE owner_drawings      ENABLE ROW LEVEL SECURITY;
 
 -- Drop existing policies (idempotent re-run)
 DO $$ DECLARE r RECORD;
@@ -614,165 +467,6 @@ CREATE POLICY "purchase_bills_all" ON purchase_bills FOR ALL
 CREATE POLICY "purchase_bill_items_all" ON purchase_bill_items FOR ALL
   USING  (shop_id = ANY(auth_shop_ids()))
   WITH CHECK (shop_id = ANY(auth_shop_ids()));
-
--- credit_accounts
-CREATE POLICY "credit_accounts_all" ON credit_accounts FOR ALL
-  USING  (shop_id = ANY(auth_shop_ids()))
-  WITH CHECK (shop_id = ANY(auth_shop_ids()));
-
--- credit_entries
-CREATE POLICY "credit_entries_all" ON credit_entries FOR ALL
-  USING  (shop_id = ANY(auth_shop_ids()))
-  WITH CHECK (shop_id = ANY(auth_shop_ids()));
-
--- expenses
-CREATE POLICY "expenses_all" ON expenses FOR ALL
-  USING  (shop_id = ANY(auth_shop_ids()))
-  WITH CHECK (shop_id = ANY(auth_shop_ids()));
-
--- investments
-CREATE POLICY "investments_all" ON investments FOR ALL
-  USING  (shop_id = ANY(auth_shop_ids()))
-  WITH CHECK (shop_id = ANY(auth_shop_ids()));
-
--- bank_accounts
-CREATE POLICY "bank_accounts_all" ON bank_accounts FOR ALL
-  USING  (shop_id = ANY(auth_shop_ids()))
-  WITH CHECK (shop_id = ANY(auth_shop_ids()));
-
--- bank_transactions
-CREATE POLICY "bank_transactions_all" ON bank_transactions FOR ALL
-  USING  (shop_id = ANY(auth_shop_ids()))
-  WITH CHECK (shop_id = ANY(auth_shop_ids()));
-
--- owner_drawings
-CREATE POLICY "owner_drawings_all" ON owner_drawings FOR ALL
-  USING  (shop_id = ANY(auth_shop_ids()))
-  WITH CHECK (shop_id = ANY(auth_shop_ids()));
-
--- ============================================================
--- FINANCE AUTO-POST TRIGGERS
--- ============================================================
-
-CREATE OR REPLACE FUNCTION fn_sync_bank_transaction(
-  p_source_table TEXT,
-  p_source_id UUID,
-  p_shop_id UUID,
-  p_account_id UUID,
-  p_transaction_date DATE,
-  p_direction TEXT,
-  p_entry_type TEXT,
-  p_amount DECIMAL,
-  p_reference_note TEXT,
-  p_notes TEXT
-)
-RETURNS VOID LANGUAGE plpgsql AS $$
-BEGIN
-  IF p_account_id IS NULL OR COALESCE(p_amount, 0) <= 0 THEN
-    DELETE FROM bank_transactions
-    WHERE shop_id = p_shop_id
-      AND source_table = p_source_table
-      AND source_id = p_source_id;
-    RETURN;
-  END IF;
-
-  INSERT INTO bank_transactions (
-    shop_id, account_id, transaction_date, direction, entry_type,
-    amount, reference_note, notes, source_table, source_id, is_active
-  )
-  VALUES (
-    p_shop_id, p_account_id, p_transaction_date, p_direction, p_entry_type,
-    p_amount, p_reference_note, p_notes, p_source_table, p_source_id, TRUE
-  )
-  ON CONFLICT (shop_id, source_table, source_id) DO UPDATE SET
-    account_id       = EXCLUDED.account_id,
-    transaction_date  = EXCLUDED.transaction_date,
-    direction        = EXCLUDED.direction,
-    entry_type       = EXCLUDED.entry_type,
-    amount           = EXCLUDED.amount,
-    reference_note   = EXCLUDED.reference_note,
-    notes            = EXCLUDED.notes,
-    is_active        = TRUE,
-    updated_at       = NOW();
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION fn_delete_bank_transaction(
-  p_source_table TEXT,
-  p_source_id UUID,
-  p_shop_id UUID
-)
-RETURNS VOID LANGUAGE plpgsql AS $$
-BEGIN
-  DELETE FROM bank_transactions
-  WHERE shop_id = p_shop_id
-    AND source_table = p_source_table
-    AND source_id = p_source_id;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION trg_sync_expenses_to_bank()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-  IF TG_OP = 'DELETE' THEN
-    PERFORM fn_delete_bank_transaction('expenses', OLD.id, OLD.shop_id);
-    RETURN OLD;
-  END IF;
-
-  PERFORM fn_sync_bank_transaction(
-    'expenses', NEW.id, NEW.shop_id, NEW.bank_account_id, NEW.expense_date,
-    'out', 'expense', NEW.amount, NEW.title, NEW.notes
-  );
-  RETURN NEW;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION trg_sync_investments_to_bank()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-  IF TG_OP = 'DELETE' THEN
-    PERFORM fn_delete_bank_transaction('investments', OLD.id, OLD.shop_id);
-    RETURN OLD;
-  END IF;
-
-  PERFORM fn_sync_bank_transaction(
-    'investments', NEW.id, NEW.shop_id, NEW.bank_account_id, NEW.investment_date,
-    'in', 'investment', NEW.amount, NEW.source_name, NEW.notes
-  );
-  RETURN NEW;
-END;
-$$;
-
-CREATE OR REPLACE FUNCTION trg_sync_drawings_to_bank()
-RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-  IF TG_OP = 'DELETE' THEN
-    PERFORM fn_delete_bank_transaction('owner_drawings', OLD.id, OLD.shop_id);
-    RETURN OLD;
-  END IF;
-
-  PERFORM fn_sync_bank_transaction(
-    'owner_drawings', NEW.id, NEW.shop_id, NEW.bank_account_id, NEW.drawing_date,
-    'out', 'drawing', NEW.amount, NEW.title, NEW.notes
-  );
-  RETURN NEW;
-END;
-$$;
-
-DROP TRIGGER IF EXISTS trg_expenses_bank_sync ON expenses;
-CREATE TRIGGER trg_expenses_bank_sync
-  AFTER INSERT OR UPDATE OR DELETE ON expenses
-  FOR EACH ROW EXECUTE FUNCTION trg_sync_expenses_to_bank();
-
-DROP TRIGGER IF EXISTS trg_investments_bank_sync ON investments;
-CREATE TRIGGER trg_investments_bank_sync
-  AFTER INSERT OR UPDATE OR DELETE ON investments
-  FOR EACH ROW EXECUTE FUNCTION trg_sync_investments_to_bank();
-
-DROP TRIGGER IF EXISTS trg_owner_drawings_bank_sync ON owner_drawings;
-CREATE TRIGGER trg_owner_drawings_bank_sync
-  AFTER INSERT OR UPDATE OR DELETE ON owner_drawings
-  FOR EACH ROW EXECUTE FUNCTION trg_sync_drawings_to_bank();
 
 -- ============================================================
 -- VIEWS (optional helpers)

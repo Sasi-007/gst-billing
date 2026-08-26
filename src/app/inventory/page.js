@@ -3,72 +3,29 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
-import { readPageCache, writePageCache } from '@/lib/pageCache'
-import LoadingPlaceholder from '@/components/LoadingPlaceholder'
-import { useShop } from '@/context/ShopContext'
-import { usePageLoadingState } from '@/context/PageLoadingContext'
-import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import Link from 'next/link'
 
 export default function InventoryPage() {
-  const { shop } = useShop()
+  const [products, setProducts] = useState([])
+  const [loading,  setLoading]  = useState(true)
   const [search,   setSearch]   = useState('')
   const [filter,   setFilter]   = useState('all')
   const [catId,    setCatId]    = useState('')
-  const debouncedSearch = useDebouncedValue(search)
-  const cacheKey = shop?.id ? `inventory:${shop.id}:${debouncedSearch}:${filter}:${catId}` : ''
-  const catsCacheKey = shop?.id ? `inventory-categories:${shop.id}` : ''
-  const initialListCache = readPageCache(cacheKey)
-  const initialCatsCache = readPageCache(catsCacheKey)
-  const [products, setProducts] = useState(() => initialListCache?.products || [])
-  const [loading,  setLoading]  = useState(() => !initialListCache)
-  const [cats,     setCats]     = useState(() => initialCatsCache?.cats || [])
-  usePageLoadingState('inventory-page', loading)
+  const [cats,     setCats]     = useState([])
 
   useEffect(() => {
-    if (!shop?.id) return
-
-    const cached = readPageCache(catsCacheKey)
-    if (cached?.cats) setCats(cached.cats)
-
-    supabase
-      .from('categories')
-      .select('id,name,shop_id')
-      .eq('shop_id', shop.id)
-      .order('name')
-      .then(({ data }) => {
-        const nextCats = data || []
-        setCats(nextCats)
-        writePageCache(catsCacheKey, { cats: nextCats })
-      })
-  }, [catsCacheKey, shop?.id])
+    supabase.from('categories').select('*').order('name').then(({ data }) => setCats(data || []))
+  }, [])
 
   const load = useCallback(async () => {
-    if (!shop?.id) {
-      setProducts([])
-      setLoading(false)
-      return
-    }
-
-    const cached = readPageCache(cacheKey)
-    if (cached?.products) {
-      setProducts(cached.products)
-      setLoading(false)
-    } else {
-      setLoading(true)
-    }
-
+    setLoading(true)
     let q = supabase
       .from('products')
       .select('id,name,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,is_active,suppliers(name),categories(name)')
-      .eq('shop_id', shop.id)
       .order('name')
       .limit(200)
 
-    if (debouncedSearch) {
-      const term = debouncedSearch.toLowerCase()
-      q = q.or(`search_text.ilike.%${term}%,name.ilike.%${term}%,brand.ilike.%${term}%,barcode.ilike.%${term}%,hsn_code.ilike.%${term}%`)
-    }
+    if (search)               q = q.ilike('search_text', `%${search.toLowerCase()}%`)
     if (filter === 'low')     q = q.gt('min_stock', 0)   // further filtered client-side
     if (filter === 'out')     q = q.lte('stock_qty', 0)
     if (filter === 'inactive')q = q.eq('is_active', false)
@@ -79,14 +36,13 @@ export default function InventoryPage() {
     let rows = data || []
     if (filter === 'low') rows = rows.filter(p => p.stock_qty <= p.min_stock)
     setProducts(rows)
-    writePageCache(cacheKey, { products: rows })
     setLoading(false)
-  }, [cacheKey, catId, debouncedSearch, filter, shop?.id])
+  }, [search, filter, catId])
 
   useEffect(() => { load() }, [load])
 
   async function toggleActive(id, val) {
-    await supabase.from('products').update({ is_active: val }).eq('id', id).eq('shop_id', shop?.id)
+    await supabase.from('products').update({ is_active: val }).eq('id', id)
     load()
   }
 
@@ -104,20 +60,12 @@ export default function InventoryPage() {
             {lowCount > 0 && <span className="text-yellow-600 font-medium">⚡ {lowCount} low stock</span>}
           </div>
         </div>
-        <div className="flex items-center gap-2">
-          <Link
-            href="/categories"
-            className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium"
-          >
-            Categories
-          </Link>
-          <Link
-            href="/inventory/new"
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
-          >
-            + Add Product
-          </Link>
-        </div>
+        <Link
+          href="/inventory/new"
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
+        >
+          + Add Product
+        </Link>
       </div>
 
       {/* Filters */}
@@ -127,12 +75,9 @@ export default function InventoryPage() {
           type="text"
           value={search}
           onChange={e => setSearch(e.target.value)}
-          placeholder="🔍 Search by name, barcode, brand, HSN…"
+          placeholder="🔍 Search by name, barcode, brand…"
           className="flex-1 min-w-48 border rounded-lg px-3 py-2 text-sm"
         />
-        {search !== debouncedSearch && (
-          <span className="self-center text-xs text-blue-600">Searching…</span>
-        )}
         <select value={catId} onChange={e => setCatId(e.target.value)}
           className="border rounded-lg px-2 py-2 text-sm">
           <option value="">All Categories</option>
@@ -149,7 +94,7 @@ export default function InventoryPage() {
 
       {/* Table */}
       {loading ? (
-        <LoadingPlaceholder label="Loading inventory" rows={4} fullPage />
+        <div className="text-center text-gray-400 py-10">Loading…</div>
       ) : products.length === 0 ? (
         <div className="text-center text-gray-400 py-10">No products found</div>
       ) : (

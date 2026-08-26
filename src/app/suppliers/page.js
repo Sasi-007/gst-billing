@@ -3,49 +3,26 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../../lib/supabase'
 import { useShop } from '../../context/ShopContext'
-import { readPageCache, writePageCache } from '../../lib/pageCache'
-import LoadingPlaceholder from '../../components/LoadingPlaceholder'
-import { usePageLoadingState } from '../../context/PageLoadingContext'
-import { useDebouncedValue } from '../../lib/useDebouncedValue'
 
 const blank = { name:'', contact_person:'', phone:'', email:'', gstin:'', address:'', city:'', state:'', pincode:'' }
 
 export default function SuppliersPage() {
-  const { shop } = useShop()
-  const [search,    setSearch]    = useState('')
-  const debouncedSearch = useDebouncedValue(search)
-  const cacheKey = shop?.id ? `suppliers:${shop.id}:${debouncedSearch}` : ''
-  const initialCache = readPageCache(cacheKey)
-  const [suppliers, setSuppliers] = useState(() => initialCache?.suppliers || [])
-  const [loading,   setLoading]   = useState(() => !initialCache)
+  const [suppliers, setSuppliers] = useState([])
+  const [loading,   setLoading]   = useState(true)
   const [form,      setForm]      = useState(blank)
   const [editId,    setEditId]    = useState(null)
   const [saving,    setSaving]    = useState(false)
-  usePageLoadingState('suppliers-page', loading)
+  const [search,    setSearch]    = useState('')
+  const { shop } = useShop()
 
   const load = useCallback(async () => {
-    if (!shop?.id) {
-      setSuppliers([])
-      setLoading(false)
-      return
-    }
-
-    const cached = readPageCache(cacheKey)
-    if (cached?.suppliers) {
-      setSuppliers(cached.suppliers)
-      setLoading(false)
-    } else {
-      setLoading(true)
-    }
-
-    let q = supabase.from('suppliers').select('*').eq('shop_id', shop.id).eq('is_active', true).order('name')
-    if (debouncedSearch) q = q.ilike('name', `%${debouncedSearch}%`)
+    setLoading(true)
+    let q = supabase.from('suppliers').select('*').eq('is_active', true).order('name')
+    if (search) q = q.ilike('name', `%${search}%`)
     const { data } = await q
-    const nextSuppliers = data || []
-    setSuppliers(nextSuppliers)
-    writePageCache(cacheKey, { suppliers: nextSuppliers })
+    setSuppliers(data || [])
     setLoading(false)
-  }, [cacheKey, debouncedSearch, shop?.id])
+  }, [search])
 
   useEffect(() => { load() }, [load])
 
@@ -58,7 +35,7 @@ export default function SuppliersPage() {
     const payload = { ...form, updated_at: new Date().toISOString() }
 
     if (editId) {
-      await supabase.from('suppliers').update(payload).eq('id', editId).eq('shop_id', shop?.id)
+      await supabase.from('suppliers').update(payload).eq('id', editId)
     } else {
       await supabase.from('suppliers').insert({ ...payload, shop_id: shop?.id })
     }
@@ -70,7 +47,7 @@ export default function SuppliersPage() {
 
   async function deactivate(id) {
     if (!window.confirm('Remove this supplier?')) return
-    await supabase.from('suppliers').update({ is_active: false }).eq('id', id).eq('shop_id', shop?.id)
+    await supabase.from('suppliers').update({ is_active: false }).eq('id', id)
     load()
   }
 
@@ -96,12 +73,9 @@ export default function SuppliersPage() {
         <input value={search} onChange={e => setSearch(e.target.value)}
           placeholder="🔍 Search suppliers…"
           className="border rounded-lg px-3 py-2 text-sm w-full mb-3" />
-        {search !== debouncedSearch && (
-          <div className="mb-3 text-xs text-blue-600">Searching…</div>
-        )}
 
         {loading ? (
-          <LoadingPlaceholder label="Loading suppliers" rows={4} fullPage />
+          <div className="text-center text-gray-400 py-8">Loading…</div>
         ) : suppliers.length === 0 ? (
           <div className="text-center text-gray-400 py-8">No suppliers yet</div>
         ) : (

@@ -1,10 +1,9 @@
 'use client'
 
-import Link from 'next/link'
 import { useState, useEffect } from 'react'
 import { useRouter, useParams, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { fmt, GST_RATES } from '@/lib/gst'
+import { GST_RATES } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'dozen', 'box', 'pack', 'bottle', 'roll', 'strip', 'pair']
@@ -13,31 +12,6 @@ const blank = {
   name:'', barcode:'', brand:'', category_id:'', tags:'', hsn_code:'',
   unit:'pcs', purchase_price:'', mrp:'', selling_price:'', gst_rate:5,
   stock_qty:'', min_stock:'', supplier_id:'', is_active:true,
-}
-
-function parseAmount(value) {
-  const parsed = parseFloat(value)
-  return Number.isFinite(parsed) ? parsed : 0
-}
-
-function getSellingPriceFromMargin(purchasePrice, marginPct) {
-  if (marginPct === '' || marginPct === null || marginPct === undefined) return ''
-  const purchase = parseAmount(purchasePrice)
-  const margin = parseAmount(marginPct)
-  if (purchase <= 0) return ''
-  return (purchase * (1 + margin / 100)).toFixed(2)
-}
-
-function getMarginPctFromPrices(purchasePrice, sellingPrice) {
-  const purchase = parseAmount(purchasePrice)
-  const selling = parseAmount(sellingPrice)
-  if (purchase <= 0 || selling <= 0) return ''
-  return (((selling - purchase) / purchase) * 100).toFixed(2)
-}
-
-function formatDate(value) {
-  if (!value) return '—'
-  return new Date(`${value}T00:00:00`).toLocaleDateString('en-IN')
 }
 
 export default function ProductFormPage() {
@@ -51,186 +25,52 @@ export default function ProductFormPage() {
   const [suppliers, setSuppliers] = useState([])
   const [saving,    setSaving]    = useState(false)
   const [error,     setError]     = useState('')
-  const [recentPurchases, setRecentPurchases] = useState([])
-  const [historyLoading, setHistoryLoading] = useState(false)
-  const [historyError, setHistoryError] = useState('')
-  const [useMarginHelper, setUseMarginHelper] = useState(false)
-  const [marginPct, setMarginPct] = useState('')
+  const [newCatName, setNewCatName] = useState('')
+  const [addingCat,  setAddingCat]  = useState(false)
   const { shop } = useShop()
 
   function loadCats() {
-    if (!shop?.id) return
-    supabase
-      .from('categories')
-      .select('id,name,shop_id')
-      .eq('shop_id', shop.id)
-      .order('name')
-      .then(({ data }) => setCats(data || []))
+    supabase.from('categories').select('*').order('name').then(({ data }) => setCats(data || []))
   }
 
   useEffect(() => {
-    let cancelled = false
-
     loadCats()
     supabase.from('suppliers').select('id,name').eq('is_active',true).order('name').then(({ data }) => setSuppliers(data || []))
 
-    async function loadRecentPurchases(productId) {
-      if (!shop?.id || !productId) {
-        if (!cancelled) {
-          setRecentPurchases([])
-          setHistoryError('')
-        }
-        return
-      }
-
-      setHistoryLoading(true)
-      setHistoryError('')
-
-      const { data: itemRows, error: itemErr } = await supabase
-        .from('purchase_bill_items')
-        .select('id,purchase_bill_id,quantity,rate,mrp,total,created_at')
-        .eq('shop_id', shop.id)
-        .eq('product_id', productId)
-        .order('created_at', { ascending: false })
-        .limit(10)
-
-      if (cancelled) return
-      if (itemErr) {
-        setRecentPurchases([])
-        setHistoryError(itemErr.message || 'Failed to load purchase history')
-        setHistoryLoading(false)
-        return
-      }
-
-      const purchaseBillIds = [...new Set((itemRows || []).map((row) => row.purchase_bill_id).filter(Boolean))]
-      if (purchaseBillIds.length === 0) {
-        setRecentPurchases([])
-        setHistoryLoading(false)
-        return
-      }
-
-      const { data: billRows, error: billErr } = await supabase
-        .from('purchase_bills')
-        .select('id,bill_no,date,suppliers(name)')
-        .in('id', purchaseBillIds)
-
-      if (cancelled) return
-      if (billErr) {
-        setRecentPurchases([])
-        setHistoryError(billErr.message || 'Failed to load purchase bills')
-        setHistoryLoading(false)
-        return
-      }
-
-      const billMap = new Map((billRows || []).map((bill) => [bill.id, bill]))
-      const mergedRows = (itemRows || [])
-        .map((row) => {
-          const bill = billMap.get(row.purchase_bill_id)
-          return {
-            ...row,
-            bill_no: bill?.bill_no || '—',
-            date: bill?.date || null,
-            supplier_name: bill?.suppliers?.name || '—',
-          }
-        })
-        .sort((a, b) => {
-          const dateA = new Date(a.date ? `${a.date}T00:00:00` : a.created_at || 0).getTime()
-          const dateB = new Date(b.date ? `${b.date}T00:00:00` : b.created_at || 0).getTime()
-          return dateB - dateA
-        })
-
-      setRecentPurchases(mergedRows)
-      setHistoryLoading(false)
-    }
-
     if (!isNew) {
-      supabase.from('products').select('*').eq('id', id).single().then(({ data, error: productErr }) => {
-        if (cancelled) return
-        if (productErr) {
-          setError(productErr.message || 'Failed to load product')
-          return
-        }
-        if (data) {
-          setForm({ ...data, tags: (data.tags || []).join(', ') })
-          setMarginPct(getMarginPctFromPrices(data.purchase_price, data.selling_price || data.mrp))
-        }
+      supabase.from('products').select('*').eq('id', id).single().then(({ data }) => {
+        if (data) setForm({ ...data, tags: (data.tags || []).join(', ') })
       })
-      loadRecentPurchases(id)
     } else {
-      setRecentPurchases([])
-      setHistoryError('')
-      setHistoryLoading(false)
-      setUseMarginHelper(false)
-      setMarginPct('')
       const prefilledName = searchParams.get('name')
-      setForm({ ...blank, name: prefilledName || '' })
+      if (prefilledName) setForm(f => ({ ...f, name: prefilledName }))
     }
+  }, [id, isNew])
 
-    return () => { cancelled = true }
-  }, [id, isNew, searchParams, shop?.id])
+  async function addCategory() {
+    const name = newCatName.trim()
+    if (!name) return
+    setAddingCat(true)
+    const { data, error: err } = await supabase
+      .from('categories')
+      .insert({ name, shop_id: shop?.id })
+      .select()
+      .single()
+    setAddingCat(false)
+    if (!err && data) {
+      setNewCatName('')
+      loadCats()
+      set('category_id', data.id)
+    }
+  }
 
   function set(k, v) {
     setForm(f => {
       const next = { ...f, [k]: v }
-      if (useMarginHelper && k === 'purchase_price') {
-        const calculatedSellingPrice = getSellingPriceFromMargin(v, marginPct)
-        if (calculatedSellingPrice) next.selling_price = calculatedSellingPrice
-      } else if (k === 'mrp' && (!f.selling_price || f.selling_price === f.mrp)) {
-        // auto-fill selling price from MRP if not manually set
+      // auto-fill selling price from MRP if not manually set
+      if (k === 'mrp' && (!f.selling_price || f.selling_price === f.mrp)) {
         next.selling_price = v
       }
-      return next
-    })
-  }
-
-  function toggleMarginHelper(enabled) {
-    if (!enabled) {
-      setUseMarginHelper(false)
-      return
-    }
-
-    const nextMarginPct = marginPct || getMarginPctFromPrices(form.purchase_price, form.selling_price || form.mrp)
-    setUseMarginHelper(true)
-    setMarginPct(nextMarginPct)
-
-    if (nextMarginPct) {
-      setForm(f => ({
-        ...f,
-        selling_price: getSellingPriceFromMargin(f.purchase_price, nextMarginPct) || f.selling_price,
-      }))
-    }
-  }
-
-  function handleMarginPctChange(value) {
-    setMarginPct(value)
-    if (!useMarginHelper) return
-
-    setForm(f => {
-      const calculatedSellingPrice = getSellingPriceFromMargin(f.purchase_price, value)
-      return calculatedSellingPrice
-        ? { ...f, selling_price: calculatedSellingPrice }
-        : f
-    })
-  }
-
-  function applyLatestPurchasePricing() {
-    const latestPurchase = recentPurchases[0]
-    if (!latestPurchase) return
-
-    setForm(f => {
-      const next = {
-        ...f,
-        purchase_price: String(latestPurchase.rate ?? ''),
-        mrp: String(latestPurchase.mrp ?? ''),
-      }
-
-      if (useMarginHelper) {
-        const calculatedSellingPrice = getSellingPriceFromMargin(latestPurchase.rate, marginPct)
-        if (calculatedSellingPrice) next.selling_price = calculatedSellingPrice
-      } else if (!f.selling_price || String(f.selling_price) === String(f.mrp)) {
-        next.selling_price = String(latestPurchase.mrp ?? '')
-      }
-
       return next
     })
   }
@@ -240,17 +80,12 @@ export default function ProductFormPage() {
     setError('')
     setSaving(true)
 
-    const purchasePrice = parseFloat(form.purchase_price) || 0
-    const mrp = parseFloat(form.mrp) || 0
-    const manualSellingPrice = parseFloat(form.selling_price) || 0
-    const helperSellingPrice = useMarginHelper ? parseFloat(getSellingPriceFromMargin(purchasePrice, marginPct)) || 0 : 0
-
     const payload = {
       ...form,
       tags:           form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
-      purchase_price: purchasePrice,
-      mrp,
-      selling_price:  helperSellingPrice || manualSellingPrice || mrp || 0,
+      purchase_price: parseFloat(form.purchase_price) || 0,
+      mrp:            parseFloat(form.mrp)            || 0,
+      selling_price:  parseFloat(form.selling_price)  || parseFloat(form.mrp) || 0,
       gst_rate:       parseFloat(form.gst_rate)       || 0,
       stock_qty:      parseFloat(form.stock_qty)      || 0,
       min_stock:      parseFloat(form.min_stock)      || 0,
@@ -278,8 +113,6 @@ export default function ProductFormPage() {
       />
     </div>
   )
-
-  const latestPurchase = recentPurchases[0] || null
 
   return (
     <div className="p-4 max-w-2xl">
@@ -313,13 +146,19 @@ export default function ProductFormPage() {
                 <option value="">— Select —</option>
                 {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
-              <Link
-                href="/categories"
-                className="px-3 py-2 rounded-lg border bg-gray-50 text-xs text-gray-700 whitespace-nowrap hover:bg-gray-100"
-                title="Manage categories"
-              >
-                Manage
-              </Link>
+            </div>
+            <div className="flex gap-1 mt-1">
+              <input
+                value={newCatName}
+                onChange={e => setNewCatName(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addCategory())}
+                placeholder="+ New category name"
+                className="flex-1 border rounded-lg px-2 py-1 text-xs"
+              />
+              <button type="button" onClick={addCategory} disabled={addingCat || !newCatName.trim()}
+                className="px-2 py-1 bg-blue-600 text-white rounded-lg text-xs disabled:opacity-50">
+                {addingCat ? '…' : 'Add'}
+              </button>
             </div>
           </div>
 
@@ -362,53 +201,10 @@ export default function ProductFormPage() {
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Selling Price (incl. GST) ₹</label>
             <input type="number" min="0" step="0.01"
-              disabled={useMarginHelper}
               value={form.selling_price} onChange={e => set('selling_price', e.target.value)}
               placeholder="Defaults to MRP"
-              className={`w-full border rounded-lg px-3 py-2 text-sm ${useMarginHelper ? 'bg-gray-100 text-gray-500 cursor-not-allowed' : ''}`} />
-            <p className="text-xs text-gray-400 mt-0.5">
-              {useMarginHelper ? 'Selling price is auto-calculated from purchase price and margin %.' : 'Leave blank to sell at MRP'}
-            </p>
-          </div>
-
-          <div className="col-span-2 rounded-xl border border-amber-200 bg-amber-50/70 p-4">
-            <label className="flex items-center gap-2 text-sm font-medium text-amber-900">
-              <input
-                type="checkbox"
-                checked={useMarginHelper}
-                onChange={e => toggleMarginHelper(e.target.checked)}
-                className="w-4 h-4"
-              />
-              Use margin helper (optional)
-            </label>
-            <p className="mt-1 text-xs text-amber-800">
-              Turn this on only when you want selling price to be auto-calculated from purchase price.
-            </p>
-            {useMarginHelper && (
-              <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div>
-                  <label className="block text-xs font-medium text-amber-900 mb-1">Margin %</label>
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    value={marginPct}
-                    onChange={e => handleMarginPctChange(e.target.value)}
-                    className="w-full border rounded-lg px-3 py-2 text-sm"
-                    placeholder="0.00"
-                  />
-                </div>
-                <div className="sm:col-span-2 rounded-lg bg-white/80 border border-amber-100 px-3 py-2">
-                  <div className="text-xs text-gray-500">Auto selling price</div>
-                  <div className="text-lg font-semibold text-amber-900">
-                    {form.selling_price ? fmt(parseAmount(form.selling_price)) : '—'}
-                  </div>
-                  <div className="text-xs text-gray-500 mt-1">
-                    Based on purchase price {fmt(parseAmount(form.purchase_price || 0))}
-                  </div>
-                </div>
-              </div>
-            )}
+              className="w-full border rounded-lg px-3 py-2 text-sm" />
+            <p className="text-xs text-gray-400 mt-0.5">Leave blank to sell at MRP</p>
           </div>
 
           {/* Stock */}
@@ -431,83 +227,6 @@ export default function ProductFormPage() {
               onChange={e => set('is_active', e.target.checked)} className="w-4 h-4" />
             <label htmlFor="active" className="text-sm">Active (visible in search)</label>
           </div>
-
-          {!isNew && (
-            <div className="col-span-2 rounded-xl border bg-gray-50 p-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                <div>
-                  <h2 className="text-sm font-semibold text-gray-900">Recent purchase history</h2>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Track the latest supplier rate and MRP for this product without losing old bill history.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={applyLatestPurchasePricing}
-                  disabled={!latestPurchase}
-                  className="px-3 py-2 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  Use latest rate & MRP
-                </button>
-              </div>
-
-              {historyLoading ? (
-                <div className="mt-3 text-sm text-gray-500">Loading recent purchases…</div>
-              ) : historyError ? (
-                <div className="mt-3 text-sm text-red-600">{historyError}</div>
-              ) : recentPurchases.length === 0 ? (
-                <div className="mt-3 text-sm text-gray-500">No purchase history found for this product yet.</div>
-              ) : (
-                <>
-                  <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
-                    <div className="rounded-lg border bg-white px-3 py-2">
-                      <div className="text-xs text-gray-500">Latest supplier</div>
-                      <div className="text-sm font-medium text-gray-900">{latestPurchase.supplier_name}</div>
-                    </div>
-                    <div className="rounded-lg border bg-white px-3 py-2">
-                      <div className="text-xs text-gray-500">Latest purchase rate</div>
-                      <div className="text-sm font-medium text-gray-900">{fmt(latestPurchase.rate)}</div>
-                    </div>
-                    <div className="rounded-lg border bg-white px-3 py-2">
-                      <div className="text-xs text-gray-500">Latest MRP</div>
-                      <div className="text-sm font-medium text-gray-900">{fmt(latestPurchase.mrp)}</div>
-                    </div>
-                    <div className="rounded-lg border bg-white px-3 py-2">
-                      <div className="text-xs text-gray-500">Latest bill date</div>
-                      <div className="text-sm font-medium text-gray-900">{formatDate(latestPurchase.date)}</div>
-                    </div>
-                  </div>
-
-                  <div className="mt-4 overflow-x-auto rounded-lg border bg-white">
-                    <table className="w-full text-sm">
-                      <thead className="bg-gray-50 text-xs text-gray-500">
-                        <tr>
-                          <th className="px-3 py-2 text-left">Date</th>
-                          <th className="px-3 py-2 text-left">Bill No</th>
-                          <th className="px-3 py-2 text-left">Supplier</th>
-                          <th className="px-3 py-2 text-right">Qty</th>
-                          <th className="px-3 py-2 text-right">Rate</th>
-                          <th className="px-3 py-2 text-right">MRP</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {recentPurchases.slice(0, 5).map((purchase) => (
-                          <tr key={purchase.id} className="border-t">
-                            <td className="px-3 py-2">{formatDate(purchase.date)}</td>
-                            <td className="px-3 py-2 font-medium text-gray-900">{purchase.bill_no}</td>
-                            <td className="px-3 py-2">{purchase.supplier_name}</td>
-                            <td className="px-3 py-2 text-right">{purchase.quantity}</td>
-                            <td className="px-3 py-2 text-right">{fmt(purchase.rate)}</td>
-                            <td className="px-3 py-2 text-right">{fmt(purchase.mrp)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
         </div>
 
         <div className="flex gap-3 mt-6 pt-4 border-t">

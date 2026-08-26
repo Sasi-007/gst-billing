@@ -5,8 +5,7 @@ import { createClient } from '@supabase/supabase-js'
 function getAdminClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY
-  // Service role key must be a JWT (starts with eyJ) — new sb_secret_ format keys don't work here
-  if (!url || !key || !key.startsWith('eyJ')) return null
+  if (!url || !key) return null
   return createClient(url, key, { auth: { persistSession: false } })
 }
 
@@ -135,64 +134,6 @@ export async function POST(request) {
       })
       if (error) return NextResponse.json({ error: error.message }, { status: 400 })
       return NextResponse.json({ user: { id: data.user.id, email: data.user.email } })
-    }
-
-    if (action === 'reset_shop_data') {
-      const { shop_id, confirmation } = body
-      if (!shop_id) return NextResponse.json({ error: 'shop_id required' }, { status: 400 })
-      if (confirmation !== 'RESET') {
-        return NextResponse.json({ error: 'Invalid confirmation. Send confirmation as RESET.' }, { status: 400 })
-      }
-
-      const { data: shopRow, error: shopErr } = await admin
-        .from('shops')
-        .select('id,name')
-        .eq('id', shop_id)
-        .single()
-      if (shopErr || !shopRow) {
-        return NextResponse.json({ error: 'Shop not found' }, { status: 404 })
-      }
-
-      const tablesToClear = [
-        'bank_transactions',
-        'owner_drawings',
-        'investments',
-        'expenses',
-        'credit_entries',
-        'credit_accounts',
-        'bill_items',
-        'bills',
-        'purchase_bill_items',
-        'purchase_bills',
-        'products',
-        'categories',
-        'suppliers',
-        'bank_accounts',
-      ]
-
-      for (const tableName of tablesToClear) {
-        const { error: deleteErr } = await admin
-          .from(tableName)
-          .delete()
-          .eq('shop_id', shop_id)
-        if (deleteErr) {
-          return NextResponse.json({ error: `Failed clearing ${tableName}: ${deleteErr.message}` }, { status: 500 })
-        }
-      }
-
-      const { error: resetCountersErr } = await admin
-        .from('shops')
-        .update({
-          bill_counter: 0,
-          purchase_counter: 0,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', shop_id)
-      if (resetCountersErr) {
-        return NextResponse.json({ error: `Data cleared but failed to reset counters: ${resetCountersErr.message}` }, { status: 500 })
-      }
-
-      return NextResponse.json({ ok: true, message: `Reset completed for ${shopRow.name}` })
     }
 
     return NextResponse.json({ error: 'Unknown action' }, { status: 400 })

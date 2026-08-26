@@ -3,8 +3,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
-import { useShop } from '@/context/ShopContext'
-import { loadProductSnapshot } from '@/lib/offlineBilling'
 
 /**
  * Full-screen modal product search.
@@ -18,130 +16,34 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
   const [results, setResults] = useState([])
   const [cursor,  setCursor]  = useState(0)
   const [loading, setLoading] = useState(false)
-  const [purchaseHints, setPurchaseHints] = useState({})
   const inputRef  = useRef(null)
   const itemRefs  = useRef([])
-  const { shop } = useShop()
 
   useEffect(() => { inputRef.current?.focus() }, [])
 
   // Debounced search — 150 ms
   useEffect(() => {
-    if (!query.trim()) { setResults([]); setPurchaseHints({}); return }
+    if (!query.trim()) { setResults([]); return }
     const timer = setTimeout(search, 150)
     return () => clearTimeout(timer)
-  }, [query, shop?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [query]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function search() {
     const q = query.trim().toLowerCase()
-    if (!shop?.id) return
     setLoading(true)
     try {
-      // Search by the indexed text plus direct HSN/barcode/name fallbacks.
+      // OR: search_text (computed), name, barcode — name is fallback if search_text not yet built
       const { data, error } = await supabase
         .from('products')
-        .select('id,name,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code')
-        .or(`search_text.ilike.%${q}%,name.ilike.%${q}%,brand.ilike.%${q}%,barcode.ilike.%${q}%,hsn_code.ilike.%${q}%`)
-        .eq('shop_id', shop.id)
+        .select('id,name,brand,barcode,unit,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code')
+        .or(`search_text.ilike.%${q}%,name.ilike.%${q}%,barcode.ilike.%${q}%`)
         .eq('is_active', true)
         .order('name')
         .limit(12)
 
-      if (!error) {
-        const rows = data || []
-        setResults(rows)
-        setCursor(0)
-        await loadPurchaseHints(rows)
-        return
-      }
-      throw new Error(error?.message || 'Search failed')
-    } catch {
-      const snapshot = await loadProductSnapshot(shop.id)
-      const rows = snapshot.filter((product) => {
-        if (!q) return true
-        return [
-          product.name,
-          product.brand,
-          product.barcode,
-          product.hsn_code,
-          product.search_text,
-        ].some((field) => String(field || '').toLowerCase().includes(q))
-      }).slice(0, 12)
-      setResults(rows)
-      setCursor(0)
-      await loadPurchaseHints(rows)
+      if (!error) { setResults(data || []); setCursor(0) }
     } finally {
       setLoading(false)
-    }
-  }
-
-  async function loadPurchaseHints(products) {
-    const productIds = products.map((product) => product.id).filter(Boolean)
-    if (!shop?.id || productIds.length === 0) {
-      setPurchaseHints({})
-      return
-    }
-
-    try {
-      const { data: itemRows, error: itemErr } = await supabase
-        .from('purchase_bill_items')
-        .select('product_id,rate,mrp,purchase_bill_id,created_at')
-        .eq('shop_id', shop.id)
-        .in('product_id', productIds)
-        .order('created_at', { ascending: false })
-        .limit(productIds.length * 4)
-
-      if (itemErr || !itemRows?.length) {
-        setPurchaseHints({})
-        return
-      }
-
-      const latestByProduct = new Map()
-      itemRows.forEach((row) => {
-        if (!latestByProduct.has(row.product_id)) latestByProduct.set(row.product_id, row)
-      })
-
-      const purchaseBillIds = [...new Set([...latestByProduct.values()].map((row) => row.purchase_bill_id).filter(Boolean))]
-      if (purchaseBillIds.length === 0) {
-        setPurchaseHints(Object.fromEntries(
-          [...latestByProduct.entries()].map(([productId, row]) => [productId, {
-            rate: row.rate,
-            mrp: row.mrp,
-            billNo: '',
-            billDate: '',
-            supplierName: '',
-          }])
-        ))
-        return
-      }
-
-      const { data: billRows, error: billErr } = await supabase
-        .from('purchase_bills')
-        .select('id,bill_no,date,suppliers(name)')
-        .in('id', purchaseBillIds)
-
-      if (billErr) {
-        setPurchaseHints({})
-        return
-      }
-
-      const billMap = new Map((billRows || []).map((bill) => [bill.id, bill]))
-      const hints = Object.fromEntries(
-        [...latestByProduct.entries()].map(([productId, row]) => {
-          const bill = billMap.get(row.purchase_bill_id)
-          return [productId, {
-            rate: row.rate,
-            mrp: row.mrp,
-            billNo: bill?.bill_no || '',
-            billDate: bill?.date || '',
-            supplierName: bill?.suppliers?.name || '',
-          }]
-        })
-      )
-
-      setPurchaseHints(hints)
-    } catch {
-      setPurchaseHints({})
     }
   }
 
@@ -182,7 +84,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={handleKey}
-            placeholder="Search by name, barcode, brand, HSN or tag…"
+            placeholder="Search by name, barcode, brand or tag…"
             className="flex-1 text-base outline-none min-w-0"
           />
           {loading && <span className="text-xs text-gray-400 animate-pulse flex-shrink-0">searching…</span>}
@@ -232,24 +134,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
             </div>
           )}
 
-          {results.map((p, i) => {
-          const hint = purchaseHints[p.id]
-          const hasHistoryHint = Boolean(hint?.rate || hint?.mrp || hint?.supplierName || hint?.billDate)
-          const fallbackPurchasePrice = p.purchase_price > 0 ? fmt(p.purchase_price) : null
-          const fallbackMrp = p.mrp > 0 ? fmt(p.mrp) : null
-          const purchaseHintText = hasHistoryHint
-            ? [
-                hint?.rate ? `Last buy ${fmt(hint.rate)}` : null,
-                hint?.mrp ? `MRP ${fmt(hint.mrp)}` : null,
-                hint?.supplierName || null,
-                hint?.billDate ? new Date(`${hint.billDate}T00:00:00`).toLocaleDateString('en-IN') : null,
-              ].filter(Boolean).join(' · ')
-            : [
-                fallbackPurchasePrice ? `Buy ${fallbackPurchasePrice}` : null,
-                fallbackMrp ? `MRP ${fallbackMrp}` : null,
-              ].filter(Boolean).join(' · ')
-
-          return (
+          {results.map((p, i) => (
             <div
               key={p.id}
               ref={el => (itemRefs.current[i] = el)}
@@ -268,11 +153,6 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
                   {p.barcode && <span className="text-xs font-mono text-gray-400">{p.barcode}</span>}
                   <span className="text-xs text-gray-400">{p.unit}</span>
                 </div>
-                {purchaseHintText && (
-                  <div className="mt-1 text-xs text-amber-700 truncate">
-                    {purchaseHintText}
-                  </div>
-                )}
               </div>
               <div className="text-right ml-3 flex-shrink-0">
                 <div className="font-bold text-blue-700 text-sm">{fmt(p.selling_price || p.mrp)}</div>
@@ -284,8 +164,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
                 </div>
               </div>
             </div>
-          )
-          })}
+          ))}
         </div>
 
         {/* Keyboard hints */}

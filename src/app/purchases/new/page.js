@@ -1,24 +1,12 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
-import { todayStr } from '@/lib/finance'
 import ProductSearch from '@/components/ProductSearch'
 import BillScanner from '@/components/BillScanner'
 import { useShop } from '@/context/ShopContext'
-import {
-  enqueuePendingAction,
-  listPendingActions,
-  makeTempBillNo,
-  removePendingAction,
-  updatePendingAction,
-} from '@/lib/offlineBilling'
-
-function isOnline() {
-  return typeof navigator !== 'undefined' ? navigator.onLine : true
-}
 
 let _uid = 0
 function uid() { return ++_uid }
@@ -26,7 +14,7 @@ function uid() { return ++_uid }
 function emptyItem() {
   return {
     _id: uid(), product_id: null, product_name: '', hsn_code: '',
-    unit: 'pcs', quantity: '', rate: '', mrp: '', gst_rate: 0,
+    unit: 'pcs', quantity: '', rate: '', gst_rate: 0,
     base_amount: 0, gst_amount: 0, total: 0,
   }
 }
@@ -42,7 +30,7 @@ export default function NewPurchasePage() {
   const [items,      setItems]     = useState([emptyItem()])
   const [suppId,     setSuppId]    = useState('')
   const [suppInv,    setSuppInv]   = useState('')
-  const [date,       setDate]      = useState(todayStr())
+  const [date,       setDate]      = useState(new Date().toISOString().slice(0, 10))
   const [payMode,    setPayMode]   = useState('Credit')
   const [paidAmt,    setPaidAmt]   = useState('')
   const [notes,      setNotes]     = useState('')
@@ -56,23 +44,10 @@ export default function NewPurchasePage() {
   const [saving,     setSaving]     = useState(false)
   const [toast,      setToast]      = useState(null)
   const [editPurchaseId, setEditPurchaseId] = useState(null)
-  const [offlineNotice, setOfflineNotice] = useState('')
-  const syncInProgressRef = useRef(false)
 
   useEffect(() => {
-    if (!shop?.id) return
-    if (!isOnline()) {
-      setSuppliers([])
-      setSettings(null)
-      return
-    }
-
-    supabase.from('suppliers').select('id,name').eq('is_active', true).order('name')
-      .then(({ data }) => setSuppliers(data || []))
-      .catch(() => setSuppliers([]))
-    supabase.from('shops').select('*').eq('id', shop?.id || '').single()
-      .then(({ data }) => setSettings(data))
-      .catch(() => setSettings(null))
+    supabase.from('suppliers').select('id,name').eq('is_active', true).order('name').then(({ data }) => setSuppliers(data || []))
+    supabase.from('shops').select('*').eq('id', shop?.id || '').single().then(({ data }) => setSettings(data))
   }, [shop?.id])
 
   useEffect(() => {
@@ -90,7 +65,7 @@ export default function NewPurchasePage() {
           .single(),
         supabase
           .from('purchase_bill_items')
-          .select('id,product_id,product_name,hsn_code,unit,quantity,rate,mrp,gst_rate,gst_amount,total,sl_no')
+          .select('id,product_id,product_name,hsn_code,unit,quantity,rate,gst_rate,gst_amount,total,sl_no')
           .eq('purchase_bill_id', editId)
           .eq('shop_id', shop.id)
           .order('sl_no'),
@@ -103,7 +78,7 @@ export default function NewPurchasePage() {
       setEditPurchaseId(editId)
       setSuppId(b.supplier_id || '')
       setSuppInv(b.supplier_invoice_no || '')
-      setDate(b.date || todayStr())
+      setDate(b.date || new Date().toISOString().slice(0, 10))
       setPayMode(b.payment_mode ? b.payment_mode.charAt(0).toUpperCase() + b.payment_mode.slice(1) : 'Credit')
       setPaidAmt(String(b.paid_amount ?? ''))
       setNotes(b.notes || '')
@@ -116,7 +91,6 @@ export default function NewPurchasePage() {
         unit: it.unit || 'pcs',
         quantity: it.quantity ?? 1,
         rate: it.rate ?? 0,
-        mrp: it.mrp ?? 0,
         gst_rate: it.gst_rate ?? 0,
         base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
         gst_amount: it.gst_amount ?? 0,
@@ -136,79 +110,6 @@ export default function NewPurchasePage() {
     setTimeout(() => setToast(null), 3000)
   }
 
-  useEffect(() => {
-    if (!shop?.id || !isOnline()) return
-
-    let cancelled = false
-    async function syncQueue() {
-      if (syncInProgressRef.current) return
-      syncInProgressRef.current = true
-      try {
-        const queue = await listPendingActions(shop.id, 'purchase-bill')
-        for (const record of queue) {
-          if (cancelled) return
-          await updatePendingAction(record.id, { status: 'syncing' })
-
-          const prefix = settings?.purchase_prefix || shop?.purchase_prefix || 'PUR'
-          let billNo = record.purchaseRow?.bill_no || ''
-          if (!billNo || String(billNo).startsWith('OFF-')) {
-            try {
-              const { data: generatedNo, error: noErr } = await supabase.rpc('get_next_purchase_no', {
-                p_shop_id: shop.id,
-                p_prefix: prefix,
-              })
-              if (noErr) throw noErr
-              billNo = generatedNo || `${prefix}-${Date.now()}`
-            } catch {
-              billNo = billNo || `${prefix}-${Date.now()}`
-            }
-          }
-
-          const purchaseRow = {
-            ...record.purchaseRow,
-            bill_no: billNo,
-          }
-
-          const { data: saved, error: billErr } = await supabase.from('purchase_bills').insert(purchaseRow).select().single()
-          if (billErr) throw billErr
-
-          const syncedLineItems = (record.lineItems || []).map((item, i) => ({
-            shop_id: shop.id,
-            purchase_bill_id: saved.id,
-            product_id: item.product_id,
-            sl_no: i + 1,
-            product_name: item.product_name,
-            hsn_code: item.hsn_code || null,
-            unit: item.unit,
-            quantity: parseFloat(item.quantity) || 1,
-            rate: parseFloat(item.rate) || 0,
-            mrp: parseFloat(item.mrp) || 0,
-            base_rate: (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
-            gst_rate: item.gst_rate || 0,
-            gst_amount: item.gst_amount || 0,
-            total: item.total || 0,
-          }))
-
-          const { error: itemsErr } = await supabase.from('purchase_bill_items').insert(syncedLineItems)
-          if (itemsErr) throw itemsErr
-
-          await removePendingAction(record.id)
-        }
-      } catch (error) {
-        console.warn('Purchase queue sync failed:', error)
-      } finally {
-        syncInProgressRef.current = false
-      }
-    }
-
-    syncQueue()
-    window.addEventListener('online', syncQueue)
-    return () => {
-      cancelled = true
-      window.removeEventListener('online', syncQueue)
-    }
-  }, [shop?.id, settings?.purchase_prefix])
-
   function recalc(item) {
     if (!item.product_id && !item.product_name) return item
     const c = calcItem(parseFloat(item.rate) || 0, parseFloat(item.quantity) || 0, parseFloat(item.gst_rate) || 0, 0)
@@ -223,14 +124,13 @@ export default function NewPurchasePage() {
 
   function handleProductSelect(product) {
     const rate = product.purchase_price || product.mrp || 0
-    const mrp = product.mrp || rate
     setItems(prev => {
       const n = [...prev]
       n[activeRow] = recalc({
         ...n[activeRow],
         product_id: product.id, product_name: product.name,
         hsn_code: product.hsn_code || '', unit: product.unit || 'pcs',
-        rate, mrp, gst_rate: product.gst_rate || 0, quantity: 1,
+        rate, gst_rate: product.gst_rate || 0, quantity: 1,
       })
       return n
     })
@@ -248,7 +148,6 @@ export default function NewPurchasePage() {
         unit:         'pcs',
         quantity:     1,
         rate:         '',
-        mrp:          '',
         gst_rate:     0,
         base_amount:  0,
         gst_amount:   0,
@@ -284,7 +183,7 @@ export default function NewPurchasePage() {
       const calc = calcItem(item.rate || 0, item.quantity || 1, item.gst_rate || 0, 0)
       return { ...base, product_name: item.name, hsn_code: item.hsn_code || '',
         unit: item.unit || 'pcs', quantity: item.quantity || 1,
-        rate: item.rate || 0, mrp: item.mrp || item.rate || 0, gst_rate: item.gst_rate || 0, ...calc }
+        rate: item.rate || 0, gst_rate: item.gst_rate || 0, ...calc }
     })
     setItems(newItems)
     if (scanResult.invoice_number) setSuppInv(scanResult.invoice_number)
@@ -301,59 +200,13 @@ export default function NewPurchasePage() {
     if (filledItems.length === 0) { showToast('Add at least one item', 'error'); return }
     setSaving(true)
     try {
-      const prefix = settings?.purchase_prefix || shop?.purchase_prefix || 'PUR'
-      const paid = parseFloat(paidAmt) || 0
-      if (!isOnline()) {
-        if (editPurchaseId) throw new Error('Editing purchases offline is not available yet')
-        const tempNo = makeTempBillNo('OFF')
-        const purchaseRow = {
-          shop_id:            shop.id,
-          bill_no:            tempNo,
-          supplier_id:        suppId || null,
-          supplier_invoice_no: suppInv || null,
-          date,
-          subtotal: totals.subtotal,
-          gst_amount: totals.gstAmount,
-          total: totals.total,
-          paid_amount: paid,
-          payment_mode: payMode.toLowerCase(),
-          payment_status: paid >= totals.total ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
-          notes: notes || null,
-        }
-        await enqueuePendingAction(shop.id, {
-          type: 'purchase-bill',
-          purchaseRow,
-          lineItems: filledItems.map((item) => ({
-            product_id: item.product_id,
-            product_name: item.product_name,
-            hsn_code: item.hsn_code || null,
-            unit: item.unit,
-            quantity: parseFloat(item.quantity) || 1,
-            rate: parseFloat(item.rate) || 0,
-            mrp: parseFloat(item.mrp) || 0,
-            gst_rate: item.gst_rate || 0,
-            gst_amount: item.gst_amount || 0,
-            total: item.total || 0,
-          })),
-        })
-        showToast(`✓ ${tempNo} saved offline. It will sync when internet returns.`)
-        setOfflineNotice('Offline mode: purchase queued for sync')
-        setItems([emptyItem()])
-        setSuppId('')
-        setSuppInv('')
-        setNotes('')
-        setPaidAmt('')
-        setPayMode('Credit')
-        setEditPurchaseId(null)
-        return
-      }
-
       let no = ''
       if (!editPurchaseId) {
         const { data: generatedNo } = await supabase.rpc('get_next_purchase_no', {
           p_shop_id: shop.id,
-          p_prefix: prefix,
+          p_prefix: settings?.purchase_prefix || shop?.purchase_prefix || 'PUR',
         })
+        const prefix = settings?.purchase_prefix || shop?.purchase_prefix || 'PUR'
         no = generatedNo || `${prefix}-${Date.now()}`
       } else {
         const { data: current } = await supabase
@@ -365,6 +218,8 @@ export default function NewPurchasePage() {
         no = current?.bill_no || no
       }
       if (!no) throw new Error('Purchase number could not be generated')
+      const paid = parseFloat(paidAmt) || 0
+
       const purchaseRow = {
         shop_id:            shop.id,
         bill_no:            no,
@@ -414,7 +269,6 @@ export default function NewPurchasePage() {
           unit: item.unit,
           quantity: parseFloat(item.quantity) || 1,
           rate: parseFloat(item.rate) || 0,
-          mrp: parseFloat(item.mrp) || 0,
           base_rate: (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
           gst_rate: item.gst_rate || 0,
           gst_amount: item.gst_amount || 0,
@@ -477,12 +331,6 @@ export default function NewPurchasePage() {
           <span><kbd>Ctrl+D</kbd> Delete Row</span>
         </div>
 
-        {offlineNotice && (
-          <div className="mx-4 mt-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
-            {offlineNotice}
-          </div>
-        )}
-
         {/* Supplier row */}
         <div className="bg-white border-b px-4 py-2 flex flex-wrap gap-3 flex-shrink-0">
           <div className="flex items-center gap-2">
@@ -517,7 +365,6 @@ export default function NewPurchasePage() {
                 <th className="px-2 py-2 text-center w-20">Qty</th>
                 <th className="px-2 py-2 text-center w-14">Unit</th>
                 <th className="px-2 py-2 text-right w-24">Rate (₹)</th>
-                <th className="px-2 py-2 text-right w-24">MRP (₹)</th>
                 <th className="px-2 py-2 text-center w-16">GST%</th>
                 <th className="px-2 py-2 text-right w-24">Amount (₹)</th>
                 <th className="px-2 py-2 w-7"></th>
@@ -551,13 +398,6 @@ export default function NewPurchasePage() {
                   <td className="px-1 py-1">
                     <input id={`rate-${i}`} type="number" value={item.rate}
                       onChange={e => updateItem(i, 'rate', e.target.value)}
-                      onFocus={e => { setActiveRow(i); e.target.select() }}
-                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`mrp-${i}`) } }}
-                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" />
-                  </td>
-                  <td className="px-1 py-1">
-                    <input id={`mrp-${i}`} type="number" value={item.mrp}
-                      onChange={e => updateItem(i, 'mrp', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addRow() } }}
                       className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" />

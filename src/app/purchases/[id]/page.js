@@ -40,7 +40,7 @@ export default function PurchaseDetailsPage() {
 
         const { data: lineItems, error: itemsErr } = await supabase
           .from('purchase_bill_items')
-          .select('id,sl_no,product_name,hsn_code,quantity,unit,rate,mrp,gst_rate,gst_amount,total')
+          .select('id,sl_no,product_name,hsn_code,quantity,unit,rate,gst_rate,gst_amount,total')
           .eq('purchase_bill_id', id)
           .eq('shop_id', shop.id)
           .order('sl_no')
@@ -128,14 +128,14 @@ export default function PurchaseDetailsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 border-b text-xs text-gray-500">
-                {['#', 'Product', 'HSN', 'Qty', 'Unit', 'Rate', 'MRP', 'GST%', 'GST', 'Amount'].map(h => (
+                {['#', 'Product', 'HSN', 'Qty', 'Unit', 'Rate', 'GST%', 'GST', 'Amount'].map(h => (
                   <th key={h} className="px-3 py-2 text-left">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {items.length === 0 ? (
-                <tr><td colSpan={10} className="px-3 py-4 text-center text-gray-400">No line items found</td></tr>
+                <tr><td colSpan={9} className="px-3 py-4 text-center text-gray-400">No line items found</td></tr>
               ) : (
                 items.map((it, idx) => (
                   <tr key={it.id || idx} className="border-b last:border-b-0">
@@ -145,7 +145,6 @@ export default function PurchaseDetailsPage() {
                     <td className="px-3 py-2">{it.quantity}</td>
                     <td className="px-3 py-2">{it.unit || 'pcs'}</td>
                     <td className="px-3 py-2">{fmt(it.rate)}</td>
-                    <td className="px-3 py-2">{fmt(it.mrp)}</td>
                     <td className="px-3 py-2">{it.gst_rate}%</td>
                     <td className="px-3 py-2">{fmt(it.gst_amount)}</td>
                     <td className="px-3 py-2 font-medium">{fmt(it.total)}</td>
@@ -193,7 +192,7 @@ function PurchasePrintTemplate({ shop, bill, items }) {
           <thead>
             <tr>
               <th>#</th><th>Description</th><th className="tc">HSN</th><th className="tc">Qty</th>
-              <th className="tc">Unit</th><th className="tr">Rate</th><th className="tr">MRP</th><th className="tc">GST%</th><th className="tr">Amount</th>
+              <th className="tc">Unit</th><th className="tr">Rate</th><th className="tc">GST%</th><th className="tr">Amount</th>
             </tr>
           </thead>
           <tbody>
@@ -205,7 +204,6 @@ function PurchasePrintTemplate({ shop, bill, items }) {
                 <td className="tc">{it.quantity}</td>
                 <td className="tc">{it.unit || 'pcs'}</td>
                 <td className="tr">{Number(it.rate || 0).toFixed(2)}</td>
-                <td className="tr">{Number(it.mrp || 0).toFixed(2)}</td>
                 <td className="tc">{it.gst_rate}%</td>
                 <td className="tr">{Number(it.total || 0).toFixed(2)}</td>
               </tr>
@@ -222,3 +220,4 @@ function PurchasePrintTemplate({ shop, bill, items }) {
     </div>
   )
 }
+

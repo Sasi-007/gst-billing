@@ -19,24 +19,6 @@ kbd {
     display: none !important;
   }
 
-  .billing-table {
-    font-size: 11px;
-  }
-
-  .billing-table th,
-  .billing-table td {
-    padding-left: 6px;
-    padding-right: 6px;
-  }
-
-  /* Hide row number and unit on very small screens */
-  .billing-table th:nth-child(1),
-  .billing-table td:nth-child(1),
-  .billing-table th:nth-child(5),
-  .billing-table td:nth-child(5) {
-    display: none;
-  }
-
   /* Hide HSN column */
   .billing-table th:nth-child(3),
   .billing-table td:nth-child(3) {
@@ -55,15 +37,6 @@ kbd {
 .table-scroll {
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
-}
-
-.sidebar-scrollbar {
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.sidebar-scrollbar::-webkit-scrollbar {
-  display: none;
 }
 
 /* ── Safe-area for iPhone bottom bar notch ──────── */
