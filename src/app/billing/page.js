@@ -12,7 +12,6 @@ import PrintTemplate from '@/components/PrintTemplate'
 import { useShop } from '@/context/ShopContext'
 import {
   applyLocalStockDelta,
-  applyLocalStockDeltaMap,
   clearBillingDraft,
   enqueuePendingBill,
   listPendingBills,
@@ -25,6 +24,8 @@ import {
 } from '@/lib/offlineBilling'
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit', 'Cheque']
+const AUTO_INVOICE_CREDIT_TAG_PREFIX = '[AUTO-INVOICE:'
+const AUTO_INVOICE_CREDIT_NOTE = 'Auto-created from invoice credit billing'
 
 let _uid = 0
 function uid() { return ++_uid }
@@ -90,13 +91,13 @@ function getBillProfitSummary(items) {
   }, { totalProfit: 0, totalCost: 0 })
 }
 
-function buildQuantityMap(items) {
-  return (items || []).reduce((map, item) => {
-    if (!item?.product_id) return map
-    const qty = parseFloat(item.quantity) || 0
-    map[item.product_id] = (map[item.product_id] || 0) + qty
-    return map
-  }, {})
+function normalizePaidAmount(paidAmtValue, totalsTotal, payModeValue) {
+  const parsedPaid = parseFloat(paidAmtValue)
+  const hasPaidInput = paidAmtValue !== '' && Number.isFinite(parsedPaid)
+  const normalizedPayMode = String(payModeValue || '').toLowerCase()
+  const defaultPaid = normalizedPayMode === 'credit' ? 0 : totalsTotal
+  const resolvedPaid = hasPaidInput ? parsedPaid : defaultPaid
+  return Math.max(0, Number(resolvedPaid || 0))
 }
 
 function getBillPrefix(shop, billType) {
@@ -116,6 +117,154 @@ function isNetworkError(error) {
     message.includes('fetch') ||
     message.includes('offline')
   )
+}
+
+function normalizePhone(value) {
+  const digitsOnly = String(value || '').replace(/\D/g, '')
+  return digitsOnly.length === 10 ? digitsOnly : ''
+}
+
+function getAutoInvoiceCreditTag(billId) {
+  return `${AUTO_INVOICE_CREDIT_TAG_PREFIX}${billId}]`
+}
+
+async function removeAutoInvoiceCreditEntries(shopId, billId) {
+  if (!shopId || !billId) return
+  const tag = getAutoInvoiceCreditTag(billId)
+  const { data: existingEntries, error: lookupErr } = await supabase
+    .from('credit_entries')
+    .select('id,account_id')
+    .eq('shop_id', shopId)
+    .ilike('reference_note', `%${tag}%`)
+  if (lookupErr) throw lookupErr
+  const touchedAccountIds = [...new Set((existingEntries || []).map((row) => row.account_id).filter(Boolean))]
+  const entryIds = (existingEntries || []).map((row) => row.id).filter(Boolean)
+  if (!entryIds.length) return
+
+  const { error: deleteErr } = await supabase
+    .from('credit_entries')
+    .delete()
+    .eq('shop_id', shopId)
+    .in('id', entryIds)
+  if (deleteErr) throw deleteErr
+
+  if (touchedAccountIds.length === 0) return
+  const { data: accountRows, error: accountErr } = await supabase
+    .from('credit_accounts')
+    .select('id,opening_balance,notes,relation_type')
+    .eq('shop_id', shopId)
+    .in('id', touchedAccountIds)
+  if (accountErr) throw accountErr
+
+  const removableAccountIds = []
+  for (const account of (accountRows || [])) {
+    if (account.relation_type !== 'borrower') continue
+    if (String(account.notes || '') !== AUTO_INVOICE_CREDIT_NOTE) continue
+    if (Number(account.opening_balance || 0) !== 0) continue
+
+    const { data: remainingEntries, error: remainingErr } = await supabase
+      .from('credit_entries')
+      .select('id')
+      .eq('shop_id', shopId)
+      .eq('account_id', account.id)
+      .limit(1)
+    if (remainingErr) throw remainingErr
+    if ((remainingEntries || []).length === 0) removableAccountIds.push(account.id)
+  }
+
+  if (!removableAccountIds.length) return
+  const { error: removeAccountsErr } = await supabase
+    .from('credit_accounts')
+    .delete()
+    .eq('shop_id', shopId)
+    .in('id', removableAccountIds)
+  if (removeAccountsErr) throw removeAccountsErr
+}
+
+async function ensureBorrowerCreditAccount(shopId, customerName, customerPhone, billNo) {
+  const normalizedPhone = normalizePhone(customerPhone)
+  if (normalizedPhone) {
+    const { data: byPhone, error: byPhoneErr } = await supabase
+      .from('credit_accounts')
+      .select('id')
+      .eq('shop_id', shopId)
+      .eq('relation_type', 'borrower')
+      .eq('phone', normalizedPhone)
+      .limit(1)
+    if (byPhoneErr) throw byPhoneErr
+    if (byPhone?.length) return byPhone[0].id
+  }
+
+  const normalizedName = String(customerName || '').trim()
+  if (normalizedName) {
+    const { data: byName, error: byNameErr } = await supabase
+      .from('credit_accounts')
+      .select('id')
+      .eq('shop_id', shopId)
+      .eq('relation_type', 'borrower')
+      .ilike('party_name', normalizedName)
+      .limit(1)
+    if (byNameErr) throw byNameErr
+    if (byName?.length) return byName[0].id
+  }
+
+  const autoPartyName = normalizedName || (normalizedPhone ? `Customer ${normalizedPhone}` : `Walk-in (${billNo || 'Invoice'})`)
+  const { data: createdAccount, error: createErr } = await supabase
+    .from('credit_accounts')
+    .insert({
+      shop_id: shopId,
+      party_name: autoPartyName,
+      phone: normalizedPhone || null,
+      relation_type: 'borrower',
+      settlement_cycle: 'daily',
+      settlement_day: null,
+      opening_balance: 0,
+      notes: AUTO_INVOICE_CREDIT_NOTE,
+      is_active: true,
+    })
+    .select('id')
+    .single()
+  if (createErr) throw createErr
+  return createdAccount.id
+}
+
+async function syncInvoiceCreditEntry({
+  shopId,
+  billId,
+  billNo,
+  billDate,
+  customerName,
+  customerPhone,
+  payMode,
+  paidAmount,
+  totalAmount,
+}) {
+  if (!shopId || !billId) return
+
+  await removeAutoInvoiceCreditEntries(shopId, billId)
+
+  const total = Number(totalAmount || 0)
+  const paid = Number(paidAmount || 0)
+  const dueAmount = Math.max(0, total - paid)
+  const normalizedPayMode = String(payMode || '').toLowerCase()
+  const shouldTrack = dueAmount > 0 || normalizedPayMode === 'credit'
+  if (!shouldTrack || dueAmount <= 0) return
+
+  const accountId = await ensureBorrowerCreditAccount(shopId, customerName, customerPhone, billNo)
+  const tag = getAutoInvoiceCreditTag(billId)
+  const referenceNote = `Invoice ${billNo || ''} due ${fmt(dueAmount)} ${tag}`.trim()
+
+  const { error: entryErr } = await supabase
+    .from('credit_entries')
+    .insert({
+      shop_id: shopId,
+      account_id: accountId,
+      direction: 'increase',
+      amount: dueAmount,
+      entry_date: billDate,
+      reference_note: referenceNote,
+    })
+  if (entryErr) throw entryErr
 }
 
 export default function BillingPage() {
@@ -291,25 +440,20 @@ export default function BillingPage() {
           const { error: itemsErr } = await supabase.from('bill_items').insert(syncedLineItems)
           if (itemsErr) throw itemsErr
 
-          if (billRow.bill_type === 'invoice' && syncedLineItems.length > 0) {
-            for (const item of syncedLineItems) {
-              if (!item.product_id) continue
-              const { data: productRow, error: productErr } = await supabase
-                .from('products')
-                .select('id,stock_qty')
-                .eq('id', item.product_id)
-                .eq('shop_id', shop.id)
-                .single()
-              if (productErr) throw productErr
-
-              const nextStock = Number(productRow.stock_qty || 0) - Number(item.quantity || 0)
-              const { error: stockErr } = await supabase
-                .from('products')
-                .update({ stock_qty: nextStock })
-                .eq('id', item.product_id)
-                .eq('shop_id', shop.id)
-              if (stockErr) throw stockErr
-            }
+          if (billRow.bill_type === 'invoice') {
+            await syncInvoiceCreditEntry({
+              shopId: shop.id,
+              billId: saved.id,
+              billNo: billRow.bill_no,
+              billDate: billRow.date,
+              customerName: billRow.customer_name,
+              customerPhone: billRow.customer_phone,
+              payMode: billRow.payment_mode,
+              paidAmount: billRow.paid_amount,
+              totalAmount: billRow.total,
+            })
+          } else {
+            await removeAutoInvoiceCreditEntries(shop.id, saved.id)
           }
 
           if (record.conversionSourceId) {
@@ -352,7 +496,7 @@ export default function BillingPage() {
     setHistoryLoading(true)
     let q = supabase
       .from('bills')
-      .select('id,bill_no,date,customer_name,total,payment_status,bill_type')
+      .select('id,bill_no,date,customer_name,total,payment_mode,payment_status,bill_type')
       .eq('shop_id', shop.id)
       .eq('bill_type', billType)
       .order('created_at', { ascending: false })
@@ -564,6 +708,18 @@ export default function BillingPage() {
   const totals      = calcBillTotals(filledItems)
   const profitSummary = getBillProfitSummary(filledItems)
 
+  function handlePayModeChange(nextPayMode) {
+    setPayMode(nextPayMode)
+    const isCreditMode = String(nextPayMode || '').toLowerCase() === 'credit'
+    if (!isCreditMode) return
+
+    const currentPaid = parseFloat(paidAmt)
+    const hasPaidInput = paidAmt !== '' && Number.isFinite(currentPaid)
+    if (!hasPaidInput || currentPaid >= totals.total) {
+      setPaidAmt('0')
+    }
+  }
+
   // ── Open search for a row ──────────────────────────────────────────────────
   const openSearch = useCallback((rowIdx) => {
     setActiveRow(rowIdx)
@@ -659,6 +815,12 @@ export default function BillingPage() {
   // ── Save ───────────────────────────────────────────────────────────────────
   async function handleSave(withPrint = false) {
     if (filledItems.length === 0) { showToast('Add at least one item', 'error'); return }
+    const isCreditMode = String(payMode || '').toLowerCase() === 'credit'
+    if (isCreditMode && !String(customer.name || '').trim()) {
+      showToast('Customer name is required for credit bills', 'error')
+      focusId('customer-name')
+      return
+    }
     setSaving(true)
 
     try {
@@ -680,7 +842,7 @@ export default function BillingPage() {
         setBillNo(finalNo || makeTempBillNo(getBillPrefix(shop, billType)))
       }
 
-      const paid = parseFloat(paidAmt) || totals.total
+      const paid = normalizePaidAmount(paidAmt, totals.total, payMode)
 
       const billRow = {
         shop_id:          shop.id,
@@ -767,54 +929,6 @@ export default function BillingPage() {
         savedId = saved.id
       }
 
-      const newImpactMap = billType === 'invoice' ? buildQuantityMap(lineItems) : {}
-      let oldImpactMap = {}
-      if (editBillId) {
-        const [{ data: oldBill, error: oldBillErr }, { data: oldItems, error: oldItemsErr }] = await Promise.all([
-          supabase
-            .from('bills')
-            .select('bill_type')
-            .eq('id', editBillId)
-            .eq('shop_id', shop.id)
-            .single(),
-          supabase
-            .from('bill_items')
-            .select('product_id,quantity')
-            .eq('bill_id', editBillId)
-            .eq('shop_id', shop.id),
-        ])
-        if (oldBillErr) throw oldBillErr
-        if (oldItemsErr) throw oldItemsErr
-        oldImpactMap = oldBill?.bill_type === 'invoice' ? buildQuantityMap(oldItems || []) : {}
-      }
-
-      const stockDeltaMap = {}
-      const productIds = new Set([...Object.keys(oldImpactMap), ...Object.keys(newImpactMap)])
-      productIds.forEach((productId) => {
-        const oldQty = Number(oldImpactMap[productId] || 0)
-        const newQty = Number(newImpactMap[productId] || 0)
-        const delta = oldQty - newQty
-        if (delta) stockDeltaMap[productId] = delta
-      })
-
-      for (const [productId, delta] of Object.entries(stockDeltaMap)) {
-        const { data: productRow, error: productErr } = await supabase
-          .from('products')
-          .select('id,stock_qty')
-          .eq('id', productId)
-          .eq('shop_id', shop.id)
-          .single()
-        if (productErr) throw productErr
-
-        const nextStock = Number(productRow.stock_qty || 0) + Number(delta || 0)
-        const { error: stockErr } = await supabase
-          .from('products')
-          .update({ stock_qty: nextStock })
-          .eq('id', productId)
-          .eq('shop_id', shop.id)
-        if (stockErr) throw stockErr
-      }
-
       if (editBillId) {
         const { error: delErr } = await supabase
           .from('bill_items')
@@ -828,7 +942,21 @@ export default function BillingPage() {
       const { error: itemErr } = await supabase.from('bill_items').insert(savedLineItems)
       if (itemErr) throw itemErr
 
-      await applyLocalStockDeltaMap(shop.id, stockDeltaMap)
+      if (billType === 'invoice') {
+        await syncInvoiceCreditEntry({
+          shopId: shop.id,
+          billId: savedId,
+          billNo: finalNo,
+          billDate,
+          customerName: customer.name,
+          customerPhone: customer.phone,
+          payMode,
+          paidAmount: paid,
+          totalAmount: totals.total,
+        })
+      } else {
+        await removeAutoInvoiceCreditEntries(shop.id, savedId)
+      }
 
       if (conversionSource?.id && billType === 'invoice') {
         const { error: sourceItemsErr } = await supabase
@@ -1016,7 +1144,7 @@ export default function BillingPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-50 text-xs text-gray-500 border-b">
-                          {['Date','Bill No','Customer','Total','Status','Action'].map(h => (
+                          {['Date','Bill No','Customer','Total','Mode','Status','Action'].map(h => (
                         <th key={h} className="px-3 py-2 text-left">{h}</th>
                       ))}
                     </tr>
@@ -1032,6 +1160,7 @@ export default function BillingPage() {
                         </td>
                         <td className="px-3 py-2 text-gray-600">{b.customer_name || '—'}</td>
                         <td className="px-3 py-2 font-medium text-right">₹{Number(b.total).toFixed(2)}</td>
+                        <td className="px-3 py-2 text-xs uppercase text-gray-500">{b.payment_mode || '—'}</td>
                         <td className="px-3 py-2">
                           <span className={`px-1.5 py-0.5 rounded text-xs ${
                             b.payment_status === 'paid' ? 'bg-green-100 text-green-700'
@@ -1066,7 +1195,10 @@ export default function BillingPage() {
         <div className="bg-white border-b px-4 py-2 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 flex-shrink-0">
           <div className="flex items-center gap-1 min-w-0">
             <span className="text-xs text-gray-400 whitespace-nowrap">Customer:</span>
-            <input value={customer.name} onChange={e => setCustomer(c => ({ ...c, name: e.target.value }))}
+            <input
+              id="customer-name"
+              value={customer.name}
+              onChange={e => setCustomer(c => ({ ...c, name: e.target.value }))}
               placeholder="Name (optional)" className="border rounded px-2 py-1 text-sm w-40" />
           </div>
           <div className="flex items-center gap-1 min-w-0">
@@ -1109,6 +1241,12 @@ export default function BillingPage() {
             <tbody>
               {items.map((item, i) => {
                 const profitPreview = getProfitPreview(item)
+                const hasStockQty =
+                  item.stock_qty !== undefined
+                  && item.stock_qty !== null
+                  && item.stock_qty !== ''
+                  && Number.isFinite(Number(item.stock_qty))
+                const stockQty = hasStockQty ? Number(item.stock_qty) : null
                 return (
                 <tr
                   key={item._id}
@@ -1135,11 +1273,11 @@ export default function BillingPage() {
                       {item.product_name || 'Press F3 or / to search product…'}
                     </button>
                     {/* Low / out-of-stock warning */}
-                    {item.stock_qty !== undefined && item.stock_qty !== null && (
-                      item.stock_qty <= 0
-                        ? <div className="text-xs text-red-500 leading-tight mt-0.5">⚠ Out of stock</div>
-                        : item.min_stock > 0 && item.stock_qty <= item.min_stock
-                          ? <div className="text-xs text-yellow-600 leading-tight mt-0.5">⚡ Low stock ({item.stock_qty} left)</div>
+                    {hasStockQty && (
+                      stockQty <= 0
+                        ? <div className="text-xs text-red-500 leading-tight mt-0.5">⚠ 0 left · Out of stock</div>
+                        : item.min_stock > 0 && stockQty <= item.min_stock
+                          ? <div className="text-xs text-yellow-600 leading-tight mt-0.5">⚡ Low stock ({stockQty} left)</div>
                           : null
                     )}
                   </td>
@@ -1285,7 +1423,7 @@ export default function BillingPage() {
                 <div className="text-xs text-gray-500 mb-0.5">Payment Mode</div>
                 <select
                   value={payMode}
-                  onChange={e => setPayMode(e.target.value)}
+                  onChange={e => handlePayModeChange(e.target.value)}
                   className="border rounded px-2 py-1 text-sm"
                 >
                   {PAYMENT_MODES.map(m => <option key={m}>{m}</option>)}

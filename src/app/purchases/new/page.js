@@ -9,6 +9,12 @@ import ProductSearch from '@/components/ProductSearch'
 import BillScanner from '@/components/BillScanner'
 import { useShop } from '@/context/ShopContext'
 import {
+  applyLocalProductStockDeltaMap,
+  buildQuantityMap,
+  invalidatePurchaseImpactCache,
+  syncProductPricingFromLatestPurchases,
+} from '@/lib/productStock'
+import {
   enqueuePendingAction,
   listPendingActions,
   makeTempBillNo,
@@ -148,51 +154,63 @@ export default function NewPurchasePage() {
         for (const record of queue) {
           if (cancelled) return
           await updatePendingAction(record.id, { status: 'syncing' })
-
-          const prefix = settings?.purchase_prefix || shop?.purchase_prefix || 'PUR'
-          let billNo = record.purchaseRow?.bill_no || ''
-          if (!billNo || String(billNo).startsWith('OFF-')) {
-            try {
-              const { data: generatedNo, error: noErr } = await supabase.rpc('get_next_purchase_no', {
-                p_shop_id: shop.id,
-                p_prefix: prefix,
-              })
-              if (noErr) throw noErr
-              billNo = generatedNo || `${prefix}-${Date.now()}`
-            } catch {
-              billNo = billNo || `${prefix}-${Date.now()}`
+          try {
+            const prefix = settings?.purchase_prefix || shop?.purchase_prefix || 'PUR'
+            let billNo = record.purchaseRow?.bill_no || ''
+            if (!billNo || String(billNo).startsWith('OFF-')) {
+              try {
+                const { data: generatedNo, error: noErr } = await supabase.rpc('get_next_purchase_no', {
+                  p_shop_id: shop.id,
+                  p_prefix: prefix,
+                })
+                if (noErr) throw noErr
+                billNo = generatedNo || `${prefix}-${Date.now()}`
+              } catch {
+                billNo = billNo || `${prefix}-${Date.now()}`
+              }
             }
+
+            const purchaseRow = {
+              ...record.purchaseRow,
+              bill_no: billNo,
+            }
+
+            const { data: saved, error: billErr } = await supabase.from('purchase_bills').insert(purchaseRow).select().single()
+            if (billErr) throw billErr
+
+            const syncedLineItems = (record.lineItems || []).map((item, i) => ({
+              shop_id: shop.id,
+              purchase_bill_id: saved.id,
+              product_id: item.product_id,
+              sl_no: i + 1,
+              product_name: item.product_name,
+              hsn_code: item.hsn_code || null,
+              unit: item.unit,
+              quantity: parseFloat(item.quantity) || 1,
+              rate: parseFloat(item.rate) || 0,
+              mrp: parseFloat(item.mrp) || 0,
+              base_rate: (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
+              gst_rate: item.gst_rate || 0,
+              gst_amount: item.gst_amount || 0,
+              total: item.total || 0,
+            }))
+
+            const { error: itemsErr } = await supabase.from('purchase_bill_items').insert(syncedLineItems)
+            if (itemsErr) throw itemsErr
+
+            const queuedStockDeltaMap = buildQuantityMap(record.lineItems || [])
+            await syncProductPricingFromLatestPurchases(shop.id, Object.keys(queuedStockDeltaMap))
+            invalidatePurchaseImpactCache(shop.id)
+
+            await removePendingAction(record.id)
+          } catch (error) {
+            await updatePendingAction(record.id, {
+              status: 'pending',
+              attempts: Number(record.attempts || 0) + 1,
+              lastError: error?.message || 'Purchase sync failed',
+            })
+            throw error
           }
-
-          const purchaseRow = {
-            ...record.purchaseRow,
-            bill_no: billNo,
-          }
-
-          const { data: saved, error: billErr } = await supabase.from('purchase_bills').insert(purchaseRow).select().single()
-          if (billErr) throw billErr
-
-          const syncedLineItems = (record.lineItems || []).map((item, i) => ({
-            shop_id: shop.id,
-            purchase_bill_id: saved.id,
-            product_id: item.product_id,
-            sl_no: i + 1,
-            product_name: item.product_name,
-            hsn_code: item.hsn_code || null,
-            unit: item.unit,
-            quantity: parseFloat(item.quantity) || 1,
-            rate: parseFloat(item.rate) || 0,
-            mrp: parseFloat(item.mrp) || 0,
-            base_rate: (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
-            gst_rate: item.gst_rate || 0,
-            gst_amount: item.gst_amount || 0,
-            total: item.total || 0,
-          }))
-
-          const { error: itemsErr } = await supabase.from('purchase_bill_items').insert(syncedLineItems)
-          if (itemsErr) throw itemsErr
-
-          await removePendingAction(record.id)
         }
       } catch (error) {
         console.warn('Purchase queue sync failed:', error)
@@ -336,6 +354,9 @@ export default function NewPurchasePage() {
             total: item.total || 0,
           })),
         })
+        const queuedStockDeltaMap = buildQuantityMap(filledItems)
+        await applyLocalProductStockDeltaMap(shop.id, queuedStockDeltaMap)
+        invalidatePurchaseImpactCache(shop.id)
         showToast(`✓ ${tempNo} saved offline. It will sync when internet returns.`)
         setOfflineNotice('Offline mode: purchase queued for sync')
         setItems([emptyItem()])
@@ -365,6 +386,17 @@ export default function NewPurchasePage() {
         no = current?.bill_no || no
       }
       if (!no) throw new Error('Purchase number could not be generated')
+      let oldImpactMap = {}
+      if (editPurchaseId) {
+        const { data: oldItems, error: oldItemsErr } = await supabase
+          .from('purchase_bill_items')
+          .select('product_id,quantity')
+          .eq('purchase_bill_id', editPurchaseId)
+          .eq('shop_id', shop.id)
+        if (oldItemsErr) throw oldItemsErr
+        oldImpactMap = buildQuantityMap(oldItems || [])
+      }
+
       const purchaseRow = {
         shop_id:            shop.id,
         bill_no:            no,
@@ -394,6 +426,9 @@ export default function NewPurchasePage() {
         purchaseId = saved.id
       }
 
+      const newImpactMap = buildQuantityMap(filledItems)
+      const productIds = new Set([...Object.keys(oldImpactMap), ...Object.keys(newImpactMap)])
+
       if (editPurchaseId) {
         const { error: delErr } = await supabase
           .from('purchase_bill_items')
@@ -403,7 +438,7 @@ export default function NewPurchasePage() {
         if (delErr) throw delErr
       }
 
-      await supabase.from('purchase_bill_items').insert(
+      const { error: itemErr } = await supabase.from('purchase_bill_items').insert(
         filledItems.map((item, i) => ({
           shop_id:         shop.id,
           purchase_bill_id: purchaseId,
@@ -421,6 +456,10 @@ export default function NewPurchasePage() {
           total: item.total || 0,
         }))
       )
+      if (itemErr) throw itemErr
+
+      await syncProductPricingFromLatestPurchases(shop.id, [...productIds])
+      invalidatePurchaseImpactCache(shop.id)
 
       showToast(editPurchaseId ? `✓ ${no} updated` : `✓ ${no} saved`)
       setTimeout(() => router.push(`/purchases/${purchaseId}`), 700)

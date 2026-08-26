@@ -156,12 +156,35 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     else if (e.key === 'Enter') {
       e.preventDefault()
       if (results.length > 0) {
-        onSelect(results[cursor])
+        onSelect(resolveSelectedProduct(results[cursor]))
       } else if (query.trim() && onAddFreeText) {
         // Enter with no results → add as free-text
         onAddFreeText(query.trim())
       }
     } else if (e.key === 'Escape') { onClose() }
+  }
+
+  function resolveSelectedProduct(product) {
+    const hint = purchaseHints[product?.id]
+    if (!hint) return product
+
+    return {
+      ...product,
+      purchase_price: hint.rate ?? product.purchase_price,
+      mrp: hint.mrp ?? product.mrp,
+    }
+  }
+
+  function parseStockQty(value) {
+    if (value === null || value === undefined || value === '') return null
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+
+  function formatStockQty(value) {
+    if (!Number.isFinite(value)) return ''
+    if (Number.isInteger(value)) return String(value)
+    return value.toFixed(3).replace(/\.?0+$/, '')
   }
 
   const trimmed = query.trim()
@@ -235,6 +258,14 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
           {results.map((p, i) => {
           const hint = purchaseHints[p.id]
           const hasHistoryHint = Boolean(hint?.rate || hint?.mrp || hint?.supplierName || hint?.billDate)
+          const stockQty = parseStockQty(p.stock_qty)
+          const hasStockQty = stockQty !== null
+          const isOutOfStock = hasStockQty && stockQty <= 0
+          const stockText = !hasStockQty
+            ? 'Stock not set'
+            : isOutOfStock
+              ? '0 in stock · Out of stock'
+              : `${formatStockQty(stockQty)} in stock`
           const fallbackPurchasePrice = p.purchase_price > 0 ? fmt(p.purchase_price) : null
           const fallbackMrp = p.mrp > 0 ? fmt(p.mrp) : null
           const purchaseHintText = hasHistoryHint
@@ -258,7 +289,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
                   ? 'bg-blue-50 border-l-4 border-l-blue-500'
                   : 'hover:bg-gray-50 border-l-4 border-l-transparent'
               }`}
-              onClick={() => onSelect(p)}
+              onClick={() => onSelect(resolveSelectedProduct(p))}
               onMouseEnter={() => setCursor(i)}
             >
               <div className="flex-1 min-w-0">
@@ -278,8 +309,14 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
                 <div className="font-bold text-blue-700 text-sm">{fmt(p.selling_price || p.mrp)}</div>
                 <div className="text-xs text-gray-400">
                   GST {p.gst_rate}% ·{' '}
-                  <span className={p.stock_qty <= 0 ? 'text-red-500 font-semibold' : 'text-green-600'}>
-                    {p.stock_qty <= 0 ? 'Out of stock' : `${p.stock_qty} in stock`}
+                  <span className={
+                    !hasStockQty
+                      ? 'text-gray-500'
+                      : isOutOfStock
+                        ? 'text-red-500 font-semibold'
+                        : 'text-green-600'
+                  }>
+                    {stockText}
                   </span>
                 </div>
               </div>

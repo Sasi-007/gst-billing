@@ -30,3 +30,22 @@ export function writePageCache(key, data) {
     console.warn('Failed to write page cache:', error)
   }
 }
+
+export function clearPageCacheByPrefix(prefixes) {
+  if (typeof window === 'undefined') return
+
+  const activePrefixes = Array.isArray(prefixes) ? prefixes.filter(Boolean) : [prefixes].filter(Boolean)
+  if (activePrefixes.length === 0) return
+
+  try {
+    for (let index = window.sessionStorage.length - 1; index >= 0; index -= 1) {
+      const key = window.sessionStorage.key(index)
+      if (!key) continue
+      if (activePrefixes.some((prefix) => key.startsWith(prefix))) {
+        window.sessionStorage.removeItem(key)
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to clear page cache:', error)
+  }
+}

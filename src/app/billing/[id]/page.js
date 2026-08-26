@@ -9,6 +9,8 @@ import { fmt } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
 import PrintTemplate from '@/components/PrintTemplate'
 
+const AUTO_INVOICE_CREDIT_NOTE = 'Auto-created from invoice credit billing'
+
 export default function BillDetailsPage() {
   const { id } = useParams()
   const router = useRouter()
@@ -104,6 +106,78 @@ export default function BillDetailsPage() {
   async function handleDelete() {
     if (!window.confirm(`Delete bill ${bill.bill_no}? This cannot be undone.`)) return
     setDeleting(true)
+    const autoTag = `[AUTO-INVOICE:${bill.id}]`
+    const { data: creditRows, error: creditLookupErr } = await supabase
+      .from('credit_entries')
+      .select('id,account_id')
+      .eq('shop_id', shop.id)
+      .ilike('reference_note', `%${autoTag}%`)
+    if (creditLookupErr) {
+      setDeleting(false)
+      setError(creditLookupErr.message)
+      return
+    }
+    const touchedAccountIds = [...new Set((creditRows || []).map((row) => row.account_id).filter(Boolean))]
+    const creditIds = (creditRows || []).map((row) => row.id).filter(Boolean)
+    if (creditIds.length > 0) {
+      const { error: creditDeleteErr } = await supabase
+        .from('credit_entries')
+        .delete()
+        .eq('shop_id', shop.id)
+        .in('id', creditIds)
+      if (creditDeleteErr) {
+        setDeleting(false)
+        setError(creditDeleteErr.message)
+        return
+      }
+    }
+
+    if (touchedAccountIds.length > 0) {
+      const { data: accountRows, error: accountErr } = await supabase
+        .from('credit_accounts')
+        .select('id,opening_balance,notes,relation_type')
+        .eq('shop_id', shop.id)
+        .in('id', touchedAccountIds)
+      if (accountErr) {
+        setDeleting(false)
+        setError(accountErr.message)
+        return
+      }
+
+      const removableAccountIds = []
+      for (const account of (accountRows || [])) {
+        if (account.relation_type !== 'borrower') continue
+        if (String(account.notes || '') !== AUTO_INVOICE_CREDIT_NOTE) continue
+        if (Number(account.opening_balance || 0) !== 0) continue
+
+        const { data: remainingEntries, error: remainingErr } = await supabase
+          .from('credit_entries')
+          .select('id')
+          .eq('shop_id', shop.id)
+          .eq('account_id', account.id)
+          .limit(1)
+        if (remainingErr) {
+          setDeleting(false)
+          setError(remainingErr.message)
+          return
+        }
+        if ((remainingEntries || []).length === 0) removableAccountIds.push(account.id)
+      }
+
+      if (removableAccountIds.length > 0) {
+        const { error: removeAccountsErr } = await supabase
+          .from('credit_accounts')
+          .delete()
+          .eq('shop_id', shop.id)
+          .in('id', removableAccountIds)
+        if (removeAccountsErr) {
+          setDeleting(false)
+          setError(removeAccountsErr.message)
+          return
+        }
+      }
+    }
+
     const { error: delErr } = await supabase
       .from('bills')
       .delete()

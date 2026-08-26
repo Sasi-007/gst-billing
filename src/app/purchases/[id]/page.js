@@ -7,6 +7,11 @@ import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
+import {
+  buildQuantityMap,
+  invalidatePurchaseImpactCache,
+  syncProductPricingFromLatestPurchases,
+} from '@/lib/productStock'
 
 export default function PurchaseDetailsPage() {
   const { id } = useParams()
@@ -40,7 +45,7 @@ export default function PurchaseDetailsPage() {
 
         const { data: lineItems, error: itemsErr } = await supabase
           .from('purchase_bill_items')
-          .select('id,sl_no,product_name,hsn_code,quantity,unit,rate,mrp,gst_rate,gst_amount,total')
+          .select('id,product_id,sl_no,product_name,hsn_code,quantity,unit,rate,mrp,gst_rate,gst_amount,total')
           .eq('purchase_bill_id', id)
           .eq('shop_id', shop.id)
           .order('sl_no')
@@ -64,14 +69,24 @@ export default function PurchaseDetailsPage() {
   async function handleDelete() {
     if (!window.confirm(`Delete purchase ${bill.bill_no}? This cannot be undone.`)) return
     setDeleting(true)
-    const { error: delErr } = await supabase
-      .from('purchase_bills')
-      .delete()
-      .eq('id', bill.id)
-      .eq('shop_id', shop.id)
-    setDeleting(false)
-    if (delErr) { setError(delErr.message); return }
-    router.replace('/purchases')
+    const purchaseQtyMap = buildQuantityMap(items)
+
+    try {
+      const { error: delErr } = await supabase
+        .from('purchase_bills')
+        .delete()
+        .eq('id', bill.id)
+        .eq('shop_id', shop.id)
+      if (delErr) throw delErr
+      await syncProductPricingFromLatestPurchases(shop.id, Object.keys(purchaseQtyMap))
+      await syncProductPricingFromLatestPurchases(shop.id, Object.keys(purchaseQtyMap))
+      invalidatePurchaseImpactCache(shop.id)
+      router.replace('/purchases')
+    } catch (err) {
+      setError(err.message || 'Failed to delete purchase')
+    } finally {
+      setDeleting(false)
+    }
   }
 
   function handlePrint() {
