@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useState } from 'react'
 import { usePageLoading } from '@/context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
@@ -9,9 +9,13 @@ import { useShop } from '@/context/ShopContext'
 const NAV = [
   { href: '/',          icon: '📊', label: 'Dashboard',  key: 'h' },
   { href: '/billing',   icon: '🧾', label: 'New Bill',   key: 'b' },
+  { href: '/billing?view=history', icon: '🗂️', label: 'Invoice History', key: 'j' },
+  { href: '/billing/invoice-number-updater', icon: '🔢', label: 'Invoice Numbers', key: null },
   { href: '/quotation', icon: '📄', label: 'Quotation',  key: 'q' },
+  { href: '/customers', icon: '👥', label: 'Customers',  key: 'c' },
   { href: '/credits',   icon: '📒', label: 'Credit Book',key: 'u' },
   { href: '/inventory', icon: '📦', label: 'Inventory',  key: 'i' },
+  { href: '/online',    icon: '🌐', label: 'Online Store', key: 'o' },
   { href: '/categories', icon: '🏷️', label: 'Categories', key: null },
   { href: '/purchases', icon: '🛒', label: 'Purchases',  key: 'p' },
   { href: '/suppliers', icon: '🏪', label: 'Suppliers',  key: 's' },
@@ -28,23 +32,25 @@ const NAV = [
 const NAV_SECTIONS = [
   {
     title: 'Main',
-    items: NAV.slice(0, 7),
+    items: NAV.slice(0, 11),
   },
   {
     title: 'Finance',
-    items: NAV.slice(7, 14),
+    items: NAV.slice(11, 18),
   },
   {
     title: 'System',
-    items: NAV.slice(14),
+    items: NAV.slice(18),
   },
 ]
 
 const MOBILE_NAV = [
   { href: '/',          icon: '📊', label: 'Home'     },
   { href: '/billing',   icon: '🧾', label: 'Bill'     },
+  { href: '/customers', icon: '👥', label: 'Users'    },
   { href: '/credits',   icon: '📒', label: 'Credit'   },
   { href: '/inventory', icon: '📦', label: 'Stock'    },
+  { href: '/online',    icon: '🌐', label: 'Online'   },
   { href: '/categories', icon: '🏷️', label: 'Cat'     },
   { href: '/summary',   icon: '🧮', label: 'Summary'  },
   { href: '/expenses',  icon: '💸', label: 'Expense'  },
@@ -57,6 +63,7 @@ const MOBILE_NAV = [
 
 export default function Sidebar({ mode = 'expanded', onSetMode }) {
   const pathname = usePathname()
+  const searchParams = useSearchParams()
   const router   = useRouter()
   const { isPageLoading } = usePageLoading()
   const { shop, user, allShops, loading, switchShop, signOut } = useShop()
@@ -83,6 +90,13 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
 
   function prepareNavigation(href) {
     router.prefetch(href)
+  }
+
+  function isNavActive(href) {
+    const view = searchParams.get('view')
+    if (href === '/billing') return pathname === '/billing' && view !== 'history'
+    if (href === '/billing?view=history') return pathname === '/billing' && view === 'history'
+    return pathname === href
   }
 
   return (
@@ -178,7 +192,7 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
                     className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors ${
                       isCollapsed ? 'justify-center px-2' : ''
                     } ${
-                      pathname === n.href
+                      isNavActive(n.href)
                         ? 'bg-blue-600 text-white font-medium shadow-sm'
                         : 'text-gray-400 hover:bg-gray-800 hover:text-white'
                     }`}>

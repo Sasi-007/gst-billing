@@ -66,6 +66,29 @@ CREATE TABLE IF NOT EXISTS suppliers (
   updated_at     TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ── Customers ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS customers (
+  id             UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+  shop_id        UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
+  name           TEXT,
+  phone          TEXT,
+  gstin          TEXT,
+  address        TEXT,
+  notes          TEXT,
+  is_active      BOOLEAN DEFAULT TRUE,
+  created_at     TIMESTAMPTZ DEFAULT NOW(),
+  updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_customers_shop_name ON customers (shop_id, name);
+CREATE INDEX IF NOT EXISTS idx_customers_shop_active ON customers (shop_id, is_active);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_shop_phone_unique
+  ON customers (shop_id, phone)
+  WHERE phone IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_customers_shop_gstin_unique
+  ON customers (shop_id, gstin)
+  WHERE gstin IS NOT NULL;
+
 -- ── Categories ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS categories (
   id          UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
@@ -80,12 +103,16 @@ CREATE TABLE IF NOT EXISTS products (
   id             UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
   shop_id        UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
   name           TEXT NOT NULL,
+  local_name     TEXT,
   barcode        TEXT,
   brand          TEXT,
   category_id    UUID REFERENCES categories(id)  ON DELETE SET NULL,
   tags           TEXT[] DEFAULT '{}',
+  search_aliases TEXT[] DEFAULT '{}',
   hsn_code       TEXT,
   unit           TEXT DEFAULT 'pcs',
+  bill_name_mode TEXT NOT NULL DEFAULT 'english'
+                 CHECK (bill_name_mode IN ('english','local','both')),
 
   -- Pricing (all GST-inclusive)
   purchase_price DECIMAL(10,2) DEFAULT 0,
@@ -130,6 +157,7 @@ CREATE TABLE IF NOT EXISTS bills (
   date             DATE NOT NULL DEFAULT CURRENT_DATE,
 
   -- Customer
+  customer_id      UUID REFERENCES customers(id) ON DELETE SET NULL,
   customer_name    TEXT,
   customer_phone   TEXT,
   customer_gstin   TEXT,
@@ -160,6 +188,7 @@ CREATE TABLE IF NOT EXISTS bills (
 
 CREATE INDEX IF NOT EXISTS idx_bills_shop_date ON bills (shop_id, date);
 CREATE INDEX IF NOT EXISTS idx_bills_shop_type ON bills (shop_id, bill_type);
+CREATE INDEX IF NOT EXISTS idx_bills_shop_customer ON bills (shop_id, customer_id);
 
 -- ── Sales Bill Line Items ─────────────────────────────────────
 CREATE TABLE IF NOT EXISTS bill_items (
@@ -356,6 +385,7 @@ CREATE INDEX IF NOT EXISTS idx_owner_drawings_shop_date ON owner_drawings (shop_
 CREATE TABLE IF NOT EXISTS credit_accounts (
   id                UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
   shop_id           UUID NOT NULL REFERENCES shops(id) ON DELETE CASCADE,
+  customer_id       UUID REFERENCES customers(id) ON DELETE SET NULL,
   party_name        TEXT NOT NULL,
   phone             TEXT,
   relation_type     TEXT NOT NULL DEFAULT 'borrower'
@@ -382,6 +412,7 @@ CREATE TABLE IF NOT EXISTS credit_entries (
 );
 
 CREATE INDEX IF NOT EXISTS idx_credit_accounts_shop ON credit_accounts (shop_id, party_name);
+CREATE INDEX IF NOT EXISTS idx_credit_accounts_shop_customer ON credit_accounts (shop_id, customer_id);
 CREATE INDEX IF NOT EXISTS idx_credit_entries_shop_account ON credit_entries (shop_id, account_id, entry_date DESC);
 
 -- ============================================================
@@ -393,11 +424,13 @@ CREATE OR REPLACE FUNCTION fn_update_search_text()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
   NEW.search_text := lower(
-    COALESCE(NEW.name,'')    || ' ' ||
-    COALESCE(NEW.brand,'')   || ' ' ||
+    COALESCE(NEW.name,'') || ' ' ||
+    COALESCE(NEW.local_name,'') || ' ' ||
+    COALESCE(NEW.brand,'') || ' ' ||
     COALESCE(NEW.barcode,'') || ' ' ||
     COALESCE(NEW.hsn_code,'') || ' ' ||
-    array_to_string(COALESCE(NEW.tags,'{}'), ' ')
+    array_to_string(COALESCE(NEW.tags,'{}'), ' ') || ' ' ||
+    array_to_string(COALESCE(NEW.search_aliases,'{}'), ' ')
   );
   RETURN NEW;
 END;
@@ -405,7 +438,7 @@ $$;
 
 DROP TRIGGER IF EXISTS trg_product_search ON products;
 CREATE TRIGGER trg_product_search
-  BEFORE INSERT OR UPDATE OF name, brand, barcode, hsn_code, tags
+  BEFORE INSERT OR UPDATE OF name, local_name, brand, barcode, hsn_code, tags, search_aliases
   ON products FOR EACH ROW EXECUTE FUNCTION fn_update_search_text();
 
 -- ── 2. Adjust stock when bill item is inserted/deleted ───────
@@ -464,6 +497,10 @@ $$;
 DROP TRIGGER IF EXISTS trg_shops_updated ON shops;
 CREATE TRIGGER trg_shops_updated
   BEFORE UPDATE ON shops FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_customers_updated ON customers;
+CREATE TRIGGER trg_customers_updated
+  BEFORE UPDATE ON customers FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_credit_accounts_updated ON credit_accounts;
 CREATE TRIGGER trg_credit_accounts_updated
@@ -540,6 +577,7 @@ $$;
 ALTER TABLE shops               ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_shops          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE suppliers           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customers           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE categories          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE products            ENABLE ROW LEVEL SECURITY;
 ALTER TABLE bills               ENABLE ROW LEVEL SECURITY;
@@ -582,6 +620,11 @@ CREATE POLICY "user_shops_delete" ON user_shops FOR DELETE
 -- ── All shop-scoped tables: shared pattern ────────────────────
 -- suppliers
 CREATE POLICY "suppliers_all" ON suppliers FOR ALL
+  USING  (shop_id = ANY(auth_shop_ids()))
+  WITH CHECK (shop_id = ANY(auth_shop_ids()));
+
+-- customers
+CREATE POLICY "customers_all" ON customers FOR ALL
   USING  (shop_id = ANY(auth_shop_ids()))
   WITH CHECK (shop_id = ANY(auth_shop_ids()));
 

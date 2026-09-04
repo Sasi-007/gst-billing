@@ -43,7 +43,7 @@ export default function BillDetailsPage() {
 
         const { data: lineItems, error: itemsErr } = await supabase
           .from('bill_items')
-          .select('id,sl_no,product_name,hsn_code,quantity,unit,rate,gst_rate,gst_amount,total')
+          .select('id,sl_no,product_name,hsn_code,quantity,unit,mrp,rate,gst_rate,gst_amount,total')
           .eq('bill_id', id)
           .eq('shop_id', shop.id)
           .order('sl_no')
@@ -79,7 +79,20 @@ export default function BillDetailsPage() {
     )
   }
 
-  function handlePrint() {
+  async function getLatestShopForPrint() {
+    if (!shop?.id || !navigator.onLine) return shop
+
+    const { data, error: shopErr } = await supabase
+      .from('shops')
+      .select('*')
+      .eq('id', shop.id)
+      .single()
+    if (shopErr) throw shopErr
+
+    return { ...shop, ...data }
+  }
+
+  async function handlePrint() {
     const gstBreakdown = {}
     for (const it of items) {
       const rate = String(it.gst_rate || 0)
@@ -88,10 +101,18 @@ export default function BillDetailsPage() {
       gstBreakdown[rate].gst += Number(it.gst_amount || 0)
     }
 
+    let printShop
+    try {
+      printShop = await getLatestShopForPrint()
+    } catch (err) {
+      setError(err.message || 'Failed to load print settings')
+      return
+    }
+
     setPrintData({
       bill,
       items,
-      shop,
+      shop: printShop,
       totals: {
         subtotal: Number(bill.subtotal || 0),
         gstAmount: Number(bill.gst_amount || 0),

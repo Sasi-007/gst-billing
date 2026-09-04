@@ -75,6 +75,16 @@ kbd {
 /* ── Print layout ───────────────────────────────── */
 
 @media print {
+  @page thermalReceipt {
+    size: 80mm auto;
+    margin: 2mm;
+  }
+
+  @page standardInvoice {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+
   * {
     box-sizing: border-box;
   }
@@ -91,14 +101,188 @@ kbd {
     background: white;
     margin: 0;
     padding: 0;
-    font-family: Arial, sans-serif;
-    font-size: 12px;
+    font-family: "Noto Sans Tamil", "Nirmala UI", "Arial Unicode MS", Arial, sans-serif;
+    font-size: 10px;
     color: #000;
+  }
+
+  .thermal-receipt {
+    page: thermalReceipt;
+    width: 76mm;
+    margin: 0 auto;
+    padding: 0;
+    font-size: 10px;
+    line-height: 1.22;
+    color: #000;
+  }
+
+  .thermal-receipt .tc {
+    text-align: center;
+  }
+
+  .thermal-receipt .tr {
+    text-align: right;
+  }
+
+  .thermal-receipt .tr-header {
+    text-align: center;
+    border-bottom: 1px dashed #000;
+    padding-bottom: 3px;
+    margin-bottom: 2px;
+  }
+
+  .thermal-receipt .tr-header h1 {
+    margin: 0 0 1px;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: .2px;
+    text-transform: uppercase;
+  }
+
+  .thermal-receipt .tr-header p {
+    margin: 0;
+    font-size: 8.5px;
+    line-height: 1.15;
+  }
+
+  .thermal-receipt .tr-title {
+    display: inline-block;
+    margin-top: 1px;
+    font-weight: 800;
+    font-size: 10px;
+    letter-spacing: .4px;
+  }
+
+  .thermal-receipt .tr-meta {
+    display: flex;
+    justify-content: space-between;
+    gap: 6px;
+    border-bottom: 1px dashed #000;
+    padding-bottom: 2px;
+    margin-bottom: 2px;
+  }
+
+  .thermal-receipt .tr-meta > div:last-child {
+    text-align: right;
+  }
+
+  .thermal-receipt .tr-meta p,
+  .thermal-receipt .tr-customer p,
+  .thermal-receipt .tr-footer p {
+    margin: 1px 0;
+  }
+
+  .thermal-receipt .tr-customer {
+    border-bottom: 1px dashed #000;
+    padding-bottom: 4px;
+    margin-bottom: 4px;
+  }
+
+  .thermal-receipt .tr-items,
+  .thermal-receipt .tr-gst table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .thermal-receipt .tr-items thead,
+  .thermal-receipt .tr-gst thead {
+    border-bottom: 1px dashed #000;
+  }
+
+  .thermal-receipt .tr-items th,
+  .thermal-receipt .tr-items td {
+    padding: 2px 2px;
+    vertical-align: top;
+    font-size: 10px;
+  }
+
+  .thermal-receipt .tr-items th:nth-child(1),
+  .thermal-receipt .tr-items td:nth-child(1) {
+    width: 8mm;
+  }
+
+  .thermal-receipt .tr-items th:nth-child(2),
+  .thermal-receipt .tr-items td:nth-child(2) {
+    width: 31mm;
+    word-break: break-word;
+  }
+
+  .thermal-receipt .tr-items th:nth-child(3),
+  .thermal-receipt .tr-items td:nth-child(3) {
+    width: 10mm;
+  }
+
+  .thermal-receipt .tr-items th:nth-child(4),
+  .thermal-receipt .tr-items td:nth-child(4),
+  .thermal-receipt .tr-items th:nth-child(5),
+  .thermal-receipt .tr-items td:nth-child(5) {
+    width: 13mm;
+  }
+
+  .thermal-receipt .tr-total-row {
+    display: flex;
+    justify-content: space-between;
+    border-top: 1px dashed #000;
+    padding-top: 4px;
+    margin-top: 4px;
+    font-weight: 700;
+  }
+
+  .thermal-receipt .tr-bill-amount {
+    text-align: center;
+    font-size: 18px;
+    font-weight: 900;
+    margin: 5px 0;
+  }
+
+  .thermal-receipt .tr-savings {
+    font-size: 10px;
+    font-weight: 700;
+    text-align: center;
+    border-bottom: 1px dashed #000;
+    padding-top: 2px;
+    padding-bottom: 4px;
+    margin-bottom: 4px;
+  }
+
+  .thermal-receipt .tr-section-title {
+    margin: 4px 0 2px;
+    font-weight: 800;
+  }
+
+  .thermal-receipt .tr-gst table {
+    border-top: 1px dashed #000;
+    border-bottom: 1px dashed #000;
+    margin-bottom: 4px;
+  }
+
+  .thermal-receipt .tr-gst th,
+  .thermal-receipt .tr-gst td {
+    padding: 2px 1px;
+    text-align: right;
+    font-size: 9px;
+  }
+
+  .thermal-receipt .tr-footer {
+    padding-top: 4px;
+    text-align: center;
+    font-weight: 700;
+  }
+
+  .thermal-receipt .tr-payment-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 2px;
+    font-size: 12px;
+    font-weight: 800;
+    text-align: left;
   }
 
   /* ── Invoice wrapper ── */
 
   .invoice {
+    page: standardInvoice;
     width: 100%;
     max-width: 780px;
     margin: 0 auto;
@@ -282,8 +466,4 @@ kbd {
     font-size: 10px;
   }
 
-  @page {
-    margin: 10mm;
-    size: A4 portrait;
-  }
 }

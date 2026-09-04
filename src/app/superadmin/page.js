@@ -51,6 +51,7 @@ export default function SuperadminPage() {
   const [tab,     setTab]     = useState('shops')
   const [shops,   setShops]   = useState([])
   const [users,   setUsers]   = useState([])
+  const [nameSuggestions, setNameSuggestions] = useState([])
   const [loading, setLoading] = useState(false)
   const [error,   setError]   = useState('')
   const [authBlocked, setAuthBlocked] = useState(false)
@@ -61,6 +62,15 @@ export default function SuperadminPage() {
   const [newEmail,    setNewEmail]    = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [creating,    setCreating]    = useState(false)
+  const [suggestionForm, setSuggestionForm] = useState({
+    english_name: '',
+    local_name: '',
+    aliases: '',
+    category: '',
+    language: 'ta',
+    is_active: true,
+  })
+  const [savingSuggestion, setSavingSuggestion] = useState(false)
 
   const isSuperadmin = user && SUPERADMIN_EMAILS.split(',').map(e => e.trim()).includes(user.email)
 
@@ -72,9 +82,12 @@ export default function SuperadminPage() {
       if (tab === 'shops') {
         const data = await adminFetch('/api/admin?resource=shops')
         setShops(data.shops || [])
-      } else {
+      } else if (tab === 'users') {
         const data = await adminFetch('/api/admin?resource=users')
         setUsers(data.users || [])
+      } else if (tab === 'name-suggestions') {
+        const data = await adminFetch('/api/admin?resource=name-suggestions')
+        setNameSuggestions(data.suggestions || [])
       }
     } catch (err) {
       if (
@@ -109,6 +122,22 @@ export default function SuperadminPage() {
     } catch (err) { setError(err.message) }
   }
 
+  async function toggleShopModule(shopId, module, currentState) {
+    try {
+      await adminFetch('/api/admin', {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'toggle_shop_module',
+          shop_id: shopId,
+          module,
+          enabled: !currentState,
+        }),
+      })
+      showToast(`${module === 'ecommerce' ? 'Online store' : 'Delivery'} ${currentState ? 'disabled' : 'enabled'}`)
+      loadData()
+    } catch (err) { setError(err.message) }
+  }
+
   async function createUser(e) {
     e.preventDefault()
     if (!newEmail || !newPassword) return
@@ -123,6 +152,49 @@ export default function SuperadminPage() {
       loadData()
     } catch (err) { setError(err.message) }
     finally { setCreating(false) }
+  }
+
+  function editSuggestion(suggestion) {
+    setSuggestionForm({
+      id: suggestion.id,
+      english_name: suggestion.english_name || '',
+      local_name: suggestion.local_name || '',
+      aliases: (suggestion.aliases || []).join(', '),
+      category: suggestion.category || '',
+      language: suggestion.language || 'ta',
+      is_active: suggestion.is_active !== false,
+    })
+    setTab('name-suggestions')
+  }
+
+  async function saveNameSuggestion(e) {
+    e.preventDefault()
+    setSavingSuggestion(true)
+    setError('')
+
+    try {
+      await adminFetch('/api/admin', {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'save_name_suggestion',
+          ...suggestionForm,
+        }),
+      })
+      showToast('Name suggestion saved')
+      setSuggestionForm({
+        english_name: '',
+        local_name: '',
+        aliases: '',
+        category: '',
+        language: 'ta',
+        is_active: true,
+      })
+      loadData()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSavingSuggestion(false)
+    }
   }
 
   async function resetShopData(shop) {
@@ -210,12 +282,12 @@ export default function SuperadminPage() {
 
       {/* Tabs */}
       <div className="flex gap-1 mb-4">
-        {['shops','users','new-user'].map(t => (
+        {['shops','users','name-suggestions','new-user'].map(t => (
           <button key={t} onClick={() => setTab(t)}
             className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors capitalize ${
               tab === t ? 'bg-blue-600 text-white' : 'bg-white border text-gray-600 hover:bg-gray-50'
             }`}>
-            {t === 'new-user' ? '+ Create User' : t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === 'new-user' ? '+ Create User' : t === 'name-suggestions' ? 'Name Suggestions' : t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </div>
@@ -244,7 +316,7 @@ export default function SuperadminPage() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-gray-50 text-xs text-gray-500 border-b">
-                    {['Shop Name','Owner','City','GSTIN','Bills','Plan','Status',''].map(h => (
+                    {['Shop Name','Owner','City','GSTIN','Bills','Plan','Modules','Status',''].map(h => (
                       <th key={h} className="px-3 py-2 text-left">{h}</th>
                     ))}
                   </tr>
@@ -261,6 +333,28 @@ export default function SuperadminPage() {
                         <span className={`px-1.5 py-0.5 rounded text-xs ${
                           s.plan === 'pro' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'
                         }`}>{s.plan}</span>
+                      </td>
+                      <td className="px-3 py-2">
+                        <div className="flex flex-wrap gap-1">
+                          <button
+                            onClick={() => toggleShopModule(s.id, 'ecommerce', s.ecommerce_enabled)}
+                            className={`rounded px-1.5 py-0.5 text-xs ${
+                              s.ecommerce_enabled ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500'
+                            }`}
+                            title="Enable online storefront for this shop"
+                          >
+                            Online {s.ecommerce_enabled ? 'On' : 'Off'}
+                          </button>
+                          <button
+                            onClick={() => toggleShopModule(s.id, 'delivery', s.delivery_enabled)}
+                            className={`rounded px-1.5 py-0.5 text-xs ${
+                              s.delivery_enabled ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-500'
+                            }`}
+                            title="Enable delivery workflow for this shop"
+                          >
+                            Delivery {s.delivery_enabled ? 'On' : 'Off'}
+                          </button>
+                        </div>
                       </td>
                       <td className="px-3 py-2">
                         <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${
@@ -335,6 +429,127 @@ export default function SuperadminPage() {
             </table>
           )}
           <div className="px-3 py-2 text-xs text-gray-400">{users.length} users total</div>
+        </div>
+      )}
+
+      {tab === 'name-suggestions' && (
+        <div className="grid gap-4 lg:grid-cols-[420px_1fr]">
+          <form onSubmit={saveNameSuggestion} className="bg-white rounded-xl border p-5 space-y-3">
+            <div>
+              <h2 className="font-semibold">{suggestionForm.id ? 'Edit suggestion' : 'Add suggestion'}</h2>
+              <p className="text-xs text-gray-500 mt-1">These global suggestions are shared by all shops. Shops can also save their own names from product master.</p>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">English / Tanglish name *</label>
+              <input
+                required
+                value={suggestionForm.english_name}
+                onChange={e => setSuggestionForm(f => ({ ...f, english_name: e.target.value }))}
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="e.g. Toor Dal"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Tamil / Local name *</label>
+              <input
+                required
+                value={suggestionForm.local_name}
+                onChange={e => setSuggestionForm(f => ({ ...f, local_name: e.target.value }))}
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="e.g. துவரம் பருப்பு"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Aliases</label>
+              <textarea
+                value={suggestionForm.aliases}
+                onChange={e => setSuggestionForm(f => ({ ...f, aliases: e.target.value }))}
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                rows={3}
+                placeholder="toor dal, toor dall, thuvaram paruppu"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
+                <input
+                  value={suggestionForm.category}
+                  onChange={e => setSuggestionForm(f => ({ ...f, category: e.target.value }))}
+                  className="w-full border rounded-lg px-3 py-2 text-sm"
+                  placeholder="Dal"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 mb-1">Language</label>
+                <input
+                  value={suggestionForm.language}
+                  onChange={e => setSuggestionForm(f => ({ ...f, language: e.target.value }))}
+                  className="w-full border rounded-lg px-3 py-2 text-sm"
+                  placeholder="ta"
+                />
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={suggestionForm.is_active}
+                onChange={e => setSuggestionForm(f => ({ ...f, is_active: e.target.checked }))}
+              />
+              Active
+            </label>
+            <div className="flex gap-2">
+              <button type="submit" disabled={savingSuggestion}
+                className="flex-1 rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+                {savingSuggestion ? 'Saving...' : 'Save suggestion'}
+              </button>
+              {suggestionForm.id && (
+                <button type="button" onClick={() => setSuggestionForm({
+                  english_name: '', local_name: '', aliases: '', category: '', language: 'ta', is_active: true,
+                })}
+                  className="rounded-lg border px-4 py-2 text-sm font-medium text-gray-700">
+                  Clear
+                </button>
+              )}
+            </div>
+          </form>
+
+          <div className="bg-white rounded-xl border overflow-x-auto">
+            {loading ? (
+              <div className="text-center text-gray-400 py-8">Loading…</div>
+            ) : (
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-gray-50 text-xs text-gray-500 border-b">
+                    {['English','Tamil / Local','Aliases','Category','Status',''].map(h => (
+                      <th key={h} className="px-3 py-2 text-left">{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {nameSuggestions.map(s => (
+                    <tr key={s.id} className="border-b hover:bg-gray-50">
+                      <td className="px-3 py-2 font-medium">{s.english_name}</td>
+                      <td className="px-3 py-2">{s.local_name}</td>
+                      <td className="px-3 py-2 text-xs text-gray-500 max-w-xs">{(s.aliases || []).join(', ') || '—'}</td>
+                      <td className="px-3 py-2 text-xs text-gray-500">{s.category || '—'}</td>
+                      <td className="px-3 py-2">
+                        <span className={`rounded px-1.5 py-0.5 text-xs ${s.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                          {s.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        <button onClick={() => editSuggestion(s)}
+                          className="text-xs text-blue-600 hover:underline">
+                          Edit
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <div className="px-3 py-2 text-xs text-gray-400">{nameSuggestions.length} suggestions</div>
+          </div>
         </div>
       )}
 

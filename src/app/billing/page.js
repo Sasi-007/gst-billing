@@ -1,15 +1,25 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
 import { todayStr } from '@/lib/finance'
+import {
+  ensureCustomerRecord,
+  fetchCustomerDirectory,
+  isMissingCustomerSchemaError,
+  isUuidLike,
+  matchesCustomerSearch,
+  normalizeCustomerPhone,
+} from '@/lib/customers'
 import ProductSearch from '@/components/ProductSearch'
 import PrintTemplate from '@/components/PrintTemplate'
 import { useShop } from '@/context/ShopContext'
+import { readPageCache, writePageCache } from '@/lib/pageCache'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
   applyLocalStockDelta,
   clearBillingDraft,
@@ -22,6 +32,7 @@ import {
   saveProductSnapshot,
   updatePendingBill,
 } from '@/lib/offlineBilling'
+import { getBillProductName } from '@/lib/productNames'
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit', 'Cheque']
 const AUTO_INVOICE_CREDIT_TAG_PREFIX = '[AUTO-INVOICE:'
@@ -49,6 +60,10 @@ function emptyItem() {
     discount_amount:0,
     total:          0,
   }
+}
+
+function emptyCustomer() {
+  return { id: '', name: '', phone: '', gstin: '', address: '' }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -94,10 +109,17 @@ function getBillProfitSummary(items) {
 function normalizePaidAmount(paidAmtValue, totalsTotal, payModeValue) {
   const parsedPaid = parseFloat(paidAmtValue)
   const hasPaidInput = paidAmtValue !== '' && Number.isFinite(parsedPaid)
-  const normalizedPayMode = String(payModeValue || '').toLowerCase()
+  const normalizedPayMode = normalizePaymentModeForDb(payModeValue)
   const defaultPaid = normalizedPayMode === 'credit' ? 0 : totalsTotal
   const resolvedPaid = hasPaidInput ? parsedPaid : defaultPaid
   return Math.max(0, Number(resolvedPaid || 0))
+}
+
+function normalizePaymentModeForDb(value, fallback = 'cash') {
+  const mode = String(value || '').trim().toLowerCase()
+  if (!mode) return fallback
+  if (mode === 'gpay') return 'upi'
+  return mode
 }
 
 function getBillPrefix(shop, billType) {
@@ -120,12 +142,49 @@ function isNetworkError(error) {
 }
 
 function normalizePhone(value) {
-  const digitsOnly = String(value || '').replace(/\D/g, '')
-  return digitsOnly.length === 10 ? digitsOnly : ''
+  return normalizeCustomerPhone(value)
 }
 
 function getAutoInvoiceCreditTag(billId) {
   return `${AUTO_INVOICE_CREDIT_TAG_PREFIX}${billId}]`
+}
+
+function extractAutoInvoiceIdFromReferenceNote(referenceNote) {
+  const note = String(referenceNote || '')
+  const start = note.indexOf(AUTO_INVOICE_CREDIT_TAG_PREFIX)
+  if (start < 0) return ''
+  const end = note.indexOf(']', start)
+  if (end < 0) return ''
+  return note.slice(start + AUTO_INVOICE_CREDIT_TAG_PREFIX.length, end).trim()
+}
+
+async function getLatestShopForPrint(shop) {
+  if (!shop?.id || !navigator.onLine) return shop
+
+  const { data, error } = await supabase
+    .from('shops')
+    .select('*')
+    .eq('id', shop.id)
+    .single()
+  if (error) throw error
+
+  return { ...shop, ...data }
+}
+
+function isValidCreditPhone(value) {
+  return /^[6-9]\d{9}$/.test(normalizePhone(value))
+}
+
+function matchesHistoryBillSearch(bill, searchTerm) {
+  const term = String(searchTerm || '').trim().toLowerCase()
+  if (!term) return true
+
+  return [
+    bill.bill_no,
+    bill.customer_name,
+    bill.customer_phone,
+    bill.customer_gstin,
+  ].some((value) => String(value || '').toLowerCase().includes(term))
 }
 
 async function removeAutoInvoiceCreditEntries(shopId, billId) {
@@ -181,50 +240,192 @@ async function removeAutoInvoiceCreditEntries(shopId, billId) {
   if (removeAccountsErr) throw removeAccountsErr
 }
 
-async function ensureBorrowerCreditAccount(shopId, customerName, customerPhone, billNo) {
+async function findLinkedBorrowerAccountForBill(shopId, billId) {
+  if (!shopId || !billId) return ''
+  const tag = getAutoInvoiceCreditTag(billId)
+  const { data, error } = await supabase
+    .from('credit_entries')
+    .select('account_id')
+    .eq('shop_id', shopId)
+    .eq('direction', 'increase')
+    .ilike('reference_note', `%${tag}%`)
+    .limit(1)
+  if (error) throw error
+  return data?.[0]?.account_id || ''
+}
+
+async function isSharedAutoInvoiceAccount(shopId, accountId, billId) {
+  if (!shopId || !accountId) return false
+  const { data, error } = await supabase
+    .from('credit_entries')
+    .select('reference_note')
+    .eq('shop_id', shopId)
+    .eq('account_id', accountId)
+    .eq('direction', 'increase')
+    .ilike('reference_note', `%${AUTO_INVOICE_CREDIT_TAG_PREFIX}%`)
+  if (error) throw error
+
+  const taggedBillIds = [...new Set((data || [])
+    .map((entry) => extractAutoInvoiceIdFromReferenceNote(entry.reference_note))
+    .filter(Boolean))]
+  if (!billId) return taggedBillIds.length > 1
+  return taggedBillIds.some((taggedBillId) => taggedBillId !== billId)
+}
+
+async function updateBillWithCustomerCompatibility(shopId, billId, payload) {
+  const { error } = await supabase
+    .from('bills')
+    .update(payload)
+    .eq('id', billId)
+    .eq('shop_id', shopId)
+  if (!error) return
+  if (!isMissingCustomerSchemaError(error)) throw error
+
+  const { customer_id, ...legacyPayload } = payload
+  const { error: retryError } = await supabase
+    .from('bills')
+    .update(legacyPayload)
+    .eq('id', billId)
+    .eq('shop_id', shopId)
+  if (retryError) throw retryError
+}
+
+async function insertBillWithCustomerCompatibility(payload) {
+  const { data, error } = await supabase
+    .from('bills')
+    .insert(payload)
+    .select()
+    .single()
+  if (!error) return data
+  if (!isMissingCustomerSchemaError(error)) throw error
+
+  const { customer_id, ...legacyPayload } = payload
+  const { data: legacyData, error: legacyError } = await supabase
+    .from('bills')
+    .insert(legacyPayload)
+    .select()
+    .single()
+  if (legacyError) throw legacyError
+  return legacyData
+}
+
+async function reactivateBorrowerCreditAccount(shopId, accountId, options = {}) {
+  if (!shopId || !accountId) return accountId
+  const { customerId, customerName, customerPhone } = options
+  const payload = { is_active: true }
+  const normalizedName = String(customerName || '').trim()
   const normalizedPhone = normalizePhone(customerPhone)
+
+  if (normalizedName) payload.party_name = normalizedName
+  if (normalizedPhone) payload.phone = normalizedPhone
+  if (isUuidLike(customerId)) payload.customer_id = customerId
+
+  const { error } = await supabase
+    .from('credit_accounts')
+    .update(payload)
+    .eq('shop_id', shopId)
+    .eq('id', accountId)
+  if (!error) return accountId
+  if (!isMissingCustomerSchemaError(error)) throw error
+
+  const { customer_id, ...legacyPayload } = payload
+  const { error: retryError } = await supabase
+    .from('credit_accounts')
+    .update(legacyPayload)
+    .eq('shop_id', shopId)
+    .eq('id', accountId)
+  if (retryError) throw retryError
+  return accountId
+}
+
+async function createBorrowerCreditAccountWithCompatibility(payload) {
+  const { data, error } = await supabase
+    .from('credit_accounts')
+    .insert(payload)
+    .select('id')
+    .single()
+  if (!error) return data
+  if (!isMissingCustomerSchemaError(error)) throw error
+
+  const { customer_id, ...legacyPayload } = payload
+  const { data: legacyData, error: legacyError } = await supabase
+    .from('credit_accounts')
+    .insert(legacyPayload)
+    .select('id')
+    .single()
+  if (legacyError) throw legacyError
+  return legacyData
+}
+
+async function ensureBorrowerCreditAccount(shopId, customerName, customerPhone, billNo, options = {}) {
+  const { billId, customerId } = options
+  const normalizedName = String(customerName || '').trim()
+  const normalizedPhone = normalizePhone(customerPhone)
+  if (billId) {
+    const linkedAccountId = await findLinkedBorrowerAccountForBill(shopId, billId)
+    if (linkedAccountId) {
+      const shouldAvoidSharedAccount = !normalizedPhone && await isSharedAutoInvoiceAccount(shopId, linkedAccountId, billId)
+      if (!shouldAvoidSharedAccount) {
+        return reactivateBorrowerCreditAccount(shopId, linkedAccountId, {
+          customerId,
+          customerName: normalizedName,
+          customerPhone: normalizedPhone,
+        })
+      }
+    }
+  }
+
+  if (isUuidLike(customerId)) {
+    const { data: byCustomerId, error: byCustomerErr } = await supabase
+      .from('credit_accounts')
+      .select('id')
+      .eq('shop_id', shopId)
+      .eq('relation_type', 'borrower')
+      .eq('customer_id', customerId)
+      .limit(1)
+    if (!String(byCustomerErr?.message || '').toLowerCase().includes('customer_id')) {
+      if (byCustomerErr) throw byCustomerErr
+      if (byCustomerId?.length) {
+        return reactivateBorrowerCreditAccount(shopId, byCustomerId[0].id, {
+          customerId,
+          customerName: normalizedName,
+          customerPhone: normalizedPhone,
+        })
+      }
+    }
+  }
+
   if (normalizedPhone) {
     const { data: byPhone, error: byPhoneErr } = await supabase
       .from('credit_accounts')
-      .select('id')
+      .select('*')
       .eq('shop_id', shopId)
       .eq('relation_type', 'borrower')
       .eq('phone', normalizedPhone)
       .limit(1)
     if (byPhoneErr) throw byPhoneErr
-    if (byPhone?.length) return byPhone[0].id
-  }
-
-  const normalizedName = String(customerName || '').trim()
-  if (normalizedName) {
-    const { data: byName, error: byNameErr } = await supabase
-      .from('credit_accounts')
-      .select('id')
-      .eq('shop_id', shopId)
-      .eq('relation_type', 'borrower')
-      .ilike('party_name', normalizedName)
-      .limit(1)
-    if (byNameErr) throw byNameErr
-    if (byName?.length) return byName[0].id
+    if (byPhone?.length) {
+      return reactivateBorrowerCreditAccount(shopId, byPhone[0].id, {
+        customerId,
+        customerName: normalizedName,
+        customerPhone: normalizedPhone,
+      })
+    }
   }
 
   const autoPartyName = normalizedName || (normalizedPhone ? `Customer ${normalizedPhone}` : `Walk-in (${billNo || 'Invoice'})`)
-  const { data: createdAccount, error: createErr } = await supabase
-    .from('credit_accounts')
-    .insert({
-      shop_id: shopId,
-      party_name: autoPartyName,
-      phone: normalizedPhone || null,
-      relation_type: 'borrower',
-      settlement_cycle: 'daily',
-      settlement_day: null,
-      opening_balance: 0,
-      notes: AUTO_INVOICE_CREDIT_NOTE,
-      is_active: true,
-    })
-    .select('id')
-    .single()
-  if (createErr) throw createErr
+  const createdAccount = await createBorrowerCreditAccountWithCompatibility({
+    shop_id: shopId,
+    party_name: autoPartyName,
+    phone: normalizedPhone || null,
+    ...(isUuidLike(customerId) ? { customer_id: customerId } : {}),
+    relation_type: 'borrower',
+    settlement_cycle: 'daily',
+    settlement_day: null,
+    opening_balance: 0,
+    notes: AUTO_INVOICE_CREDIT_NOTE,
+    is_active: true,
+  })
   return createdAccount.id
 }
 
@@ -233,6 +434,7 @@ async function syncInvoiceCreditEntry({
   billId,
   billNo,
   billDate,
+  customerId,
   customerName,
   customerPhone,
   payMode,
@@ -250,7 +452,7 @@ async function syncInvoiceCreditEntry({
   const shouldTrack = dueAmount > 0 || normalizedPayMode === 'credit'
   if (!shouldTrack || dueAmount <= 0) return
 
-  const accountId = await ensureBorrowerCreditAccount(shopId, customerName, customerPhone, billNo)
+  const accountId = await ensureBorrowerCreditAccount(shopId, customerName, customerPhone, billNo, { billId, customerId })
   const tag = getAutoInvoiceCreditTag(billId)
   const referenceNote = `Invoice ${billNo || ''} due ${fmt(dueAmount)} ${tag}`.trim()
 
@@ -268,15 +470,21 @@ async function syncInvoiceCreditEntry({
 }
 
 export default function BillingPage() {
+  const router = useRouter()
+  const pathname = usePathname()
   const searchParams = useSearchParams()
   const [items,       setItems]       = useState([emptyItem()])
-  const [customer,    setCustomer]    = useState({ name:'', phone:'', gstin:'', address:'' })
+  const [customer,    setCustomer]    = useState(emptyCustomer())
   const [billDate,    setBillDate]    = useState(todayStr())
   const [billNo,      setBillNo]      = useState('')
   const [billType,    setBillType]    = useState('invoice')
   const [payMode,     setPayMode]     = useState('Cash')
   const [paidAmt,     setPaidAmt]     = useState('')
   const [notes,       setNotes]       = useState('')
+  const [customerPickerOpen, setCustomerPickerOpen] = useState(false)
+  const [customerPickerSearch, setCustomerPickerSearch] = useState('')
+  const [customerDirectory, setCustomerDirectory] = useState([])
+  const [customerDirectoryLoading, setCustomerDirectoryLoading] = useState(false)
 
   const [searchOpen,  setSearchOpen]  = useState(false)
   const [activeRow,   setActiveRow]   = useState(0)
@@ -284,15 +492,26 @@ export default function BillingPage() {
   const [saving,      setSaving]      = useState(false)
   const [toast,       setToast]       = useState(null)
   const [mounted,     setMounted]     = useState(false)
-  const [view,        setView]        = useState('form') // 'form' | 'history'
+  const [view,        setView]        = useState(
+    searchParams.get('view') === 'history' ? 'history' : 'form'
+  ) // 'form' | 'history'
   const [editBillId,   setEditBillId] = useState(null)
   const [historyBills, setHistoryBills] = useState([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historySearch, setHistorySearch] = useState('')
+  const [historyPaymentDrafts, setHistoryPaymentDrafts] = useState({})
+  const [historySelectedBillIds, setHistorySelectedBillIds] = useState([])
+  const [historyDeleting, setHistoryDeleting] = useState(false)
+  const [historyUpdatingBillId, setHistoryUpdatingBillId] = useState(null)
+  const [historyPrintingBillId, setHistoryPrintingBillId] = useState(null)
   const [conversionSource, setConversionSource] = useState(null)
   const [isOffline, setIsOffline] = useState(false)
+  const [historyRefreshKey, setHistoryRefreshKey] = useState(0)
   const draftLoadedRef = useRef(false)
   const syncInProgressRef = useRef(false)
+  const customerParamAppliedRef = useRef('')
+  const debouncedCustomerPickerSearch = useDebouncedValue(customerPickerSearch, 200)
+  const debouncedHistorySearch = useDebouncedValue(historySearch, 250)
 
   useEffect(() => setMounted(true), [])
 
@@ -308,6 +527,89 @@ export default function BillingPage() {
   }, [])
 
   const { shop } = useShop()
+  const customerDirectoryCacheKey = shop?.id ? `customers-directory:${shop.id}` : ''
+
+  const setViewMode = useCallback((nextView) => {
+    setView(nextView)
+    const params = new URLSearchParams(searchParams.toString())
+    if (nextView === 'history') {
+      params.set('view', 'history')
+    } else {
+      params.delete('view')
+    }
+    const query = params.toString()
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
+  }, [pathname, router, searchParams])
+
+  const loadCustomerDirectory = useCallback(async ({ preferCache = true, silent = false } = {}) => {
+    if (!shop?.id) {
+      setCustomerDirectory([])
+      setCustomerDirectoryLoading(false)
+      return []
+    }
+
+    if (preferCache) {
+      const cached = readPageCache(customerDirectoryCacheKey, 5 * 60 * 1000)
+      if (cached?.customers) {
+        setCustomerDirectory(cached.customers)
+        setCustomerDirectoryLoading(false)
+      } else {
+        setCustomerDirectoryLoading(true)
+      }
+    } else {
+      setCustomerDirectoryLoading(true)
+    }
+
+    try {
+      const nextCustomers = await fetchCustomerDirectory(shop.id)
+      setCustomerDirectory(nextCustomers)
+      writePageCache(customerDirectoryCacheKey, { customers: nextCustomers })
+      return nextCustomers
+    } catch (error) {
+      const fallback = readPageCache(customerDirectoryCacheKey, 5 * 60 * 1000)
+      if (fallback?.customers) {
+        setCustomerDirectory(fallback.customers)
+        return fallback.customers
+      }
+      if (!silent) {
+        showToast('Customer load failed: ' + (error?.message || 'Unknown error'), 'error')
+      }
+      return []
+    } finally {
+      setCustomerDirectoryLoading(false)
+    }
+  }, [customerDirectoryCacheKey, shop?.id])
+
+  useEffect(() => {
+    const requestedView = searchParams.get('view') === 'history' ? 'history' : 'form'
+    setView((prevView) => (prevView === requestedView ? prevView : requestedView))
+  }, [searchParams])
+
+  useEffect(() => {
+    loadCustomerDirectory({ preferCache: true, silent: true })
+  }, [loadCustomerDirectory])
+
+  useEffect(() => {
+    if (!shop?.id || isOffline) return
+    const channel = supabase.channel(`billing-live:${shop.id}`)
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'customers', filter: `shop_id=eq.${shop.id}` }, () => {
+      loadCustomerDirectory({ preferCache: false, silent: true })
+      setHistoryRefreshKey((current) => current + 1)
+    })
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'bills', filter: `shop_id=eq.${shop.id}` }, () => {
+      loadCustomerDirectory({ preferCache: false, silent: true })
+      setHistoryRefreshKey((current) => current + 1)
+    })
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'credit_accounts', filter: `shop_id=eq.${shop.id}` }, () => {
+      loadCustomerDirectory({ preferCache: false, silent: true })
+      if (view === 'history') setHistoryRefreshKey((current) => current + 1)
+    })
+    channel.on('postgres_changes', { event: '*', schema: 'public', table: 'credit_entries', filter: `shop_id=eq.${shop.id}` }, () => {
+      if (view === 'history') setHistoryRefreshKey((current) => current + 1)
+    })
+    channel.subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [isOffline, loadCustomerDirectory, shop?.id, view])
 
   useEffect(() => {
     if (!shop?.id) return
@@ -322,7 +624,7 @@ export default function BillingPage() {
         const draft = await loadBillingDraft(shop.id)
         if (cancelled || !draft) return
         setItems(draft.items?.length ? draft.items : [emptyItem()])
-        setCustomer(draft.customer || { name:'', phone:'', gstin:'', address:'' })
+        setCustomer({ ...emptyCustomer(), ...(draft.customer || {}) })
         setBillDate(draft.billDate || todayStr())
         setBillNo(draft.billNo || '')
         setBillType(draft.billType || 'invoice')
@@ -366,7 +668,7 @@ export default function BillingPage() {
       try {
         const { data, error } = await supabase
           .from('products')
-          .select('id,name,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,search_text')
+          .select('id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,search_text')
           .eq('shop_id', shop.id)
           .eq('is_active', true)
         if (error) return
@@ -396,6 +698,22 @@ export default function BillingPage() {
 
           const billRow = { ...record.billRow }
           const lineItems = record.lineItems || []
+          if (!billRow.customer_id) {
+            const ensuredCustomer = await ensureCustomerRecord(shop.id, {
+              id: '',
+              name: billRow.customer_name,
+              phone: billRow.customer_phone,
+              gstin: billRow.customer_gstin,
+              address: billRow.customer_address,
+            })
+            if (ensuredCustomer?.id) {
+              billRow.customer_id = ensuredCustomer.id
+              billRow.customer_name = ensuredCustomer.name || billRow.customer_name
+              billRow.customer_phone = ensuredCustomer.phone || billRow.customer_phone
+              billRow.customer_gstin = ensuredCustomer.gstin || billRow.customer_gstin
+              billRow.customer_address = ensuredCustomer.address || billRow.customer_address
+            }
+          }
           if (!billRow.bill_no || String(billRow.bill_no).startsWith('OFF-')) {
             const prefix = getBillPrefix(shop, billRow.bill_type)
             try {
@@ -410,12 +728,7 @@ export default function BillingPage() {
             }
           }
 
-          const { data: saved, error: billErr } = await supabase
-            .from('bills')
-            .insert(billRow)
-            .select()
-            .single()
-          if (billErr) throw billErr
+          const saved = await insertBillWithCustomerCompatibility(billRow)
 
           const syncedLineItems = lineItems.map((item, index) => ({
             shop_id: shop.id,
@@ -446,6 +759,7 @@ export default function BillingPage() {
               billId: saved.id,
               billNo: billRow.bill_no,
               billDate: billRow.date,
+              customerId: billRow.customer_id,
               customerName: billRow.customer_name,
               customerPhone: billRow.customer_phone,
               payMode: billRow.payment_mode,
@@ -494,22 +808,157 @@ export default function BillingPage() {
   useEffect(() => {
     if (view !== 'history' || !shop?.id) return
     setHistoryLoading(true)
-    let q = supabase
-      .from('bills')
-      .select('id,bill_no,date,customer_name,total,payment_mode,payment_status,bill_type')
-      .eq('shop_id', shop.id)
-      .eq('bill_type', billType)
-      .order('created_at', { ascending: false })
-      .limit(50)
-    const term = historySearch.trim()
-    if (term) {
-      q = q.or(`bill_no.ilike.%${term}%,customer_name.ilike.%${term}%`)
-    }
-    q.then(({ data }) => {
-        setHistoryBills(data || [])
+
+    let cancelled = false
+    async function loadHistoryBills() {
+      let q = supabase
+        .from('bills')
+        .select('*')
+        .eq('shop_id', shop.id)
+        .eq('bill_type', billType)
+        .order('created_at', { ascending: false })
+        .limit(debouncedHistorySearch.trim() ? 200 : 50)
+
+      const { data, error } = await q
+      if (cancelled) return
+      if (error) {
+        showToast('History load failed: ' + error.message, 'error')
+        setHistoryBills([])
+        setHistorySelectedBillIds([])
         setHistoryLoading(false)
-      })
-  }, [view, billType, historySearch, shop?.id])
+        return
+      }
+
+      const bills = data || []
+      const customerIds = [...new Set(bills.map((bill) => bill.customer_id).filter(isUuidLike))]
+      const preferredCustomerNameByBillId = new Map()
+      const preferredCustomerPhoneByBillId = new Map()
+
+      if (customerIds.length) {
+        const { data: customerRows, error: customerErr } = await supabase
+          .from('customers')
+          .select('id,name,phone')
+          .eq('shop_id', shop.id)
+          .in('id', customerIds)
+        if (cancelled) return
+        if (!customerErr) {
+          const customerById = new Map((customerRows || []).map((entry) => [entry.id, entry]))
+          for (const bill of bills) {
+            const matchedCustomer = customerById.get(bill.customer_id)
+            if (!matchedCustomer) continue
+            const nextName = String(matchedCustomer.name || '').trim()
+            const nextPhone = normalizePhone(matchedCustomer.phone)
+            if (nextName) preferredCustomerNameByBillId.set(bill.id, nextName)
+            if (nextPhone) preferredCustomerPhoneByBillId.set(bill.id, nextPhone)
+          }
+        }
+      }
+
+      const missingCustomerBillIds = bills
+        .filter((bill) => !preferredCustomerNameByBillId.get(bill.id) && !String(bill.customer_name || '').trim())
+        .map((bill) => bill.id)
+
+      if (!missingCustomerBillIds.length) {
+        const enrichedBills = bills
+          .map((bill) => ({
+            ...bill,
+            customer_name: preferredCustomerNameByBillId.get(bill.id) || bill.customer_name,
+            customer_phone: preferredCustomerPhoneByBillId.get(bill.id) || bill.customer_phone,
+          }))
+          .filter((bill) => matchesHistoryBillSearch(bill, debouncedHistorySearch))
+        setHistoryBills(enrichedBills)
+        setHistorySelectedBillIds([])
+        setHistoryLoading(false)
+        return
+      }
+
+      const partyByBillId = new Map()
+      for (const [billId, customerName] of preferredCustomerNameByBillId.entries()) {
+        partyByBillId.set(billId, customerName)
+      }
+
+      const { data: creditRows, error: creditErr } = await supabase
+        .from('credit_entries')
+        .select('account_id,reference_note')
+        .eq('shop_id', shop.id)
+        .eq('direction', 'increase')
+        .ilike('reference_note', `%${AUTO_INVOICE_CREDIT_TAG_PREFIX}%`)
+      if (cancelled) return
+      if (creditErr) {
+        setHistoryBills(bills
+          .map((bill) => ({
+            ...bill,
+            customer_name: preferredCustomerNameByBillId.get(bill.id) || partyByBillId.get(bill.id) || bill.customer_name,
+            customer_phone: preferredCustomerPhoneByBillId.get(bill.id) || bill.customer_phone,
+          }))
+          .filter((bill) => matchesHistoryBillSearch(bill, debouncedHistorySearch)))
+        setHistorySelectedBillIds([])
+        setHistoryLoading(false)
+        return
+      }
+
+      const missingSet = new Set(missingCustomerBillIds.filter((billId) => !partyByBillId.has(billId)))
+      const accountIds = [...new Set((creditRows || [])
+        .filter((row) => missingSet.has(extractAutoInvoiceIdFromReferenceNote(row.reference_note)))
+        .map((row) => row.account_id)
+        .filter(Boolean))]
+      if (!accountIds.length) {
+        setHistoryBills(bills
+          .map((bill) => ({
+            ...bill,
+            customer_name: preferredCustomerNameByBillId.get(bill.id) || partyByBillId.get(bill.id) || bill.customer_name,
+            customer_phone: preferredCustomerPhoneByBillId.get(bill.id) || bill.customer_phone,
+          }))
+          .filter((bill) => matchesHistoryBillSearch(bill, debouncedHistorySearch)))
+        setHistorySelectedBillIds([])
+        setHistoryLoading(false)
+        return
+      }
+
+      const { data: accountRows, error: accountErr } = await supabase
+        .from('credit_accounts')
+        .select('id,party_name')
+        .eq('shop_id', shop.id)
+        .in('id', accountIds)
+      if (cancelled) return
+      if (accountErr) {
+        setHistoryBills(bills
+          .map((bill) => ({
+            ...bill,
+            customer_name: preferredCustomerNameByBillId.get(bill.id) || partyByBillId.get(bill.id) || bill.customer_name,
+            customer_phone: preferredCustomerPhoneByBillId.get(bill.id) || bill.customer_phone,
+          }))
+          .filter((bill) => matchesHistoryBillSearch(bill, debouncedHistorySearch)))
+        setHistorySelectedBillIds([])
+        setHistoryLoading(false)
+        return
+      }
+
+      const accountNameById = new Map((accountRows || []).map((account) => [account.id, account.party_name]))
+      for (const row of (creditRows || [])) {
+        const billId = extractAutoInvoiceIdFromReferenceNote(row.reference_note)
+        if (!missingSet.has(billId)) continue
+        const partyName = accountNameById.get(row.account_id)
+        if (partyName && !partyByBillId.has(billId)) {
+          partyByBillId.set(billId, partyName)
+        }
+      }
+
+      const enrichedBills = bills
+        .map((bill) => ({
+          ...bill,
+          customer_name: preferredCustomerNameByBillId.get(bill.id) || partyByBillId.get(bill.id) || bill.customer_name,
+          customer_phone: preferredCustomerPhoneByBillId.get(bill.id) || bill.customer_phone,
+        }))
+        .filter((bill) => matchesHistoryBillSearch(bill, debouncedHistorySearch))
+      setHistoryBills(enrichedBills)
+      setHistorySelectedBillIds([])
+      setHistoryLoading(false)
+    }
+
+    loadHistoryBills()
+    return () => { cancelled = true }
+  }, [view, billType, debouncedHistorySearch, historyRefreshKey, shop?.id])
 
   // ── Load existing bill into form when ?editId= is provided ───────────────────
   useEffect(() => {
@@ -553,12 +1002,13 @@ export default function BillingPage() {
 
       setEditBillId(id)
       setConversionSource(null)
-      setView('form')
+      setViewMode('form')
       setBillType(b.bill_type || 'invoice')
       setConversionSource(null)
       setBillNo(b.bill_no || '')
       setBillDate(b.date || todayStr())
       setCustomer({
+        id: b.customer_id || '',
         name: b.customer_name || '',
         phone: b.customer_phone || '',
         gstin: b.customer_gstin || '',
@@ -630,11 +1080,12 @@ export default function BillingPage() {
 
       setConversionSource({ id: b.id, billNo: b.bill_no })
       setEditBillId(null)
-      setView('form')
+      setViewMode('form')
       setBillType('invoice')
       setBillNo('')
       setBillDate(todayStr())
       setCustomer({
+        id: b.customer_id || '',
         name: b.customer_name || '',
         phone: b.customer_phone || '',
         gstin: b.customer_gstin || '',
@@ -682,6 +1133,49 @@ export default function BillingPage() {
     setTimeout(() => setToast(null), 3000)
   }
 
+  function applySelectedCustomer(selectedCustomer) {
+    if (!selectedCustomer) return
+    setCustomer({
+      id: selectedCustomer.id || '',
+      name: selectedCustomer.name || '',
+      phone: selectedCustomer.phone || '',
+      gstin: selectedCustomer.gstin || '',
+      address: selectedCustomer.address || '',
+    })
+    setCustomerPickerOpen(false)
+    setCustomerPickerSearch('')
+    showToast(`Loaded ${selectedCustomer.name || selectedCustomer.phone || 'customer details'}`)
+  }
+
+  useEffect(() => {
+    const requestedCustomerId = searchParams.get('customer')
+    if (!requestedCustomerId || customerDirectoryLoading) return
+    if (customerParamAppliedRef.current === requestedCustomerId) return
+
+    const selectedCustomer = customerDirectory.find((entry) => entry.id === requestedCustomerId)
+    customerParamAppliedRef.current = requestedCustomerId
+
+    const params = new URLSearchParams(searchParams.toString())
+    params.delete('customer')
+    const query = params.toString()
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
+
+    if (!selectedCustomer) {
+      showToast('Selected customer could not be loaded', 'error')
+      return
+    }
+
+    setViewMode('form')
+    setCustomer({
+      id: selectedCustomer.id || '',
+      name: selectedCustomer.name || '',
+      phone: selectedCustomer.phone || '',
+      gstin: selectedCustomer.gstin || '',
+      address: selectedCustomer.address || '',
+    })
+    showToast(`Loaded ${selectedCustomer.name || selectedCustomer.phone || 'customer details'}`)
+  }, [customerDirectory, customerDirectoryLoading, pathname, router, searchParams, setViewMode])
+
   // ── Item calculation — runs for any item that has rate set ─────────────────
   function recalc(item) {
     if (!parseFloat(item.rate) && !parseFloat(item.quantity)) return item
@@ -707,6 +1201,10 @@ export default function BillingPage() {
   const filledItems = items.filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
   const totals      = calcBillTotals(filledItems)
   const profitSummary = getBillProfitSummary(filledItems)
+  const filteredCustomerDirectory = useMemo(
+    () => customerDirectory.filter((entry) => matchesCustomerSearch(entry, debouncedCustomerPickerSearch)),
+    [customerDirectory, debouncedCustomerPickerSearch]
+  )
 
   function handlePayModeChange(nextPayMode) {
     setPayMode(nextPayMode)
@@ -717,6 +1215,287 @@ export default function BillingPage() {
     const hasPaidInput = paidAmt !== '' && Number.isFinite(currentPaid)
     if (!hasPaidInput || currentPaid >= totals.total) {
       setPaidAmt('0')
+    }
+  }
+
+  async function handleHistoryPaymentModeUpdate(bill, nextMode) {
+    if (!shop?.id || !bill?.id || !nextMode) return
+    const normalizedMode = normalizePaymentModeForDb(nextMode)
+
+    setHistoryUpdatingBillId(bill.id)
+    try {
+      const total = Number(bill.total || 0)
+      const currentPaid = Number(bill.paid_amount || 0)
+      const currentMode = normalizePaymentModeForDb(bill.payment_mode)
+      const isCreditMode = normalizedMode === 'credit'
+      const shouldForceCreditReset = isCreditMode && currentPaid > 0
+      const shouldRepairCreditSync = isCreditMode && Math.max(0, total - currentPaid) > 0
+      if (currentMode === normalizedMode && !shouldForceCreditReset && !shouldRepairCreditSync) return
+
+      if (isCreditMode && !isValidCreditPhone(bill.customer_phone)) {
+        showToast('Valid 10-digit customer phone is required for credit invoices', 'error')
+        return
+      }
+
+      const nextPaid = isCreditMode ? 0 : currentPaid
+      const nextStatus = nextPaid >= total ? 'paid' : nextPaid > 0 ? 'partial' : 'unpaid'
+      let nextCustomerId = isUuidLike(bill.customer_id) ? bill.customer_id : ''
+      let nextCustomerName = String(bill.customer_name || '').trim() || null
+      let nextCustomerPhone = normalizePhone(bill.customer_phone)
+
+      if (isCreditMode && !nextCustomerName) {
+        const accountId = await ensureBorrowerCreditAccount(shop.id, '', bill.customer_phone, bill.bill_no, {
+          billId: bill.id,
+          customerId: nextCustomerId,
+        })
+        const { data: accountRow, error: accountErr } = await supabase
+          .from('credit_accounts')
+          .select('party_name,phone')
+          .eq('shop_id', shop.id)
+          .eq('id', accountId)
+          .single()
+        if (accountErr) throw accountErr
+        nextCustomerName = String(accountRow?.party_name || '').trim() || nextCustomerName
+        nextCustomerPhone = normalizePhone(accountRow?.phone) || nextCustomerPhone
+      }
+
+      const ensuredCustomer = await ensureCustomerRecord(shop.id, {
+        id: nextCustomerId,
+        name: nextCustomerName || '',
+        phone: nextCustomerPhone || '',
+        gstin: bill.customer_gstin || '',
+        address: bill.customer_address || '',
+      })
+      if (ensuredCustomer?.id) {
+        nextCustomerId = ensuredCustomer.id
+        nextCustomerName = ensuredCustomer.name || nextCustomerName
+        nextCustomerPhone = ensuredCustomer.phone || nextCustomerPhone
+      }
+
+      await updateBillWithCustomerCompatibility(shop.id, bill.id, {
+        customer_id: nextCustomerId || null,
+        payment_mode: normalizedMode,
+        paid_amount: nextPaid,
+        payment_status: nextStatus,
+        customer_name: nextCustomerName,
+        customer_phone: nextCustomerPhone || null,
+      })
+
+      await syncInvoiceCreditEntry({
+        shopId: shop.id,
+        billId: bill.id,
+        billNo: bill.bill_no,
+        billDate: bill.date,
+        customerId: nextCustomerId,
+        customerName: nextCustomerName,
+        customerPhone: nextCustomerPhone,
+        payMode: normalizedMode,
+        paidAmount: nextPaid,
+        totalAmount: total,
+      })
+
+      setHistoryBills((prevBills) => prevBills.map((row) => (
+        row.id === bill.id
+          ? {
+            ...row,
+            payment_mode: normalizedMode,
+            paid_amount: nextPaid,
+            payment_status: nextStatus,
+            customer_id: nextCustomerId || row.customer_id,
+            customer_name: nextCustomerName || row.customer_name,
+            customer_phone: nextCustomerPhone || row.customer_phone,
+          }
+          : row
+      )))
+      showToast(`Payment mode updated for ${bill.bill_no}`)
+    } catch (error) {
+      showToast('Payment mode update failed: ' + (error?.message || 'Unknown error'), 'error')
+    } finally {
+      setHistoryUpdatingBillId(null)
+    }
+  }
+
+  function getHistoryDueAmount(bill) {
+    return Math.max(0, Number(bill.total || 0) - Number(bill.paid_amount || 0))
+  }
+
+  async function handleHistoryRecordPayment(bill) {
+    if (!shop?.id || !bill?.id) return
+    const dueAmount = getHistoryDueAmount(bill)
+    if (dueAmount <= 0) return
+
+    const draftValue = historyPaymentDrafts[bill.id] ?? ''
+    const amountToAdd = Number(draftValue)
+    if (!Number.isFinite(amountToAdd) || amountToAdd <= 0) {
+      showToast('Enter a valid amount greater than 0', 'error')
+      return
+    }
+
+    const total = Number(bill.total || 0)
+    const currentPaid = Number(bill.paid_amount || 0)
+    const nextPaid = Math.min(total, currentPaid + amountToAdd)
+    const nextMode = normalizePaymentModeForDb(bill.payment_mode || 'cash')
+    const nextStatus = nextPaid >= total ? 'paid' : nextPaid > 0 ? 'partial' : 'unpaid'
+
+    setHistoryUpdatingBillId(bill.id)
+    try {
+      const { error } = await supabase
+        .from('bills')
+        .update({
+          paid_amount: nextPaid,
+          payment_mode: nextMode,
+          payment_status: nextStatus,
+        })
+        .eq('id', bill.id)
+        .eq('shop_id', shop.id)
+
+      if (error) throw error
+
+      await syncInvoiceCreditEntry({
+        shopId: shop.id,
+        billId: bill.id,
+        billNo: bill.bill_no,
+        billDate: bill.date,
+        customerId: bill.customer_id,
+        customerName: bill.customer_name,
+        customerPhone: bill.customer_phone,
+        payMode: nextMode,
+        paidAmount: nextPaid,
+        totalAmount: total,
+      })
+
+      setHistoryBills((prevBills) => prevBills.map((row) => (
+        row.id === bill.id
+          ? { ...row, paid_amount: nextPaid, payment_mode: nextMode, payment_status: nextStatus }
+          : row
+      )))
+      setHistoryPaymentDrafts((prevDrafts) => ({ ...prevDrafts, [bill.id]: '' }))
+      showToast(`Payment recorded for ${bill.bill_no}`)
+    } catch (error) {
+      showToast('Payment update failed: ' + (error?.message || 'Unknown error'), 'error')
+    } finally {
+      setHistoryUpdatingBillId(null)
+    }
+  }
+
+  function handleToggleHistoryBillSelection(billId, checked) {
+    setHistorySelectedBillIds((prevIds) => {
+      if (checked) {
+        return prevIds.includes(billId) ? prevIds : [...prevIds, billId]
+      }
+      return prevIds.filter((id) => id !== billId)
+    })
+  }
+
+  function handleToggleSelectAllHistoryBills(checked) {
+    if (!checked) {
+      setHistorySelectedBillIds([])
+      return
+    }
+    setHistorySelectedBillIds(historyBills.map((bill) => bill.id))
+  }
+
+  function handleMoveSelectedHistoryBillsToNumberUpdater() {
+    if (!shop?.id) return
+    if (!historySelectedBillIds.length) {
+      showToast('Select invoices to update numbering', 'error')
+      return
+    }
+
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.setItem(
+        `invoice-number-updater:${shop.id}`,
+        JSON.stringify({
+          billType,
+          billIds: historySelectedBillIds,
+          selectedAt: Date.now(),
+        })
+      )
+    }
+
+    router.push('/billing/invoice-number-updater')
+  }
+
+  async function handleHistoryPrint(bill) {
+    if (!shop?.id || !bill?.id) return
+
+    setHistoryPrintingBillId(bill.id)
+    try {
+      const { data: lineItems, error: itemsErr } = await supabase
+        .from('bill_items')
+        .select('id,sl_no,product_name,hsn_code,quantity,unit,mrp,rate,gst_rate,gst_amount,total')
+        .eq('bill_id', bill.id)
+        .eq('shop_id', shop.id)
+        .order('sl_no')
+      if (itemsErr) throw itemsErr
+
+      const gstBreakdown = {}
+      for (const item of (lineItems || [])) {
+        const rate = String(item.gst_rate || 0)
+        if (!gstBreakdown[rate]) gstBreakdown[rate] = { base: 0, gst: 0 }
+        gstBreakdown[rate].base += Number(item.total || 0) - Number(item.gst_amount || 0)
+        gstBreakdown[rate].gst += Number(item.gst_amount || 0)
+      }
+
+      const printShop = await getLatestShopForPrint(shop)
+      setPrintData({
+        bill,
+        items: lineItems || [],
+        shop: printShop,
+        totals: {
+          subtotal: Number(bill.subtotal || 0),
+          gstAmount: Number(bill.gst_amount || 0),
+          discountAmount: Number(bill.discount_amount || 0),
+          total: Number(bill.total || 0),
+          gstBreakdown,
+        },
+      })
+      window.addEventListener('afterprint', () => setPrintData(null), { once: true })
+      setTimeout(() => window.print(), 120)
+    } catch (error) {
+      showToast('Print failed: ' + (error?.message || 'Unknown error'), 'error')
+    } finally {
+      setHistoryPrintingBillId(null)
+    }
+  }
+
+  async function handleDeleteSelectedHistoryBills() {
+    if (!shop?.id) return
+    if (!historySelectedBillIds.length) {
+      showToast('Select at least one invoice to delete', 'error')
+      return
+    }
+    const selectedCount = historySelectedBillIds.length
+    if (!window.confirm(`Delete ${selectedCount} selected invoice${selectedCount > 1 ? 's' : ''}? This cannot be undone.`)) return
+
+    setHistoryDeleting(true)
+    try {
+      for (const billId of historySelectedBillIds) {
+        await removeAutoInvoiceCreditEntries(shop.id, billId)
+      }
+
+      const { error: deleteErr } = await supabase
+        .from('bills')
+        .delete()
+        .eq('shop_id', shop.id)
+        .in('id', historySelectedBillIds)
+      if (deleteErr) throw deleteErr
+
+      const selectedSet = new Set(historySelectedBillIds)
+      setHistoryBills((prevBills) => prevBills.filter((bill) => !selectedSet.has(bill.id)))
+      setHistoryPaymentDrafts((prevDrafts) => {
+        const nextDrafts = { ...prevDrafts }
+        for (const billId of historySelectedBillIds) {
+          delete nextDrafts[billId]
+        }
+        return nextDrafts
+      })
+      setHistorySelectedBillIds([])
+      showToast(`Deleted ${selectedCount} invoice${selectedCount > 1 ? 's' : ''}`)
+    } catch (error) {
+      showToast('Delete failed: ' + (error?.message || 'Unknown error'), 'error')
+    } finally {
+      setHistoryDeleting(false)
     }
   }
 
@@ -734,7 +1513,7 @@ export default function BillingPage() {
       const item = {
         ...next[activeRow],
         product_id:   product.id,
-        product_name: product.name,
+        product_name: getBillProductName(product),
         hsn_code:     product.hsn_code || '',
         unit:         product.unit     || 'pcs',
         mrp:          product.mrp      || rate,
@@ -794,7 +1573,9 @@ export default function BillingPage() {
   function resetBillForm() {
     setEditBillId(null)
     setItems([emptyItem()])
-    setCustomer({ name:'', phone:'', gstin:'', address:'' })
+    setCustomer(emptyCustomer())
+    setCustomerPickerOpen(false)
+    setCustomerPickerSearch('')
     setBillDate(todayStr())
     setBillNo('')
     setPaidAmt('')
@@ -821,6 +1602,11 @@ export default function BillingPage() {
       focusId('customer-name')
       return
     }
+    if (isCreditMode && !isValidCreditPhone(customer.phone)) {
+      showToast('Valid 10-digit customer phone is required for credit bills', 'error')
+      focusId('customer-phone')
+      return
+    }
     setSaving(true)
 
     try {
@@ -843,16 +1629,29 @@ export default function BillingPage() {
       }
 
       const paid = normalizePaidAmount(paidAmt, totals.total, payMode)
+      const ensuredCustomer = navigator.onLine
+        ? await ensureCustomerRecord(shop.id, customer)
+        : null
+      const resolvedCustomer = ensuredCustomer
+        ? {
+            id: ensuredCustomer.id || '',
+            name: ensuredCustomer.name || customer.name || '',
+            phone: ensuredCustomer.phone || customer.phone || '',
+            gstin: ensuredCustomer.gstin || customer.gstin || '',
+            address: ensuredCustomer.address || customer.address || '',
+          }
+        : customer
 
       const billRow = {
         shop_id:          shop.id,
         bill_no:          finalNo,
         bill_type:        billType,
         date:             billDate,
-        customer_name:    customer.name    || null,
-        customer_phone:   customer.phone   || null,
-        customer_gstin:   customer.gstin   || null,
-        customer_address: customer.address || null,
+        customer_id:      isUuidLike(resolvedCustomer.id) ? resolvedCustomer.id : null,
+        customer_name:    resolvedCustomer.name    || null,
+        customer_phone:   resolvedCustomer.phone   || null,
+        customer_gstin:   resolvedCustomer.gstin   || null,
+        customer_address: resolvedCustomer.address || null,
         subtotal:         totals.subtotal,
         cgst_amount:      totals.gstAmount / 2,
         sgst_amount:      totals.gstAmount / 2,
@@ -860,7 +1659,7 @@ export default function BillingPage() {
         discount_amount:  totals.discountAmount,
         total:            totals.total,
         paid_amount:      paid,
-        payment_mode:     payMode.toLowerCase(),
+        payment_mode:     normalizePaymentModeForDb(payMode),
         payment_status:   paid >= totals.total ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
         notes:            notes || null,
       }
@@ -907,7 +1706,8 @@ export default function BillingPage() {
             resetBillForm()
           }
           window.addEventListener('afterprint', clearAfterPrint, { once: true })
-          setPrintData({ bill: { ...billRow, id: queuedBill.id }, items: filledItems, shop, totals })
+          const printShop = await getLatestShopForPrint(shop)
+          setPrintData({ bill: { ...billRow, id: queuedBill.id }, items: filledItems, shop: printShop, totals })
           setTimeout(() => window.print(), 200)
         } else {
           resetBillForm()
@@ -917,15 +1717,9 @@ export default function BillingPage() {
 
       let savedId = editBillId
       if (editBillId) {
-        const { error: updErr } = await supabase
-          .from('bills')
-          .update(billRow)
-          .eq('id', editBillId)
-          .eq('shop_id', shop.id)
-        if (updErr) throw updErr
+        await updateBillWithCustomerCompatibility(shop.id, editBillId, billRow)
       } else {
-        const { data: saved, error: billErr } = await supabase.from('bills').insert(billRow).select().single()
-        if (billErr) throw billErr
+        const saved = await insertBillWithCustomerCompatibility(billRow)
         savedId = saved.id
       }
 
@@ -948,8 +1742,9 @@ export default function BillingPage() {
           billId: savedId,
           billNo: finalNo,
           billDate,
-          customerName: customer.name,
-          customerPhone: customer.phone,
+          customerId: billRow.customer_id,
+          customerName: billRow.customer_name,
+          customerPhone: billRow.customer_phone,
           payMode,
           paidAmount: paid,
           totalAmount: totals.total,
@@ -976,6 +1771,7 @@ export default function BillingPage() {
 
       showToast(editBillId ? `✓ ${finalNo} updated` : `✓ ${finalNo} saved`)
       await clearBillingDraft(shop.id)
+      loadCustomerDirectory({ preferCache: false, silent: true })
 
       if (withPrint) {
         const clearAfterPrint = () => {
@@ -983,7 +1779,8 @@ export default function BillingPage() {
           resetBillForm()
         }
         window.addEventListener('afterprint', clearAfterPrint, { once: true })
-        setPrintData({ bill: { ...billRow, id: savedId }, items: filledItems, shop, totals })
+        const printShop = await getLatestShopForPrint(shop)
+        setPrintData({ bill: { ...billRow, id: savedId }, items: filledItems, shop: printShop, totals })
         setTimeout(() => window.print(), 200)
       } else {
         resetBillForm()
@@ -999,6 +1796,13 @@ export default function BillingPage() {
   // ── Global keyboard shortcuts ──────────────────────────────────────────────
   useEffect(() => {
     function onKey(e) {
+      if (customerPickerOpen) {
+        if (e.key === 'Escape') {
+          e.preventDefault()
+          setCustomerPickerOpen(false)
+        }
+        return
+      }
       if (searchOpen) return
 
       switch (e.key) {
@@ -1023,7 +1827,7 @@ export default function BillingPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchOpen, activeRow])
+  }, [customerPickerOpen, searchOpen, activeRow])
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -1043,6 +1847,63 @@ export default function BillingPage() {
         />
       )}
 
+      {customerPickerOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-3">
+          <div className="w-full max-w-3xl rounded-2xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b px-4 py-3">
+              <div>
+                <div className="text-base font-semibold text-gray-900">Select Customer</div>
+                <div className="text-xs text-gray-500">Saved automatically from bills and credit book</div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCustomerPickerOpen(false)}
+                className="rounded border px-3 py-1 text-sm text-gray-600 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+            <div className="border-b px-4 py-3">
+              <input
+                autoFocus
+                value={customerPickerSearch}
+                onChange={(event) => setCustomerPickerSearch(event.target.value)}
+                placeholder="Search by name, phone, GSTIN, invoice no..."
+                className="w-full rounded-lg border px-3 py-2 text-sm"
+              />
+            </div>
+            <div className="max-h-[26rem] overflow-y-auto">
+              {customerDirectoryLoading ? (
+                <div className="px-4 py-8 text-center text-sm text-gray-500">Loading customers...</div>
+              ) : filteredCustomerDirectory.length === 0 ? (
+                <div className="px-4 py-8 text-center text-sm text-gray-500">No matching customers found.</div>
+              ) : (
+                filteredCustomerDirectory.map((entry) => (
+                  <button
+                    key={entry.id}
+                    type="button"
+                    onClick={() => applySelectedCustomer(entry)}
+                    className="flex w-full items-start justify-between gap-3 border-b px-4 py-3 text-left hover:bg-gray-50"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-medium text-gray-900">{entry.name || entry.phone || 'Unnamed customer'}</div>
+                      <div className="text-xs text-gray-500">
+                        {entry.phone || 'No phone'}{entry.gstin ? ` • ${entry.gstin}` : ''}{entry.lastBillNo ? ` • ${entry.lastBillNo}` : ''}
+                      </div>
+                      {entry.address && <div className="mt-1 text-xs text-gray-400 truncate">{entry.address}</div>}
+                    </div>
+                    <div className="text-right text-xs text-gray-500">
+                      <div>{entry.billCount} bill{entry.billCount === 1 ? '' : 's'}</div>
+                      {entry.totalOutstanding > 0 && <div className="font-medium text-cyan-700">{fmt(entry.totalOutstanding)} due</div>}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Toast notification */}
       {toast && (
         <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow-lg text-white text-sm font-medium no-print ${
@@ -1059,7 +1920,7 @@ export default function BillingPage() {
           <div className="flex items-center gap-2">
             <select
               value={billType}
-              onChange={e => { setBillType(e.target.value); setView('form') }}
+              onChange={e => { setBillType(e.target.value); setViewMode('form') }}
               className="border rounded px-2 py-1 text-sm font-semibold"
             >
               <option value="invoice">Tax Invoice</option>
@@ -1071,11 +1932,11 @@ export default function BillingPage() {
           {/* New / History tabs */}
           <div className="flex gap-1">
             <button
-              onClick={() => setView('form')}
+              onClick={() => setViewMode('form')}
               className={`px-3 py-1 rounded text-sm font-medium transition-colors ${view === 'form' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
             >New</button>
             <button
-              onClick={() => setView('history')}
+              onClick={() => setViewMode('history')}
               className={`px-3 py-1 rounded text-sm font-medium transition-colors ${view === 'history' ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
             >History</button>
           </div>
@@ -1127,13 +1988,29 @@ export default function BillingPage() {
         {/* ── History view ─────────────────────────────────────────── */}
         {view === 'history' && (
           <div className="flex-1 overflow-y-auto p-4">
-            <div className="mb-3">
+            <div className="mb-3 flex flex-wrap items-center gap-2">
               <input
                 value={historySearch}
                 onChange={e => setHistorySearch(e.target.value)}
                 placeholder={`Search ${billType} by bill no or customer`}
                 className="w-full max-w-md border rounded-lg px-3 py-2 text-sm"
               />
+              <button
+                type="button"
+                onClick={handleMoveSelectedHistoryBillsToNumberUpdater}
+                disabled={historySelectedBillIds.length === 0}
+                className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-60"
+              >
+                Move to Number Updater{historySelectedBillIds.length ? ` (${historySelectedBillIds.length})` : ''}
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteSelectedHistoryBills}
+                disabled={historyDeleting || historySelectedBillIds.length === 0}
+                className="px-3 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 disabled:opacity-60"
+              >
+                {historyDeleting ? 'Deleting…' : `Delete Selected${historySelectedBillIds.length ? ` (${historySelectedBillIds.length})` : ''}`}
+              </button>
             </div>
             {historyLoading ? (
               <div className="text-center text-gray-400 py-10">Loading…</div>
@@ -1144,14 +2021,31 @@ export default function BillingPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-50 text-xs text-gray-500 border-b">
-                          {['Date','Bill No','Customer','Total','Mode','Status','Action'].map(h => (
-                        <th key={h} className="px-3 py-2 text-left">{h}</th>
+                          {['Select','Date','Bill No','Customer','Total','Paid','Due','Mode','Status','Action'].map(h => (
+                        <th key={h} className="px-3 py-2 text-left">
+                          {h === 'Select' ? (
+                            <input
+                              type="checkbox"
+                              checked={historyBills.length > 0 && historySelectedBillIds.length === historyBills.length}
+                              onChange={(e) => handleToggleSelectAllHistoryBills(e.target.checked)}
+                              aria-label="Select all invoices in history list"
+                            />
+                          ) : h}
+                        </th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {historyBills.map(b => (
                       <tr key={b.id} className="border-b hover:bg-gray-50">
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={historySelectedBillIds.includes(b.id)}
+                            onChange={(e) => handleToggleHistoryBillSelection(b.id, e.target.checked)}
+                            aria-label={`Select invoice ${b.bill_no}`}
+                          />
+                        </td>
                         <td className="px-3 py-2">{new Date(b.date+'T00:00:00').toLocaleDateString('en-IN')}</td>
                         <td className="px-3 py-2 font-mono font-medium">
                           <Link href={`/billing/${b.id}`} className="text-blue-700 hover:underline">
@@ -1160,7 +2054,26 @@ export default function BillingPage() {
                         </td>
                         <td className="px-3 py-2 text-gray-600">{b.customer_name || '—'}</td>
                         <td className="px-3 py-2 font-medium text-right">₹{Number(b.total).toFixed(2)}</td>
-                        <td className="px-3 py-2 text-xs uppercase text-gray-500">{b.payment_mode || '—'}</td>
+                        <td className="px-3 py-2 font-medium text-right">₹{Number(b.paid_amount || 0).toFixed(2)}</td>
+                        <td className="px-3 py-2 text-right">₹{getHistoryDueAmount(b).toFixed(2)}</td>
+                        <td className="px-3 py-2">
+                          {b.bill_type === 'invoice' ? (
+                            <select
+                              value={String(b.payment_mode || '').toLowerCase() || 'cash'}
+                              onChange={(e) => handleHistoryPaymentModeUpdate(b, e.target.value)}
+                              disabled={historyUpdatingBillId === b.id}
+                              className="border rounded px-2 py-1 text-xs bg-white disabled:opacity-60"
+                            >
+                              {PAYMENT_MODES.map((mode) => (
+                                <option key={mode} value={mode.toLowerCase()}>
+                                  {mode}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className="text-xs uppercase text-gray-500">{b.payment_mode || '—'}</span>
+                          )}
+                        </td>
                         <td className="px-3 py-2">
                           <span className={`px-1.5 py-0.5 rounded text-xs ${
                             b.payment_status === 'paid' ? 'bg-green-100 text-green-700'
@@ -1169,16 +2082,48 @@ export default function BillingPage() {
                           }`}>{b.payment_status || 'draft'}</span>
                         </td>
                         <td className="px-3 py-2">
-                          {b.bill_type !== 'invoice' ? (
-                            <Link
-                              href={`/billing?convertFrom=${b.id}`}
-                              className="text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleHistoryPrint(b)}
+                              disabled={historyPrintingBillId === b.id}
+                              className="px-2 py-1 rounded bg-gray-800 text-white text-xs hover:bg-gray-900 disabled:opacity-60"
                             >
-                              Convert to Invoice
-                            </Link>
-                          ) : (
-                            <span className="text-xs text-gray-400">—</span>
-                          )}
+                              {historyPrintingBillId === b.id ? 'Printing…' : 'Print'}
+                            </button>
+                            {b.bill_type === 'invoice' ? (
+                              getHistoryDueAmount(b) > 0 ? (
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="number"
+                                  value={historyPaymentDrafts[b.id] ?? ''}
+                                  onChange={(e) => setHistoryPaymentDrafts((prevDrafts) => ({ ...prevDrafts, [b.id]: e.target.value }))}
+                                  placeholder="Paid now"
+                                  className="w-24 border rounded px-2 py-1 text-xs"
+                                  min="0"
+                                  step="0.01"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handleHistoryRecordPayment(b)}
+                                  disabled={historyUpdatingBillId === b.id}
+                                  className="px-2 py-1 rounded bg-green-600 text-white text-xs hover:bg-green-700 disabled:opacity-60"
+                                >
+                                  {historyUpdatingBillId === b.id ? 'Saving…' : 'Record'}
+                                </button>
+                              </div>
+                              ) : (
+                                <span className="text-xs text-gray-400">Settled</span>
+                              )
+                            ) : (
+                              <Link
+                                href={`/billing?convertFrom=${b.id}`}
+                                className="text-xs px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+                              >
+                                Convert to Invoice
+                              </Link>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1193,17 +2138,31 @@ export default function BillingPage() {
         {view === 'form' && (<>
         {/* ── Customer row ────────────────────────────────────────────── */}
         <div className="bg-white border-b px-4 py-2 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 flex-shrink-0">
-          <div className="flex items-center gap-1 min-w-0">
+          <div className="flex items-center gap-1 min-w-0 flex-wrap">
             <span className="text-xs text-gray-400 whitespace-nowrap">Customer:</span>
             <input
               id="customer-name"
               value={customer.name}
               onChange={e => setCustomer(c => ({ ...c, name: e.target.value }))}
               placeholder="Name (optional)" className="border rounded px-2 py-1 text-sm w-40" />
+            <button
+              type="button"
+              onClick={() => {
+                setCustomerPickerSearch('')
+                setCustomerPickerOpen(true)
+                loadCustomerDirectory({ preferCache: true, silent: true })
+              }}
+              className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
+            >
+              Select
+            </button>
+            <Link href="/customers" className="text-xs text-gray-500 hover:text-blue-600 hover:underline">
+              Customers
+            </Link>
           </div>
           <div className="flex items-center gap-1 min-w-0">
             <span className="text-xs text-gray-400 whitespace-nowrap">Phone:</span>
-            <input value={customer.phone} onChange={e => setCustomer(c => ({ ...c, phone: e.target.value }))}
+            <input id="customer-phone" value={customer.phone} onChange={e => setCustomer(c => ({ ...c, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
               placeholder="Phone" className="border rounded px-2 py-1 text-sm w-32" />
           </div>
           <div className="flex items-center gap-1 min-w-0">
@@ -1272,6 +2231,11 @@ export default function BillingPage() {
                     >
                       {item.product_name || 'Press F3 or / to search product…'}
                     </button>
+                    {item.product_name && hasStockQty && (
+                      <div className="mt-0.5 text-xs text-gray-500">
+                        Stock: {stockQty}
+                      </div>
+                    )}
                     {/* Low / out-of-stock warning */}
                     {hasStockQty && (
                       stockQty <= 0

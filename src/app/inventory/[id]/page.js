@@ -6,13 +6,14 @@ import { useRouter, useParams, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt, GST_RATES } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
+import { findProductNameSuggestions, saveProductNameSuggestion } from '@/lib/productNameSuggestions'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'dozen', 'box', 'pack', 'bottle', 'roll', 'strip', 'pair']
 
 const blank = {
-  name:'', barcode:'', brand:'', category_id:'', tags:'', hsn_code:'',
+  name:'', local_name:'', barcode:'', brand:'', category_id:'', tags:'', search_aliases:'', hsn_code:'',
   unit:'pcs', purchase_price:'', mrp:'', selling_price:'', gst_rate:5,
-  stock_qty:'', min_stock:'', supplier_id:'', is_active:true,
+  stock_qty:'', min_stock:'', supplier_id:'', is_active:true, bill_name_mode:'english',
 }
 
 function parseAmount(value) {
@@ -40,6 +41,22 @@ function formatDate(value) {
   return new Date(`${value}T00:00:00`).toLocaleDateString('en-IN')
 }
 
+function mergeCsvValues(currentValue, nextValues) {
+  const seen = new Set()
+  return [
+    ...String(currentValue || '').split(','),
+    ...nextValues,
+  ]
+    .map((value) => value.trim())
+    .filter((value) => {
+      const key = value.toLowerCase()
+      if (!value || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    .join(', ')
+}
+
 export default function ProductFormPage() {
   const router = useRouter()
   const { id }  = useParams()
@@ -56,6 +73,8 @@ export default function ProductFormPage() {
   const [historyError, setHistoryError] = useState('')
   const [useMarginHelper, setUseMarginHelper] = useState(false)
   const [marginPct, setMarginPct] = useState('')
+  const [localNameSuggestions, setLocalNameSuggestions] = useState([])
+  const [suggestionLoading, setSuggestionLoading] = useState(false)
   const { shop } = useShop()
 
   function loadCats() {
@@ -151,7 +170,12 @@ export default function ProductFormPage() {
           return
         }
         if (data) {
-          setForm({ ...data, tags: (data.tags || []).join(', ') })
+          setForm({
+            ...data,
+            tags: (data.tags || []).join(', '),
+            search_aliases: (data.search_aliases || []).join(', '),
+            bill_name_mode: data.bill_name_mode || 'english',
+          })
           setMarginPct(getMarginPctFromPrices(data.purchase_price, data.selling_price || data.mrp))
         }
       })
@@ -168,6 +192,60 @@ export default function ProductFormPage() {
 
     return () => { cancelled = true }
   }, [id, isNew, searchParams, shop?.id])
+
+  useEffect(() => {
+    const input = `${form.name} ${form.search_aliases}`.trim()
+    if (!input) {
+      setLocalNameSuggestions([])
+      return
+    }
+
+    let cancelled = false
+    const timer = setTimeout(async () => {
+      setSuggestionLoading(true)
+      try {
+        const suggestions = await findProductNameSuggestions(
+          supabase,
+          input,
+          shop?.id,
+          shop?.use_global_name_suggestions !== false
+        )
+        if (!cancelled) setLocalNameSuggestions(suggestions)
+      } catch {
+        if (!cancelled) setLocalNameSuggestions([])
+      } finally {
+        if (!cancelled) setSuggestionLoading(false)
+      }
+    }, 200)
+
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
+  }, [form.name, form.search_aliases, shop?.id, shop?.use_global_name_suggestions])
+
+  async function saveCurrentNameAsShopSuggestion() {
+    if (!shop?.id || !form.name || !form.local_name) return
+
+    const aliases = form.search_aliases
+      ? form.search_aliases.split(',').map((value) => value.trim()).filter(Boolean)
+      : [form.name]
+
+    try {
+      await saveProductNameSuggestion(supabase, {
+        shopId: shop.id,
+        englishName: form.name,
+        localName: form.local_name,
+        aliases,
+      })
+    } catch (saveSuggestionError) {
+      setError(saveSuggestionError.message)
+      return
+    }
+
+    const suggestions = await findProductNameSuggestions(supabase, `${form.name} ${form.search_aliases}`, shop.id)
+    setLocalNameSuggestions(suggestions)
+  }
 
   function set(k, v) {
     setForm(f => {
@@ -235,6 +313,15 @@ export default function ProductFormPage() {
     })
   }
 
+  function applyLocalNameSuggestion(suggestion) {
+    setForm((current) => ({
+      ...current,
+      local_name: suggestion.local_name,
+      search_aliases: mergeCsvValues(current.search_aliases, suggestion.aliases),
+      bill_name_mode: current.bill_name_mode === 'english' ? 'local' : current.bill_name_mode,
+    }))
+  }
+
   async function submit(e) {
     e.preventDefault()
     setError('')
@@ -248,6 +335,7 @@ export default function ProductFormPage() {
     const payload = {
       ...form,
       tags:           form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+      search_aliases: form.search_aliases ? form.search_aliases.split(',').map(t => t.trim()).filter(Boolean) : [],
       purchase_price: purchasePrice,
       mrp,
       selling_price:  helperSellingPrice || manualSellingPrice || mrp || 0,
@@ -264,6 +352,20 @@ export default function ProductFormPage() {
       : await supabase.from('products').update(payload).eq('id', id)
 
     if (err) { setError(err.message); setSaving(false); return }
+    if (shop?.id && form.name && form.local_name) {
+      try {
+        await saveProductNameSuggestion(supabase, {
+          shopId: shop.id,
+          englishName: form.name,
+          localName: form.local_name,
+          aliases: payload.search_aliases,
+        })
+      } catch (suggestionErr) {
+        setError(`Product saved, but Tamil/local suggestion was not learned: ${suggestionErr.message}`)
+        setSaving(false)
+        return
+      }
+    }
     router.push('/inventory')
   }
 
@@ -299,6 +401,66 @@ export default function ProductFormPage() {
             <input autoFocus required value={form.name} onChange={e => set('name', e.target.value)}
               placeholder="e.g. Tata Salt 1kg"
               className="w-full border rounded-lg px-3 py-2 text-sm" />
+          </div>
+
+          <div className="col-span-2">
+            <label className="block text-xs font-medium text-gray-600 mb-1">Tamil / Local Name</label>
+            <input value={form.local_name || ''} onChange={e => set('local_name', e.target.value)}
+              placeholder="Tamil name shown on search/bill if enabled"
+              className="w-full border rounded-lg px-3 py-2 text-sm" />
+            {(suggestionLoading || localNameSuggestions.length > 0) && (
+              <div className="mt-2 rounded-lg border border-blue-100 bg-blue-50 p-2">
+                <div className="mb-1 text-xs font-medium text-blue-800">
+                  {suggestionLoading ? 'Looking for Tamil/local names...' : 'Suggested Tamil/local names'}
+                </div>
+                {localNameSuggestions.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {localNameSuggestions.map((suggestion) => (
+                      <button
+                        key={suggestion.id || suggestion.local_name}
+                        type="button"
+                        onClick={() => applyLocalNameSuggestion(suggestion)}
+                        className="rounded-full bg-white px-3 py-1 text-sm font-medium text-blue-700 shadow-sm hover:bg-blue-100"
+                      >
+                        {suggestion.local_name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <p className="mt-1 text-xs text-blue-700">
+                  Optional: click one to fill Tamil name and aliases, or leave empty for English-only billing.
+                </p>
+              </div>
+            )}
+            {form.name && form.local_name && (
+              <button
+                type="button"
+                onClick={saveCurrentNameAsShopSuggestion}
+                className="mt-2 rounded-lg border px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Save this Tamil name as this shop&apos;s suggestion
+              </button>
+            )}
+          </div>
+
+          <div className="col-span-2">
+            <label className="block text-xs font-medium text-gray-600 mb-1">Tanglish Search Aliases</label>
+            <input value={form.search_aliases || ''} onChange={e => set('search_aliases', e.target.value)}
+              placeholder="e.g. thuvaram paruppu, thuravam paruppu, toor paruppu"
+              className="w-full border rounded-lg px-3 py-2 text-sm" />
+            <p className="mt-1 text-xs text-gray-400">
+              Staff can type these English/Tanglish words; invoice can still print Tamil/local name.
+            </p>
+          </div>
+
+          <div className="col-span-2">
+            <label className="block text-xs font-medium text-gray-600 mb-1">Bill Display Name</label>
+            <select value={form.bill_name_mode || 'english'} onChange={e => set('bill_name_mode', e.target.value)}
+              className="w-full border rounded-lg px-3 py-2 text-sm">
+              <option value="english">English product name</option>
+              <option value="local">Tamil/local name when available</option>
+              <option value="both">English / Tamil-local</option>
+            </select>
           </div>
 
           {field('Barcode', 'barcode', { placeholder:'Scan or type', className:'w-full border rounded-lg px-3 py-2 text-sm font-mono' })}

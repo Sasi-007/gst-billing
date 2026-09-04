@@ -6,7 +6,7 @@ import { supabase } from '../lib/supabase'
 
 const ShopContext = createContext(null)
 
-const PUBLIC_PATHS = ['/login', '/onboarding']
+const PUBLIC_PATHS = ['/login', '/onboarding', '/store']
 
 export function ShopProvider({ children }) {
   const [shop, setShop] = useState(null)

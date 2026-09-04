@@ -18,9 +18,13 @@ export default function SettingsPage() {
     name:'', address:'', city:'', state:'Tamil Nadu', state_code:'33',
     pincode:'', phone:'', email:'', gstin:'', footer_text:'Thank you for your business!',
     bill_prefix:'INV', purchase_prefix:'PUR', logo_url:'',
+    use_global_name_suggestions:true,
+    print_template:'standard',
   })
   const [saving, setSaving] = useState(false)
   const [saved,  setSaved]  = useState(false)
+  const [error,  setError]  = useState('')
+  const [warning, setWarning] = useState('')
 
   // Load current shop data into form
   useEffect(() => {
@@ -35,6 +39,8 @@ export default function SettingsPage() {
     e.preventDefault()
     if (!shop?.id) return
     setSaving(true)
+    setError('')
+    setWarning('')
     const payload = {
       name:             form.name,
       address:          form.address          || null,
@@ -49,11 +55,36 @@ export default function SettingsPage() {
       bill_prefix:      form.bill_prefix      || 'INV',
       purchase_prefix:  form.purchase_prefix  || 'PUR',
       logo_url:         form.logo_url         || null,
+      print_template:   form.print_template || 'standard',
       updated_at:       new Date().toISOString(),
     }
-    const { data: updated } = await supabase
+    const { data: updated, error: updateErr } = await supabase
       .from('shops').update(payload).eq('id', shop.id).select().single()
-    if (updated) setShop({ ...shop, ...updated })  // reflect in context immediately
+    if (updateErr) {
+      setError(updateErr.message)
+      setSaving(false)
+      return
+    }
+    let updatedShop = updated ? { ...shop, ...updated } : shop
+    const { data: suggestionSettings, error: suggestionErr } = await supabase
+      .from('shops')
+      .update({ use_global_name_suggestions: form.use_global_name_suggestions !== false })
+      .eq('id', shop.id)
+      .select('use_global_name_suggestions')
+      .single()
+    if (suggestionErr) {
+      const message = suggestionErr.message || ''
+      if (message.includes('use_global_name_suggestions')) {
+        setWarning('Print settings were saved. Product name suggestion preference was not saved because the dictionary preference migration is not yet run.')
+      } else {
+        setError(message)
+        setSaving(false)
+        return
+      }
+    } else if (suggestionSettings) {
+      updatedShop = { ...updatedShop, ...suggestionSettings }
+    }
+    if (updated) setShop(updatedShop)  // reflect in context immediately
     setSaved(true)
     setTimeout(() => setSaved(false), 3000)
     setSaving(false)
@@ -73,6 +104,12 @@ export default function SettingsPage() {
 
       {saved && (
         <div className="mb-3 p-3 bg-green-50 text-green-700 text-sm rounded-lg">✓ Settings saved</div>
+      )}
+      {error && (
+        <div className="mb-3 p-3 bg-red-50 text-red-700 text-sm rounded-lg">{error}</div>
+      )}
+      {warning && (
+        <div className="mb-3 p-3 bg-amber-50 text-amber-700 text-sm rounded-lg">{warning}</div>
       )}
 
       <form onSubmit={save} className="space-y-4">
@@ -135,9 +172,36 @@ export default function SettingsPage() {
         <div className="bg-white rounded-xl border p-5">
           <h2 className="font-semibold mb-3">Print / Invoice</h2>
           <div className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">Print Template</label>
+              <select value={form.print_template || 'standard'} onChange={e => set('print_template', e.target.value)}
+                className="w-full border rounded-lg px-3 py-2 text-sm">
+                <option value="standard">Standard GST invoice</option>
+                <option value="thermal_80mm">Thermal grocery receipt - 80mm</option>
+              </select>
+            </div>
             {f('Footer Text', 'footer_text', { placeholder:'Thank you for your business!' })}
             {f('Logo URL (optional)', 'logo_url', { placeholder:'https://…' })}
           </div>
+        </div>
+
+        {/* Product Name Suggestions */}
+        <div className="bg-white rounded-xl border p-5">
+          <h2 className="font-semibold mb-3">Product Name Suggestions</h2>
+          <label className="flex items-start gap-3 text-sm">
+            <input
+              type="checkbox"
+              checked={form.use_global_name_suggestions !== false}
+              onChange={e => set('use_global_name_suggestions', e.target.checked)}
+              className="mt-0.5 h-4 w-4"
+            />
+            <span>
+              <span className="font-medium text-gray-800">Use central Tamil/local dictionary</span>
+              <span className="block text-xs text-gray-500 mt-1">
+                Turn off if this shop wants only its own saved Tamil names and aliases.
+              </span>
+            </span>
+          </label>
         </div>
 
         <button type="submit" disabled={saving}

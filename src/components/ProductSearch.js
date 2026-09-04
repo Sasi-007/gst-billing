@@ -4,7 +4,8 @@ import { useState, useEffect, useRef } from 'react'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
-import { loadProductSnapshot } from '@/lib/offlineBilling'
+import { loadProductSnapshot, saveProductSnapshot } from '@/lib/offlineBilling'
+import { getProductSubtitle } from '@/lib/productNames'
 
 /**
  * Full-screen modal product search.
@@ -16,64 +17,84 @@ import { loadProductSnapshot } from '@/lib/offlineBilling'
 export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
   const [query,   setQuery]   = useState('')
   const [results, setResults] = useState([])
+  const [products, setProducts] = useState([])
   const [cursor,  setCursor]  = useState(0)
   const [loading, setLoading] = useState(false)
   const [purchaseHints, setPurchaseHints] = useState({})
+  const [inputUnlocked, setInputUnlocked] = useState(false)
   const inputRef  = useRef(null)
   const itemRefs  = useRef([])
   const { shop } = useShop()
 
-  useEffect(() => { inputRef.current?.focus() }, [])
-
-  // Debounced search — 150 ms
   useEffect(() => {
-    if (!query.trim()) { setResults([]); setPurchaseHints({}); return }
-    const timer = setTimeout(search, 150)
-    return () => clearTimeout(timer)
-  }, [query, shop?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+    inputRef.current?.focus()
+  }, [])
 
-  async function search() {
-    const q = query.trim().toLowerCase()
+  useEffect(() => {
     if (!shop?.id) return
-    setLoading(true)
-    try {
-      // Search by the indexed text plus direct HSN/barcode/name fallbacks.
-      const { data, error } = await supabase
-        .from('products')
-        .select('id,name,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code')
-        .or(`search_text.ilike.%${q}%,name.ilike.%${q}%,brand.ilike.%${q}%,barcode.ilike.%${q}%,hsn_code.ilike.%${q}%`)
-        .eq('shop_id', shop.id)
-        .eq('is_active', true)
-        .order('name')
-        .limit(12)
 
-      if (!error) {
-        const rows = data || []
-        setResults(rows)
-        setCursor(0)
-        await loadPurchaseHints(rows)
-        return
+    let cancelled = false
+    async function loadProducts() {
+      const cachedProducts = await loadProductSnapshot(shop.id)
+      if (!cancelled && cachedProducts.length > 0) {
+        setProducts(cachedProducts)
       }
-      throw new Error(error?.message || 'Search failed')
-    } catch {
-      const snapshot = await loadProductSnapshot(shop.id)
-      const rows = snapshot.filter((product) => {
-        if (!q) return true
-        return [
+
+      if (!navigator.onLine) return
+
+      setLoading(true)
+      try {
+        const { data, error } = await supabase
+          .from('products')
+          .select('id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,search_text')
+          .eq('shop_id', shop.id)
+          .eq('is_active', true)
+          .order('name')
+        if (error) throw error
+        if (cancelled) return
+        const rows = data || []
+        setProducts(rows)
+        await saveProductSnapshot(shop.id, rows)
+      } catch {
+        if (!cancelled && cachedProducts.length === 0) setProducts([])
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    loadProducts()
+    return () => { cancelled = true }
+  }, [shop?.id])
+
+  useEffect(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) {
+      setResults([])
+      setPurchaseHints({})
+      return
+    }
+
+    const terms = q.split(/\s+/).filter(Boolean)
+    const rows = products
+      .filter((product) => {
+        const haystack = [
           product.name,
+          product.local_name,
           product.brand,
           product.barcode,
           product.hsn_code,
           product.search_text,
-        ].some((field) => String(field || '').toLowerCase().includes(q))
-      }).slice(0, 12)
-      setResults(rows)
-      setCursor(0)
-      await loadPurchaseHints(rows)
-    } finally {
-      setLoading(false)
-    }
-  }
+          ...(Array.isArray(product.search_aliases) ? product.search_aliases : []),
+        ].join(' ').toLowerCase()
+        return terms.every((term) => haystack.includes(term))
+      })
+      .slice(0, 12)
+
+    setResults(rows)
+    setCursor(0)
+    setPurchaseHints({})
+    loadPurchaseHints(rows)
+  }, [query, products]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function loadPurchaseHints(products) {
     const productIds = products.map((product) => product.id).filter(Boolean)
@@ -202,10 +223,18 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
           <input
             ref={inputRef}
             type="text"
+            name="no-autofill-product-search"
+            autoComplete="new-password"
+            autoCorrect="off"
+            autoCapitalize="none"
+            spellCheck={false}
+            aria-autocomplete="none"
+            readOnly={!inputUnlocked}
+            onFocus={() => setInputUnlocked(true)}
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={handleKey}
-            placeholder="Search by name, barcode, brand, HSN or tag…"
+            placeholder="Search by name, Tamil/local name, Tanglish alias, barcode, brand or HSN…"
             className="flex-1 text-base outline-none min-w-0"
           />
           {loading && <span className="text-xs text-gray-400 animate-pulse flex-shrink-0">searching…</span>}
@@ -280,6 +309,8 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
                 fallbackMrp ? `MRP ${fallbackMrp}` : null,
               ].filter(Boolean).join(' · ')
 
+          const productSubtitle = getProductSubtitle(p)
+
           return (
             <div
               key={p.id}
@@ -294,6 +325,9 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
             >
               <div className="flex-1 min-w-0">
                 <div className="font-medium text-gray-900 truncate">{p.name}</div>
+                {productSubtitle && (
+                  <div className="text-xs text-gray-500 truncate">{productSubtitle}</div>
+                )}
                 <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                   {p.brand && <span className="text-xs bg-gray-100 text-gray-600 px-1.5 rounded">{p.brand}</span>}
                   {p.barcode && <span className="text-xs font-mono text-gray-400">{p.barcode}</span>}

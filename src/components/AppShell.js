@@ -6,7 +6,7 @@ import LoadingPlaceholder from './LoadingPlaceholder'
 import Sidebar from './Sidebar'
 import { usePathname } from 'next/navigation'
 
-const PUBLIC_PATHS = ['/login', '/onboarding']
+const PUBLIC_PATHS = ['/login', '/onboarding', '/store']
 const DEFAULT_SIDEBAR_MODE = 'expanded'
 
 export default function AppShell({ children }) {
