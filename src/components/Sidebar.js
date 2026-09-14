@@ -15,6 +15,7 @@ const NAV = [
   { href: '/customers', icon: '👥', label: 'Customers',  key: 'c' },
   { href: '/credits',   icon: '📒', label: 'Credit Book',key: 'u' },
   { href: '/inventory', icon: '📦', label: 'Inventory',  key: 'i' },
+  { href: '/price-check', icon: '💰', label: 'Price Check',  key: null },
   { href: '/online',    icon: '🌐', label: 'Online Store', key: 'o' },
   { href: '/categories', icon: '🏷️', label: 'Categories', key: null },
   { href: '/purchases', icon: '🛒', label: 'Purchases',  key: 'p' },
@@ -47,6 +48,7 @@ const NAV_SECTIONS = [
 const MOBILE_NAV = [
   { href: '/',          icon: '📊', label: 'Home'     },
   { href: '/billing',   icon: '🧾', label: 'Bill'     },
+  { href: '/price-check',   icon: '💰', label: 'Price'     },
   { href: '/customers', icon: '👥', label: 'Users'    },
   { href: '/credits',   icon: '📒', label: 'Credit'   },
   { href: '/inventory', icon: '📦', label: 'Stock'    },

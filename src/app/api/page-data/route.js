@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
+export const dynamic = 'force-dynamic'
+
 const CACHE_TTL_MS = 45 * 1000
 const pageCache = new Map()
 
