@@ -82,6 +82,11 @@ function StandardInvoiceTemplate({ data }) {
           </div>
         )}
 
+        <div className="inv-customer" style={{ display: 'flex', justifyContent: 'space-between' }}>
+          {bill.place_of_supply && <span>Place of Supply: <strong>{bill.place_of_supply}</strong></span>}
+          <span>GST Payable on Reverse Charge: <strong>{bill.reverse_charge ? 'Yes' : 'No'}</strong></span>
+        </div>
+
         {/* ── Items ───────────────────────────────────── */}
         <table className="inv-table">
           <thead>
@@ -178,6 +183,11 @@ function StandardInvoiceTemplate({ data }) {
         </div>
 
         {bill.notes && <div className="inv-notes">Note: {bill.notes}</div>}
+
+        <div className="inv-signatory" style={{ marginTop: '40px', textAlign: 'right'}}>
+          <div>For {s?.name || s?.shop_name || 'My Shop'}</div>
+          <div style={{ marginTop: '40px' }}>Authorised Signatory</div>
+        </div>
 
       </div>
     </div>
@@ -312,6 +322,7 @@ function ThermalReceiptTemplate({ data }) {
             <span>Received : {Number(bill.paid_amount ?? totals.total ?? 0).toFixed(2)}</span>
             <span>Balance : {Number(Math.max(0, (totals.total || 0) - (bill.paid_amount ?? totals.total ?? 0))).toFixed(2)}</span>
           </div>
+          {bill.reverse_charge && <p>GST Payable on Reverse Charge: Yes</p>}
           <p>{s?.footer_text || 'THANK YOU FOR SHOPPING WITH US'}</p>
           <p>VISIT US AGAIN !</p>
         </footer>

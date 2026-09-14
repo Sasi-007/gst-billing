@@ -1,12 +1,13 @@
 'use client'
 
-import Link from 'next/link'
 import { useState, useEffect } from 'react'
 import { useRouter, useParams, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt, GST_RATES } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
 import { findProductNameSuggestions, saveProductNameSuggestion } from '@/lib/productNameSuggestions'
+import {suggestGstRateForHsn} from '@/lib/hsnGstReference'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'dozen', 'box', 'pack', 'bottle', 'roll', 'strip', 'pair']
 
@@ -65,6 +66,9 @@ export default function ProductFormPage() {
 
   const [form,      setForm]      = useState(blank)
   const [cats,      setCats]      = useState([])
+  const [showAddCat, setShowAddCat] = useState(false)
+  const [newCatName, setNewCatName] = useState('')
+  const [addingCat,  setAddingCat]  = useState(false)
   const [suppliers, setSuppliers] = useState([])
   const [saving,    setSaving]    = useState(false)
   const [error,     setError]     = useState('')
@@ -75,7 +79,17 @@ export default function ProductFormPage() {
   const [marginPct, setMarginPct] = useState('')
   const [localNameSuggestions, setLocalNameSuggestions] = useState([])
   const [suggestionLoading, setSuggestionLoading] = useState(false)
+  const [hsnGstSuggestion, setHsnGstSuggestion] = useState(null)
+  const debouncedHsnCode = useDebouncedValue(form.hsn_code, 400)
   const { shop } = useShop()
+
+  useEffect(() => {
+    let cancelled = false
+    suggestGstRateForHsn(debouncedHsnCode).then((suggestion) => {
+      if (!cancelled) setHsnGstSuggestion(suggestion)
+    })
+    return () => { cancelled = true }
+  }, [debouncedHsnCode])
 
   function loadCats() {
     if (!shop?.id) return
@@ -85,6 +99,28 @@ export default function ProductFormPage() {
       .eq('shop_id', shop.id)
       .order('name')
       .then(({ data }) => setCats(data || []))
+  }
+
+  async function addCategoryInline() {
+    const name = newCatName.trim()
+    if (!name || !shop?.id) return
+    setAddingCat(true)
+    try {
+      const { data, error: catErr } = await supabase
+        .from('categories')
+        .insert({ shop_id: shop.id, name })
+        .select()
+        .single()
+      if (catErr) throw catErr
+      setCats(prev => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)))
+      set('category_id', data.id)
+      setNewCatName('')
+      setShowAddCat(false)
+    } catch (err) {
+      setError(err.message || 'Failed to add category')
+    } finally {
+      setAddingCat(false)
+    }
   }
 
   useEffect(() => {
@@ -248,6 +284,7 @@ export default function ProductFormPage() {
   }
 
   function set(k, v) {
+    if (k === 'name' || k === 'brand') v = String(v || '').toUpperCase()
     setForm(f => {
       const next = { ...f, [k]: v }
       if (useMarginHelper && k === 'purchase_price') {
@@ -475,14 +512,35 @@ export default function ProductFormPage() {
                 <option value="">— Select —</option>
                 {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
-              <Link
-                href="/categories"
+              <button
+                type="button"
+                onClick={() => setShowAddCat(v => !v)}
                 className="px-3 py-2 rounded-lg border bg-gray-50 text-xs text-gray-700 whitespace-nowrap hover:bg-gray-100"
-                title="Manage categories"
+                title="Add a new category without leaving this page"
               >
-                Manage
-              </Link>
+                + New
+              </button>
             </div>
+            {showAddCat && (
+              <div className="mt-2 flex gap-2">
+                <input
+                  autoFocus
+                  value={newCatName}
+                  onChange={e => setNewCatName(e.target.value.toUpperCase())}
+                  onKeyDown={e => { if (e.key === 'Enter' ) { e.preventDefault(); addCategoryInline() } }}
+                  placeholder="New category name"
+                  className="flex-1 border rounded-lg px-3 py-2 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={addCategoryInline}
+                  disabled={addingCat || !newCatName.trim()}
+                  className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {addingCat ? 'Adding…' : 'Add'}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Unit */}
@@ -511,6 +569,22 @@ export default function ProductFormPage() {
                 </option>
               ))}
             </select>
+            {hsnGstSuggestion && Number(hsnGstSuggestion.gst_rate) !== Number(form.gst_rate) && (
+              <div className="mt-1 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded px-2 py-1 flex items-center justify-between gap-2">
+                <span>
+                  Suggested: <strong>{hsnGstSuggestion.gst_rate}%</strong> for HSN {hsnGstSuggestion.hsn_code}
+                  {hsnGstSuggestion.description ? ` ${hsnGstSuggestion.description}` : ''}
+                  {` `}- please verify, not a certified rate.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => set('gst_rate', hsnGstSuggestion.gst_rate)}
+                  className="shrink-0 text-amber-900 font-medium underline"
+                >
+                  Use Suggested
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Prices */}
@@ -574,7 +648,25 @@ export default function ProductFormPage() {
           </div>
 
           {/* Stock */}
-          {field('Current Stock', 'stock_qty', { type:'number', min:'0', step:'0.001' })}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              {isNew ? 'Opening Stock (qty already in hand, before any purchase)' : 'Current Stock'}
+            </label>
+            <input
+              value={form.stock_qty ?? ''}
+              onChange={e => set('stock_qty', e.target.value)}
+              type="number"
+              min="0" step="0.001"
+              className="w-full border rounded-lg px-3 py-2 text-sm"
+            />
+            {isNew && (
+              <div className="mt-1 text-xs text-amber-600">
+                ⚠️If you're about to record a Purchase Bill for this product, leave this as <strong>0</strong>.
+                Purchase quantities get <strong>added</strong> to this number, not overwritten - entering stock here
+                and then adding the same quantity again in Purchase will double-count it.
+              </div>
+            )}
+          </div>
           {field('Min Stock (Reorder level)', 'min_stock', { type:'number', min:'0', step:'0.001' })}
 
           {/* Supplier */}

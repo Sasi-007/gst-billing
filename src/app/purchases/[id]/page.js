@@ -45,7 +45,7 @@ export default function PurchaseDetailsPage() {
 
         const { data: lineItems, error: itemsErr } = await supabase
           .from('purchase_bill_items')
-          .select('id,product_id,sl_no,product_name,hsn_code,quantity,unit,rate,mrp,gst_rate,gst_amount,total')
+          .select('id,product_id,sl_no,product_name,hsn_code,quantity,unit,rate,mrp,gst_rate,sch_disc_pct,sch_disc_amount,cash_disc_pct,cash_disc_amount,taxable_amount,gst_amount,cgst_amount,sgst_amount,igst_amount,total')
           .eq('purchase_bill_id', id)
           .eq('shop_id', shop.id)
           .order('sl_no')
@@ -143,14 +143,14 @@ export default function PurchaseDetailsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 border-b text-xs text-gray-500">
-                {['#', 'Product', 'HSN', 'Qty', 'Unit', 'Rate', 'MRP', 'GST%', 'GST', 'Amount'].map(h => (
-                  <th key={h} className="px-3 py-2 text-left">{h}</th>
+                {['#', 'Product', 'HSN', 'Qty', 'Unit', 'Base Rate', 'MRP', 'Sch Disc%', 'Cash Disc%', 'Taxable Amount', 'GST%',...(bill.is_interstate ? ['IGST'] : ['CGST', 'SGST']), 'Net Amt'].map(h => (
+                  <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {items.length === 0 ? (
-                <tr><td colSpan={10} className="px-3 py-4 text-center text-gray-400">No line items found</td></tr>
+                <tr><td colSpan={13} className="px-3 py-4 text-center text-gray-400">No line items found</td></tr>
               ) : (
                 items.map((it, idx) => (
                   <tr key={it.id || idx} className="border-b last:border-b-0">
@@ -161,8 +161,18 @@ export default function PurchaseDetailsPage() {
                     <td className="px-3 py-2">{it.unit || 'pcs'}</td>
                     <td className="px-3 py-2">{fmt(it.rate)}</td>
                     <td className="px-3 py-2">{fmt(it.mrp)}</td>
+                    <td className="px-3 py-2">{it.sch_disc_pct ? `${it.sch_disc_pct}%` : '—'}</td>
+                    <td className="px-3 py-2">{it.cash_disc_pct ? `${it.cash_disc_pct}%` : '—'}</td>
+                    <td className="px-3 py-2">{fmt(it.taxable_amount)}</td>
                     <td className="px-3 py-2">{it.gst_rate}%</td>
-                    <td className="px-3 py-2">{fmt(it.gst_amount)}</td>
+                    {bill.is_interstate ? (
+                      <td className="px-3 py-2">{fmt(it.igst_amount)}</td>
+                    ) : (
+                      <>
+                        <td className="px-3 py-2">{fmt(it.cgst_amount)}</td>
+                        <td className="px-3 py-2">{fmt(it.sgst_amount)}</td>
+                      </>
+                    )}
                     <td className="px-3 py-2 font-medium">{fmt(it.total)}</td>
                   </tr>
                 ))
@@ -179,6 +189,9 @@ function PurchasePrintTemplate({ shop, bill, items }) {
   const subtotal = Number(bill.subtotal || 0)
   const gst = Number(bill.gst_amount || 0)
   const total = Number(bill.total || 0)
+  const cgst = items.reduce((s, it) => s + Number(it.cgst_amount || 0), 0)
+  const sgst = items.reduce((s, it) => s + Number(it.sgst_amount || 0), 0)
+  const igst = items.reduce((s, it) => s + Number(it.igst_amount || 0), 0)
 
   return (
     <div className="print-only">
@@ -202,13 +215,18 @@ function PurchasePrintTemplate({ shop, bill, items }) {
         <div className="inv-customer">
           <strong>Supplier: </strong>{bill.suppliers?.name || '—'}
           {bill.supplier_invoice_no && <> | Inv#: {bill.supplier_invoice_no}</>}
+          {bill.is_interstate && <> | Inter-state (IGST)</>}
         </div>
 
         <table className="inv-table">
           <thead>
             <tr>
               <th>#</th><th>Description</th><th className="tc">HSN</th><th className="tc">Qty</th>
-              <th className="tc">Unit</th><th className="tr">Rate</th><th className="tr">MRP</th><th className="tc">GST%</th><th className="tr">Amount</th>
+              <th className="tc">Unit</th><th className="tr">Base Rate</th><th className="tr">MRP</th>
+              <th className="tc">Sch%</th><th className="tc">Cash%</th><th className="tr">Taxable</th>
+              <th className="tc">GST%</th>
+              {bill.is_interstate ? <th className="tr">IGST</th> : <><th className="tr">CGST</th><th className="tr">SGST</th></>}
+              <th className="tr">Net Amt</th>
             </tr>
           </thead>
           <tbody>
@@ -221,7 +239,18 @@ function PurchasePrintTemplate({ shop, bill, items }) {
                 <td className="tc">{it.unit || 'pcs'}</td>
                 <td className="tr">{Number(it.rate || 0).toFixed(2)}</td>
                 <td className="tr">{Number(it.mrp || 0).toFixed(2)}</td>
+                <td className="tc">{it.sch_pct || 0}</td>
+                <td className="tc">{it.cash_disc_pct || 0}</td>
+                <td className="tc">{Number(it.taxable_amount || 0).toFixed(2)}</td>
                 <td className="tc">{it.gst_rate}%</td>
+                {bill.is_interstate ? (
+                  <td className="tr">{Number(it.igst_amount || 0).toFixed(2)}</td>
+                ) : (
+                  <>
+                    <td className="tr">{Number(it.cgst_amount || 0).toFixed(2)}</td>
+                    <td className="tr">{Number(it.sgst_amount || 0).toFixed(2)}</td>
+                  </>
+                )}
                 <td className="tr">{Number(it.total || 0).toFixed(2)}</td>
               </tr>
             ))}
@@ -229,8 +258,18 @@ function PurchasePrintTemplate({ shop, bill, items }) {
         </table>
 
         <div className="inv-amount-box" style={{ marginTop: 12, marginLeft: 'auto' }}>
-          <div className="row"><span>Subtotal</span><span>{subtotal.toFixed(2)}</span></div>
-          <div className="row"><span>GST</span><span>{gst.toFixed(2)}</span></div>
+          <div className="row"><span>Subtotal (Taxable)</span><span>{subtotal.toFixed(2)}</span></div>
+          {bill.is_interstate ? (
+            <div className="row"><span>IGST</span><span>{igst.toFixed(2)}</span></div>
+          ) : (
+            <>
+              <div className="row"><span>CGST</span><span>{cgst.toFixed(2)}</span></div>
+              <div className="row"><span>SGST</span><span>{sgst.toFixed(2)}</span></div>
+            </>
+          )}
+          {Number(bill.round_off || 0) !== 0 && (
+            <div className="row"><span>Round Off</span><span>{Number(bill.round_off).toFixed(2)}</span></div>
+          )}
           <div className="row grand"><span>TOTAL</span><span>{total.toFixed(2)}</span></div>
         </div>
       </div>

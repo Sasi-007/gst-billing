@@ -28,18 +28,57 @@ export function calcItem(rate, qty, gstRate, discPct = 0) {
   }
 }
 
+export function calcPurchaseItem(rate, qty, gstRate, schDiscAmt = 0, cashDiscAmt = 0, isInterstate = false, taxableOverride = null) {
+  const gross         = round2((rate || 0) * (qty || 0))
+  const schDiscAmount = round2(schDiscAmt || 0)
+  const afterSchDisc   = round2(gross - schDiscAmount)
+  const cashDiscAmount = round2(cashDiscAmt || 0)
+  const computedTaxable = round2(afterSchDisc - cashDiscAmount)
+  const taxableAmount = (taxableOverride !== null && taxableOverride !== undefined && taxableOverride !== '')
+    ? round2(parseFloat(taxableOverride) || 0)
+    : computedTaxable
+  const gstAmount = round2(taxableAmount * (gstRate || 0) / 100)
+  const netAmount = round2(taxableAmount + gstAmount)
+  const cgstAmount = isInterstate ? 0 : round2(gstAmount / 2)
+  const sgstAmount = isInterstate ? 0 : round2(gstAmount / 2)
+  const igstAmount = isInterstate ? gstAmount : 0
+  const schDiscPct = gross > 0 ? round2((schDiscAmount / gross) * 100) : 0
+  const cashDiscPct = afterSchDisc > 0 ? round2((cashDiscAmount / afterSchDisc) * 100) : 0
+
+  return {
+    gross_amount:    gross,
+    sch_disc_pct:    schDiscPct,
+    sch_disc_amount: schDiscAmount,
+    cash_disc_pct:   cashDiscPct,
+    cash_disc_amount: cashDiscAmount,
+    base_amount:     taxableAmount,
+    taxable_amount:  taxableAmount,
+    gst_amount:      gstAmount,
+    cgst_amount:     cgstAmount,
+    sgst_amount:     sgstAmount,
+    igst_amount:     igstAmount,
+    total:           netAmount,
+  }
+}
+
 // Aggregate bill totals and per-rate GST breakdown
 export function calcBillTotals(items) {
   let subtotal       = 0
   let gstAmount      = 0
   let discountAmount = 0
+  let cgstAmount     = 0
+  let sgstAmount     = 0
+  let igstAmount     = 0
   let total          = 0
   const gstBreakdown = {}   // { '5': { base, gst }, '12': {...} }
 
   for (const item of items) {
     subtotal       += item.base_amount    || 0
     gstAmount      += item.gst_amount     || 0
-    discountAmount += item.discount_amount|| 0
+    discountAmount += (item.discount_amount || 0) + (item.sch_disc_amount || 0) + (item.cash_disc_amount || 0)
+    cgstAmount     += item.cgst_amount    || 0
+    sgstAmount     += item.sgst_amount    || 0
+    igstAmount     += item.igst_amount    || 0
     total          += item.total          || 0
 
     const r = String(item.gst_rate || 0)
@@ -52,6 +91,9 @@ export function calcBillTotals(items) {
     subtotal:       round2(subtotal),
     gstAmount:      round2(gstAmount),
     discountAmount: round2(discountAmount),
+    cgstAmount:     round2(cgstAmount),
+    sgstAmount:     round2(sgstAmount),
+    igstAmount:     round2(igstAmount),
     total:          round2(total),
     gstBreakdown,
   }

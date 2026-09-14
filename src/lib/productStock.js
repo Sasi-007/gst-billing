@@ -57,7 +57,7 @@ export async function syncProductPricingFromLatestPurchases(shopId, productIds) 
 
   const { data: itemRows, error: itemErr } = await supabase
     .from('purchase_bill_items')
-    .select('product_id,purchase_bill_id,rate,mrp,created_at')
+    .select('product_id,purchase_bill_id,rate,mrp,quantity,total,created_at')
     .eq('shop_id', shopId)
     .in('product_id', uniqueProductIds)
   if (itemErr) throw itemErr
@@ -83,10 +83,14 @@ export async function syncProductPricingFromLatestPurchases(shopId, productIds) 
     const latestRow = latestByProduct.get(productId)
     if (!latestRow) continue
 
+    const qty = Number(latestRow.quantity || 0)
+    const netTotal = Number(latestRow.total || 0)
+    const netPerUnit = qty > 0 ? netTotal / qty : Number(latestRow.rate || 0)
+
     const { error: updateErr } = await supabase
       .from('products')
       .update({
-        purchase_price: Number(latestRow.rate || 0),
+        purchase_price: Math.round(netPerUnit * 100) / 100,
         mrp: Number(latestRow.mrp || 0),
       })
       .eq('id', productId)

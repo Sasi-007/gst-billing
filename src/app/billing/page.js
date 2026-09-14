@@ -481,6 +481,8 @@ export default function BillingPage() {
   const [payMode,     setPayMode]     = useState('Cash')
   const [paidAmt,     setPaidAmt]     = useState('')
   const [notes,       setNotes]       = useState('')
+  const [placeOfSupply, setPlaceOfSupply] = useState('')
+  const [reverseCharge, setReverseCharge] = useState(false)
   const [customerPickerOpen, setCustomerPickerOpen] = useState(false)
   const [customerPickerSearch, setCustomerPickerSearch] = useState('')
   const [customerDirectory, setCustomerDirectory] = useState([])
@@ -528,6 +530,12 @@ export default function BillingPage() {
 
   const { shop } = useShop()
   const customerDirectoryCacheKey = shop?.id ? `customers-directory:${shop.id}` : ''
+
+  useEffect(() => {
+    if (shop?.state && !placeOfSupply) {
+      setPlaceOfSupply(shop.state)
+    }
+  }, [shop?.state])
 
   const setViewMode = useCallback((nextView) => {
     setView(nextView)
@@ -631,6 +639,8 @@ export default function BillingPage() {
         setPayMode(draft.payMode || 'Cash')
         setPaidAmt(draft.paidAmt || '')
         setNotes(draft.notes || '')
+        setPlaceOfSupply(draft.placeOfSupply || shop.state || '')
+        setReverseCharge(!!draft.reverseCharge)
         setConversionSource(draft.conversionSource || null)
         showToast('Restored unsaved bill draft')
       } catch (error) {
@@ -656,10 +666,11 @@ export default function BillingPage() {
       payMode,
       paidAmt,
       notes,
+      placeOfSupply,
+      reverseCharge,
       conversionSource,
     })
-  }, [shop?.id, items, customer, billDate, billNo, billType, payMode, paidAmt, notes, conversionSource])
-
+  }, [shop?.id, items, customer, billDate, billNo, billType, payMode, paidAmt, notes, placeOfSupply, reverseCharge, conversionSource])
   useEffect(() => {
     if (!shop?.id || !mounted || !navigator.onLine) return
 
@@ -1017,6 +1028,8 @@ export default function BillingPage() {
       setPayMode(b.payment_mode ? b.payment_mode.charAt(0).toUpperCase() + b.payment_mode.slice(1) : 'Cash')
       setPaidAmt(String(b.paid_amount ?? ''))
       setNotes(b.notes || '')
+      setPlaceOfSupply(b.place_of_supply || shop?.state || '')
+      setReverseCharge(!!b.reverse_charge)
 
       const loaded = (lines || []).map((it) => {
         const product = it.product_id ? productPricingMap.get(it.product_id) : null
@@ -1580,6 +1593,8 @@ export default function BillingPage() {
     setBillNo('')
     setPaidAmt('')
     setNotes('')
+    setPlaceOfSupply(shop?.state || '')
+    setReverseCharge(false)
     setActiveRow(0)
     setPrintData(null)
     setSearchOpen(false)
@@ -1662,6 +1677,8 @@ export default function BillingPage() {
         payment_mode:     normalizePaymentModeForDb(payMode),
         payment_status:   paid >= totals.total ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
         notes:            notes || null,
+        place_of_supply:  placeOfSupply || shop.state || null,
+        reverse_charge:   reverseCharge,
       }
 
       const lineItems = filledItems.map((item, i) => ({
@@ -2383,6 +2400,27 @@ export default function BillingPage() {
               className="w-full border rounded px-2 py-1 text-sm resize-none"
             />
             <div className="flex flex-wrap items-end gap-3">
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">Place of Supply</div>
+                <input
+                  type="text"
+                  value={placeOfSupply}
+                  onChange={e => setPlaceOfSupply(e.target.value)}
+                  placeholder="State"
+                  className="border rounded px-2 py-1 text-sm w-32"
+                />
+              </div>
+              <div className="flex items-center gap-1.5 pb-1.5">
+                <input 
+                  id="reverseCharge"
+                  type="checkbox"
+                  checked={reverseCharge}
+                  onChange={e => setReverseCharge(e.target.checked)}
+                />
+                <label htmlFor="reverseCharge" className="text-xs text-gray-600">
+                  GST Reverse Charge
+                </label>
+              </div>
               <div>
                 <div className="text-xs text-gray-500 mb-0.5">Payment Mode</div>
                 <select

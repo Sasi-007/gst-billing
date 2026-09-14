@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
+import { calcPurchaseItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
 import { todayStr } from '@/lib/finance'
 import ProductSearch from '@/components/ProductSearch'
 import BillScanner from '@/components/BillScanner'
@@ -21,6 +21,7 @@ import {
   removePendingAction,
   updatePendingAction,
 } from '@/lib/offlineBilling'
+import { parse } from 'next/dist/build/swc'
 
 function isOnline() {
   return typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -33,7 +34,7 @@ function emptyItem() {
   return {
     _id: uid(), product_id: null, product_name: '', hsn_code: '',
     unit: 'pcs', quantity: '', rate: '', mrp: '', gst_rate: 0,
-    base_amount: 0, gst_amount: 0, total: 0,
+    sch_disc_pct: '', sch_disc_amount: 0, cash_disc_pct: '', cash_disc_amount: 0, taxable_override: '', base_amount: 0, taxable_amount: 0, gst_amount: 0, cgst_amount: 0, sgst_amount: 0, igst_amount: 0, total: 0,
   }
 }
 
@@ -45,22 +46,24 @@ export default function NewPurchasePage() {
   const router = useRouter()
   const searchParams = useSearchParams()
 
-  const [items,      setItems]     = useState([emptyItem()])
-  const [suppId,     setSuppId]    = useState('')
-  const [suppInv,    setSuppInv]   = useState('')
-  const [date,       setDate]      = useState(todayStr())
-  const [payMode,    setPayMode]   = useState('Credit')
-  const [paidAmt,    setPaidAmt]   = useState('')
-  const [notes,      setNotes]     = useState('')
-  const [suppliers,  setSuppliers] = useState([])
-  const [settings,   setSettings]  = useState(null)
+  const [items, setItems] = useState([emptyItem()])
+  const [suppId, setSuppId] = useState('')
+  const [suppInv, setSuppInv] = useState('')
+  const [date, setDate] = useState(todayStr())
+  const [payMode, setPayMode] = useState('Credit')
+  const [paidAmt, setPaidAmt] = useState('')
+  const [notes, setNotes] = useState('')
+  const [isInterstate, setIsInterstate] = useState(false)
+  const [roundOff, setRoundOff] = useState('')
+  const [suppliers, setSuppliers] = useState([])
+  const [settings, setSettings] = useState(null)
 
   const { shop } = useShop()
 
   const [searchOpen, setSearchOpen] = useState(false)
-  const [activeRow,  setActiveRow]  = useState(0)
-  const [saving,     setSaving]     = useState(false)
-  const [toast,      setToast]      = useState(null)
+  const [activeRow, setActiveRow] = useState(0)
+  const [saving, setSaving] = useState(false)
+  const [toast, setToast] = useState(null)
   const [editPurchaseId, setEditPurchaseId] = useState(null)
   const [offlineNotice, setOfflineNotice] = useState('')
   const syncInProgressRef = useRef(false)
@@ -96,7 +99,7 @@ export default function NewPurchasePage() {
           .single(),
         supabase
           .from('purchase_bill_items')
-          .select('id,product_id,product_name,hsn_code,unit,quantity,rate,mrp,gst_rate,gst_amount,total,sl_no')
+          .select('id,product_id,product_name,hsn_code,unit,quantity,rate,mrp,gst_rate,sch_disc_pct,sch_disc_amount,cash_disc_pct,cash_disc_amount,taxable_amount,gst_amount,cgst_amount,sgst_amount,igst_amount,total,sl_no')
           .eq('purchase_bill_id', editId)
           .eq('shop_id', shop.id)
           .order('sl_no'),
@@ -113,6 +116,8 @@ export default function NewPurchasePage() {
       setPayMode(b.payment_mode ? b.payment_mode.charAt(0).toUpperCase() + b.payment_mode.slice(1) : 'Credit')
       setPaidAmt(String(b.paid_amount ?? ''))
       setNotes(b.notes || '')
+      setIsInterstate(!!b.is_interstate)
+      setRoundOff(b.round_off_amount ? String(b.round_off_amount) : '')
 
       const loaded = (lines || []).map((it) => ({
         _id: uid(),
@@ -124,8 +129,16 @@ export default function NewPurchasePage() {
         rate: it.rate ?? 0,
         mrp: it.mrp ?? 0,
         gst_rate: it.gst_rate ?? 0,
+        sch_disc_pct: it.sch_disc_pct ?? '',
+        sch_disc_amount: it.sch_disc_amount ?? 0,
+        cash_disc_pct: it.cash_disc_pct ?? '',
+        cash_disc_amount: it.cash_disc_amount ?? 0,
+        taxable_amount: it.taxable_amount ?? 0,
         base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
         gst_amount: it.gst_amount ?? 0,
+        cgst_amount: it.cgst_amount ?? 0,
+        sgst_amount: it.sgst_amount ?? 0,
+        igst_amount: it.igst_amount ?? 0,
         total: it.total ?? 0,
       }))
       setItems(loaded.length ? loaded : [emptyItem()])
@@ -189,9 +202,17 @@ export default function NewPurchasePage() {
               quantity: parseFloat(item.quantity) || 1,
               rate: parseFloat(item.rate) || 0,
               mrp: parseFloat(item.mrp) || 0,
-              base_rate: (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
+              base_rate: parseFloat(item.rate) || 0,
               gst_rate: item.gst_rate || 0,
+              sch_disc_pct: parseFloat(item.sch_disc_pct) || 0,
+              sch_disc_amount: item.sch_disc_amount || 0,
+              cash_disc_pct: parseFloat(item.cash_disc_pct) || 0,
+              cash_disc_amount: item.cash_disc_amount || 0,
+              taxable_amount: item.taxable_amount || 0,
               gst_amount: item.gst_amount || 0,
+              cgst_amount: item.cgst_amount || 0,
+              sgst_amount: item.sgst_amount || 0,
+              igst_amount: item.igst_amount || 0,
               total: item.total || 0,
             }))
 
@@ -229,7 +250,15 @@ export default function NewPurchasePage() {
 
   function recalc(item) {
     if (!item.product_id && !item.product_name) return item
-    const c = calcItem(parseFloat(item.rate) || 0, parseFloat(item.quantity) || 0, parseFloat(item.gst_rate) || 0, 0)
+    const c = calcPurchaseItem(
+      parseFloat(item.rate) || 0,
+      parseFloat(item.quantity) || 0,
+      parseFloat(item.gst_rate) || 0,
+      parseFloat(item.sch_disc_pct) || 0,
+      parseFloat(item.cash_disc_pct) || 0,
+      isInterstate,
+      item.taxable_override,
+    )
     return { ...item, ...c }
   }
 
@@ -261,16 +290,16 @@ export default function NewPurchasePage() {
       const n = [...prev]
       n[activeRow] = {
         ...n[activeRow],
-        product_id:   null,
+        product_id: null,
         product_name: name,
-        unit:         'pcs',
-        quantity:     1,
-        rate:         '',
-        mrp:          '',
-        gst_rate:     0,
-        base_amount:  0,
-        gst_amount:   0,
-        total:        0,
+        unit: 'pcs',
+        quantity: 1,
+        rate: '',
+        mrp: '',
+        gst_rate: 0,
+        base_amount: 0,
+        gst_amount: 0,
+        total: 0,
       }
       return n
     })
@@ -293,20 +322,24 @@ export default function NewPurchasePage() {
 
   const filledItems = items.filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
   const totals = calcBillTotals(filledItems)
+  const roundOffAmount = parseFloat(roundOff) || 0
+  const grandTotal = Math.round((totals.total + roundOffAmount) * 100) / 100
 
   // ── AI scan apply ─────────────────────────────────────────────────────────
   function handleScanApply(scanResult) {
     if (!scanResult?.items?.length) return
     const newItems = scanResult.items.map(item => {
       const base = emptyItem()
-      const calc = calcItem(item.rate || 0, item.quantity || 1, item.gst_rate || 0, 0)
-      return { ...base, product_name: item.name, hsn_code: item.hsn_code || '',
+      const calc = calcPurchaseItem(item.rate || 0, item.quantity || 1, item.gst_rate || 0, 0, 0, isInterstate)
+      return {
+        ...base, product_name: item.name, hsn_code: item.hsn_code || '',
         unit: item.unit || 'pcs', quantity: item.quantity || 1,
-        rate: item.rate || 0, mrp: item.mrp || item.rate || 0, gst_rate: item.gst_rate || 0, ...calc }
+        rate: item.rate || 0, mrp: item.mrp || item.rate || 0, gst_rate: item.gst_rate || 0, ...calc
+      }
     })
     setItems(newItems)
     if (scanResult.invoice_number) setSuppInv(scanResult.invoice_number)
-    if (scanResult.invoice_date)   setDate(scanResult.invoice_date)
+    if (scanResult.invoice_date) setDate(scanResult.invoice_date)
     // Try to match supplier by GSTIN
     if (scanResult.supplier_gstin) {
       const matched = suppliers.find(s =>
@@ -325,17 +358,19 @@ export default function NewPurchasePage() {
         if (editPurchaseId) throw new Error('Editing purchases offline is not available yet')
         const tempNo = makeTempBillNo('OFF')
         const purchaseRow = {
-          shop_id:            shop.id,
-          bill_no:            tempNo,
-          supplier_id:        suppId || null,
+          shop_id: shop.id,
+          bill_no: tempNo,
+          supplier_id: suppId || null,
           supplier_invoice_no: suppInv || null,
           date,
           subtotal: totals.subtotal,
           gst_amount: totals.gstAmount,
-          total: totals.total,
+          is_interstate: isInterstate,
+          round_off_amount: roundOffAmount,
+          total: grandTotal,
           paid_amount: paid,
           payment_mode: payMode.toLowerCase(),
-          payment_status: paid >= totals.total ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
+          payment_status: paid >= grandTotal ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
           notes: notes || null,
         }
         await enqueuePendingAction(shop.id, {
@@ -350,7 +385,15 @@ export default function NewPurchasePage() {
             rate: parseFloat(item.rate) || 0,
             mrp: parseFloat(item.mrp) || 0,
             gst_rate: item.gst_rate || 0,
+            sch_disc_pct: parseFloat(item.sch_disc_pct) || 0,
+            sch_disc_amount: item.sch_disc_amount || 0,
+            cash_disc_pct: parseFloat(item.cash_disc_pct) || 0,
+            cash_disc_amount: item.cash_disc_amount || 0,
+            taxable_amount: item.taxable_amount || 0,
             gst_amount: item.gst_amount || 0,
+            cgst_amount: item.cgst_amount || 0,
+            sgst_amount: item.sgst_amount || 0,
+            igst_amount: item.igst_amount || 0,
             total: item.total || 0,
           })),
         })
@@ -398,17 +441,19 @@ export default function NewPurchasePage() {
       }
 
       const purchaseRow = {
-        shop_id:            shop.id,
-        bill_no:            no,
+        shop_id: shop.id,
+        bill_no: no,
         supplier_id: suppId || null,
         supplier_invoice_no: suppInv || null,
         date,
         subtotal: totals.subtotal,
         gst_amount: totals.gstAmount,
-        total: totals.total,
+        is_interstate: isInterstate,
+        round_off_amount: roundOffAmount,
+        total: grandTotal,
         paid_amount: paid,
         payment_mode: payMode.toLowerCase(),
-        payment_status: paid >= totals.total ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
+        payment_status: paid >= grandTotal ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
         notes: notes || null,
       }
 
@@ -440,7 +485,7 @@ export default function NewPurchasePage() {
 
       const { error: itemErr } = await supabase.from('purchase_bill_items').insert(
         filledItems.map((item, i) => ({
-          shop_id:         shop.id,
+          shop_id: shop.id,
           purchase_bill_id: purchaseId,
           product_id: item.product_id,
           sl_no: i + 1,
@@ -450,9 +495,17 @@ export default function NewPurchasePage() {
           quantity: parseFloat(item.quantity) || 1,
           rate: parseFloat(item.rate) || 0,
           mrp: parseFloat(item.mrp) || 0,
-          base_rate: (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
+          base_rate: parseFloat(item.rate) || 0,
           gst_rate: item.gst_rate || 0,
+          sch_disc_pct: parseFloat(item.sch_disc_pct) || 0,
+          sch_disc_amount: item.sch_disc_amount || 0,
+          cash_disc_pct: parseFloat(item.cash_disc_pct) || 0,
+          cash_disc_amount: item.cash_disc_amount || 0,
+          taxable_amount: item.taxable_amount || 0,
           gst_amount: item.gst_amount || 0,
+          cgst_amount: item.cgst_amount || 0,
+          sgst_amount: item.sgst_amount || 0,
+          igst_amount: item.igst_amount || 0,
           total: item.total || 0,
         }))
       )
@@ -474,7 +527,7 @@ export default function NewPurchasePage() {
   useEffect(() => {
     function onKey(e) {
       if (searchOpen) return
-      if (e.key === 'F3' || (e.key === '/' && !['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName))) {
+      if (e.key === 'F3' || (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName))) {
         e.preventDefault(); openSearch(activeRow)
       }
       if (e.key === 'F4') { e.preventDefault(); addRow() }
@@ -483,16 +536,15 @@ export default function NewPurchasePage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchOpen, activeRow, items, settings, filledItems, totals])
 
   return (
     <>
       {searchOpen && <ProductSearch onSelect={handleProductSelect} onAddFreeText={handleFreeTextItem} onClose={() => setSearchOpen(false)} />}
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow text-white text-sm font-medium ${
-          toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'
-        }`}>{toast.msg}</div>
+        <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow text-white text-sm font-medium ${toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'
+          }`}>{toast.msg}</div>
       )}
 
       <div className="flex flex-col h-full">
@@ -538,6 +590,30 @@ export default function NewPurchasePage() {
               placeholder="e.g. SUP-1234"
               className="border rounded px-2 py-1 text-sm w-36" />
           </div>
+          <label className="flex items-center gap-1.5 text-xs text-gray-600">
+            <input
+              type="checkbox"
+              checked={isInterstate}
+              onChange={e => {
+                const next = e.target.checked
+                setIsInterstate(next)
+                setItems(prev => prev.map(item => {
+                  if (!item.product_id && !item.product_name) return item
+                  const c = calcPurchaseItem(
+                    parseFloat(item.rate) || 0,
+                    parseFloat(item.quantity) || 0,
+                    parseFloat(item.gst_rate) || 0,
+                    parseFloat(item.sch_disc_pct) || 0,
+                    parseFloat(item.cash_disc_pct) || 0,
+                    next,
+                    item.taxable_override,
+                  )
+                  return { ...item, ...c }
+                }))
+              }}
+            />
+            Inter-state (IGST)
+          </label>
         </div>
 
         {/* AI Bill Scanner */}
@@ -547,7 +623,7 @@ export default function NewPurchasePage() {
 
         {/* Items table */}
         <div className="flex-1 overflow-y-auto px-4 pt-3">
-          <table className="w-full min-w-[600px] bg-white border rounded-lg text-sm border-collapse">
+          <table className="w-full min-w-[1100px] bg-white border rounded-lg text-sm border-collapse">
             <thead>
               <tr className="bg-gray-100 text-gray-600 text-xs">
                 <th className="px-2 py-2 text-left w-8">#</th>
@@ -555,10 +631,21 @@ export default function NewPurchasePage() {
                 <th className="px-2 py-2 text-center w-16">HSN</th>
                 <th className="px-2 py-2 text-center w-20">Qty</th>
                 <th className="px-2 py-2 text-center w-14">Unit</th>
-                <th className="px-2 py-2 text-right w-24">Rate (₹)</th>
+                <th className="px-2 py-2 text-right w-24">Base Rate (₹)</th>
                 <th className="px-2 py-2 text-right w-24">MRP (₹)</th>
+                <th className="px-2 py-2 text-center w-20">Sch Disc (₹)</th>
+                <th className="px-2 py-2 text-center w-20">Cash Disc (₹)</th>
                 <th className="px-2 py-2 text-center w-16">GST%</th>
-                <th className="px-2 py-2 text-right w-24">Amount (₹)</th>
+                <th className="px-2 py-2 text-right w-24">Taxable Amount (₹)</th>
+                {isInterstate ? (
+                  <th className="px-2 py-2 text-right w-24">IGST (₹)</th>
+                ) : (
+                  <>
+                    <th className="px-2 py-2 text-right w-24">CGST (₹)</th>
+                    <th className="px-2 py-2 text-right w-24">SGST (₹)</th>
+                  </>
+                )}
+                <th className="px-2 py-2 text-right w-24">Net Amt (₹)</th>
                 <th className="px-2 py-2 w-7"></th>
               </tr>
             </thead>
@@ -598,8 +685,22 @@ export default function NewPurchasePage() {
                     <input id={`mrp-${i}`} type="number" value={item.mrp}
                       onChange={e => updateItem(i, 'mrp', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
-                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addRow() } }}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`schdisc-${i}`) } }}
                       className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" />
+                  </td>
+                  <td className="px-1 py-1">
+                    <input id={`schdisc-${i}`} type="number" value={item.sch_disc_amount}
+                      onChange={e => updateItem(i, 'sch_disc_amount', e.target.value)}
+                      onFocus={e => { setActiveRow(i); e.target.select() }}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`cashdisc-${i}`) } }}
+                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" placeholder="0" />
+                  </td>
+                  <td className="px-1 py-1">
+                    <input id={`cashdisc-${i}`} type="number" value={item.cash_disc_amount}
+                      onChange={e => updateItem(i, 'cash_disc_amount', e.target.value)}
+                      onFocus={e => { setActiveRow(i); e.target.select() }}
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`gst-${i}`) } }}
+                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" placeholder="0" />
                   </td>
                   <td className="px-1 py-1">
                     <select value={item.gst_rate} onChange={e => updateItem(i, 'gst_rate', parseFloat(e.target.value))}
@@ -607,6 +708,21 @@ export default function NewPurchasePage() {
                       {GST_RATES.map(r => <option key={r} value={r}>{r}%</option>)}
                     </select>
                   </td>
+                  <td className="px-1 py-1">
+                    <input type="number" value={item.taxable_override}
+                      onChange={e => updateItem(i, 'taxable_override', e.target.value)}
+                      onFocus={e => { setActiveRow(i); e.target.select() }}
+                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" placeholder={item.taxable_amount > 0 ? fmt(item.taxable_amount) : '0'}
+                      title="Auto-calculated from RatexQty-Discounts. Type here only if the paper Invoice's Taxable Amt differs (due to supplier's rounded rate)." />
+                  </td>
+                  {isInterstate ? (
+                    <td className="px-2 py-1 text-right text-gray-600">{item.igst_amount > 0 ? fmt(item.igst_amount) : '—'}</td>
+                  ) : (
+                    <>
+                      <td className="px-2 py-1 text-right text-gray-600">{item.cgst_amount > 0 ? fmt(item.cgst_amount) : '—'}</td>
+                      <td className="px-2 py-1 text-right text-gray-600">{item.sgst_amount > 0 ? fmt(item.sgst_amount) : '—'}</td>
+                    </>
+                  )}
                   <td className="px-2 py-1 text-right font-medium">{item.total > 0 ? fmt(item.total) : '—'}</td>
                   <td className="px-1 py-1 text-center">
                     <button onClick={e => { e.stopPropagation(); deleteRow(i) }}
@@ -632,7 +748,7 @@ export default function NewPurchasePage() {
                 <div className="text-xs text-gray-500 mb-0.5">Payment Mode</div>
                 <select value={payMode} onChange={e => setPayMode(e.target.value)}
                   className="border rounded px-2 py-1 text-sm">
-                  {['Credit','Cash','UPI','Card','Cheque'].map(m => <option key={m}>{m}</option>)}
+                  {['Credit', 'Cash', 'UPI', 'Card', 'Cheque'].map(m => <option key={m}>{m}</option>)}
                 </select>
               </div>
               <div>
@@ -648,17 +764,39 @@ export default function NewPurchasePage() {
           </div>
           <div className="w-56 bg-gray-50 border rounded-lg px-4 py-3 space-y-1 text-sm">
             <div className="flex justify-between text-gray-500">
-              <span>Subtotal</span><span>{fmt(totals.subtotal)}</span>
+              <span>Subtotal (Taxable)</span><span>{fmt(totals.subtotal)}</span>
             </div>
-            <div className="flex justify-between text-gray-500">
-              <span>GST</span><span>{fmt(totals.gstAmount)}</span>
+            {isInterstate ? (
+              <div className="flex justify-between text-gray-500">
+                <span>IGST</span><span>{fmt(totals.igstAmount || 0)}</span>
+              </div>
+            ) : (
+              <>
+                <div className="flex justify-between text-gray-500">
+                  <span>CGST</span><span>{fmt(totals.cgstAmount || 0)}</span>
+                </div>
+                <div className="flex justify-between text-gray-500">
+                  <span>SGST</span><span>{fmt(totals.sgstAmount || 0)}</span>
+                </div>
+              </>
+            )}
+            <div className="flex justify-between text-gray-500 items-center">
+              <span>Round Off</span>
+              <div className="flex items-center gap-1">
+                <button type="button" title="Auto-fill to nearest rupee"
+                  onClick={() => setRoundOff(String(Math.round(-(totals.total - Math.round(totals.total)) * 100) / 100))}
+                  className="text-[10px] px-1 py-0.5 border rounded text-gray-400 hover:text-gray-600">auto</button>
+                <input type="number" value={roundOff} onChange={e => setRoundOff(e.target.value)}
+                  placeholder="0.00" step="0.01"
+                  className="border rounded px-1 py-0.5 text-right w-16 text-sm" />
+              </div>
             </div>
             <div className="flex justify-between font-bold text-base border-t pt-1">
-              <span>Total</span><span className="text-blue-700">{fmt(totals.total)}</span>
+              <span>Total</span><span className="text-blue-700">{fmt(grandTotal)}</span>
             </div>
           </div>
         </div>
-      </div>
+      </div >
     </>
   )
 }

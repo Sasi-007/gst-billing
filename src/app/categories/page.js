@@ -142,7 +142,7 @@ export default function CategoriesPage() {
         <div className="flex flex-col sm:flex-row gap-2">
           <input
             value={newName}
-            onChange={e => setNewName(e.target.value)}
+            onChange={e => setNewName(e.target.value.toUpperCase())}
             onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), addCategory())}
             placeholder="New category name"
             className="flex-1 border rounded-lg px-3 py-2 text-sm"
@@ -171,7 +171,7 @@ export default function CategoriesPage() {
                   <>
                     <input
                       value={editingName}
-                      onChange={e => setEditingName(e.target.value)}
+                      onChange={e => setEditingName(e.target.value.toUpperCase())}
                       className="flex-1 border rounded-lg px-3 py-2 text-sm"
                     />
                     <button
