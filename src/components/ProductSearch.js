@@ -43,14 +43,20 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
   const [cursor,  setCursor]  = useState(0)
   const [loading, setLoading] = useState(false)
   const [purchaseHints, setPurchaseHints] = useState({})
-  const [inputUnlocked, setInputUnlocked] = useState(false)
   const debouncedQuery = useDebouncedValue(query, 180)
   const inputRef  = useRef(null)
   const itemRefs  = useRef([])
   const offlineProductsRef = useRef([])
   const { shop } = useShop()
 
+  // Desktop: focus the search box immediately for keyboard-driven billing.
+  // Touch devices: skip it — a programmatic focus never opens the virtual
+  // keyboard, and leaving the field already focused stops the user's own tap
+  // from firing a focus event, which would make the keyboard unreachable.
   useEffect(() => {
+    const isTouch = typeof window !== 'undefined'
+      && window.matchMedia?.('(hover: none) and (pointer: coarse)').matches
+    if (isTouch) return
     inputRef.current?.focus()
   }, [])
 
@@ -286,7 +292,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-12 sm:pt-16 bg-black/60 px-2"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-4 sm:pt-16 bg-black/60 px-2"
       onClick={e => e.target === e.currentTarget && onClose()}
     >
       <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
@@ -303,8 +309,6 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
             autoCapitalize="none"
             spellCheck={false}
             aria-autocomplete="none"
-            readOnly={!inputUnlocked}
-            onFocus={() => setInputUnlocked(true)}
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={handleKey}
@@ -315,8 +319,9 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-lg leading-none flex-shrink-0">✕</button>
         </div>
 
-        {/* Results list */}
-        <div className="max-h-72 overflow-y-auto">
+        {/* Results list — capped to the visible area so the on-screen
+            keyboard never hides the whole list on phones */}
+        <div className="max-h-[45vh] sm:max-h-72 overflow-y-auto overscroll-contain">
           {!trimmed && (
             <div className="px-4 py-5 text-center text-gray-400 text-sm">
               Start typing to search products
@@ -433,8 +438,8 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
           })}
         </div>
 
-        {/* Keyboard hints */}
-        <div className="px-4 py-1.5 bg-gray-50 border-t text-xs text-gray-400 flex flex-wrap gap-3">
+        {/* Keyboard hints — desktop only; meaningless on touch devices */}
+        <div className="hidden md:flex px-4 py-1.5 bg-gray-50 border-t text-xs text-gray-400 flex-wrap gap-3">
           <span>↑↓ navigate</span>
           <span>Enter select</span>
           {trimmed && results.length === 0 && onAddFreeText && (

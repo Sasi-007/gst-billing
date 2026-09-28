@@ -66,6 +66,15 @@ kbd {
   display: none;
 }
 
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 /* ── Safe-area for iPhone bottom bar notch ──────── */
 
 .safe-bottom {

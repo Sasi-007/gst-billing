@@ -780,12 +780,12 @@ export default function NewPurchasePage() {
     <>
       {searchOpen && <ProductSearch onSelect={handleProductSelect} onAddFreeText={handleFreeTextItem} onClose={() => setSearchOpen(false)} />}
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow text-white text-sm font-medium ${
+        <div className={`fixed top-4 left-4 right-4 z-50 px-4 py-2 rounded-lg shadow text-white text-sm font-medium sm:left-auto sm:max-w-sm ${
           toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'
         }`}>{toast.msg}</div>
       )}
 
-      <div className="flex flex-col h-full">
+      <div className="flex flex-col min-h-full md:h-full">
         {/* Header */}
         <div className="bg-white border-b px-4 py-2 flex items-center justify-between flex-shrink-0">
           <div className="flex items-center gap-3">
@@ -896,7 +896,8 @@ export default function NewPurchasePage() {
         </div>
 
         {/* Items table */}
-        <div className="flex-1 overflow-y-auto px-4 pt-3">
+        <div className="flex-1 md:overflow-y-auto px-4 pt-3 min-h-[45vh] md:min-h-0">
+          <div className="table-scroll">
           <table className="w-full min-w-[1100px] bg-white border rounded-lg text-sm border-collapse">
             <thead>
               <tr className="bg-gray-100 text-gray-600 text-xs">
@@ -933,7 +934,7 @@ export default function NewPurchasePage() {
                       className={`text-left w-full truncate ${item.product_name ? 'font-medium' : 'text-gray-400 italic text-xs'}`}
                       onClick={e => { e.stopPropagation(); openSearch(i) }}
                     >
-                      {item.product_name || 'Press F3 to search product…'}
+                      {item.product_name || 'Tap to search product…'}
                     </button>
                   </td>
                   <td className="px-1 py-1">
@@ -1008,13 +1009,14 @@ export default function NewPurchasePage() {
               ))}
             </tbody>
           </table>
+          </div>
           <button onClick={addRow} className="mt-2 text-sm text-blue-600 hover:underline">
-            + Add Row <kbd className="text-xs">F4</kbd>
+            + Add Row <kbd className="hidden md:inline text-xs">F4</kbd>
           </button>
         </div>
 
         {/* Footer */}
-        <div className="flex-shrink-0 border-t bg-white px-4 py-3 flex gap-4">
+        <div className="flex-shrink-0 border-t bg-white px-4 py-3 flex flex-col md:flex-row gap-4">
           <div className="flex-1 space-y-2">
             <textarea value={notes} onChange={e => setNotes(e.target.value)}
               placeholder="Notes" rows={2}

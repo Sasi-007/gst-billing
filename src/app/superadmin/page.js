@@ -281,10 +281,10 @@ export default function SuperadminPage() {
       )}
 
       {/* Tabs */}
-      <div className="flex gap-1 mb-4">
+      <div className="flex gap-1 mb-4 overflow-x-auto no-scrollbar -mx-4 px-4 sm:mx-0 sm:px-0">
         {['shops','users','name-suggestions','new-user'].map(t => (
           <button key={t} onClick={() => setTab(t)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors capitalize ${
+            className={`shrink-0 px-4 py-2 rounded-lg text-sm font-medium transition-colors capitalize ${
               tab === t ? 'bg-blue-600 text-white' : 'bg-white border text-gray-600 hover:bg-gray-50'
             }`}>
             {t === 'new-user' ? '+ Create User' : t === 'name-suggestions' ? 'Name Suggestions' : t.charAt(0).toUpperCase() + t.slice(1)}

@@ -572,10 +572,10 @@ export default function BillingPage() {
   const { shop } = useShop()
   const customerDirectoryCacheKey = shop?.id ? `customers-directory:${shop.id}` : ''
 
+  // Default place of supply to the shop's own registered state (most common case)
   useEffect(() => {
-    if (shop?.state && !placeOfSupply) {
-      setPlaceOfSupply(shop.state)
-    }
+    if (shop?.state && !placeOfSupply) setPlaceOfSupply(shop.state)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shop?.state])
 
   const setViewMode = useCallback((nextView) => {
@@ -2040,17 +2040,19 @@ export default function BillingPage() {
 
       {/* Toast notification */}
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow-lg text-white text-sm font-medium no-print ${
+        <div className={`fixed top-4 left-4 right-4 z-50 px-4 py-2 rounded-lg shadow-lg text-white text-sm font-medium no-print sm:left-auto sm:max-w-sm ${
           toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'
         }`}>
           {toast.msg}
         </div>
       )}
 
-      <div className="flex flex-col h-full no-print">
+      {/* On mobile the fixed 3-pane column collapsed the items area to a few
+          pixels, so below md the page flows in one natural scroll instead. */}
+      <div className="flex flex-col min-h-full md:h-full no-print">
 
         {/* ── Top bar ─────────────────────────────────────────────────── */}
-        <div className="bg-white border-b px-4 py-2 flex items-center gap-4 flex-shrink-0">
+        <div className="bg-white border-b px-4 py-2 flex flex-wrap items-center gap-2 sm:gap-4 flex-shrink-0">
           <div className="flex items-center gap-2">
             <select
               value={billType}
@@ -2076,7 +2078,7 @@ export default function BillingPage() {
           </div>
 
           {view === 'form' && (
-            <div className="flex items-center gap-2 ml-auto text-sm">
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto sm:ml-auto text-sm">
               {editBillId && (
                 <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-xs font-medium">
                   Editing Existing Bill
@@ -2089,7 +2091,7 @@ export default function BillingPage() {
                 placeholder="Auto"
                 className="border rounded px-2 py-1 w-28 font-mono text-sm"
               />
-              <label className="text-gray-500 ml-2">Date</label>
+              <label className="text-gray-500 sm:ml-2">Date</label>
               <input
                 type="date"
                 value={billDate}
@@ -2287,14 +2289,14 @@ export default function BillingPage() {
         {/* ── Customer row, items, footer (form view only) ─────────── */}
         {view === 'form' && (<>
         {/* ── Customer row ────────────────────────────────────────────── */}
-        <div className="bg-white border-b px-4 py-2 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 flex-shrink-0">
+        <div className="bg-white border-b px-4 py-2 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2 sm:gap-3 flex-shrink-0">
           <div className="flex items-center gap-1 min-w-0 flex-wrap">
             <span className="text-xs text-gray-400 whitespace-nowrap">Customer:</span>
             <input
               id="customer-name"
               value={customer.name}
               onChange={e => setCustomer(c => ({ ...c, name: e.target.value }))}
-              placeholder="Name (optional)" className="border rounded px-2 py-1 text-sm w-40" />
+              placeholder="Name (optional)" className="border rounded px-2 py-1 text-sm flex-1 min-w-0 sm:flex-none sm:w-40" />
             <button
               type="button"
               onClick={() => {
@@ -2313,24 +2315,24 @@ export default function BillingPage() {
           <div className="flex items-center gap-1 min-w-0">
             <span className="text-xs text-gray-400 whitespace-nowrap">Phone:</span>
             <input id="customer-phone" value={customer.phone} onChange={e => setCustomer(c => ({ ...c, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
-              placeholder="Phone" className="border rounded px-2 py-1 text-sm w-32" />
+              placeholder="Phone" className="border rounded px-2 py-1 text-sm flex-1 min-w-0 sm:flex-none sm:w-32" />
           </div>
           <div className="flex items-center gap-1 min-w-0">
             <span className="text-xs text-gray-400 whitespace-nowrap">GSTIN:</span>
             <input value={customer.gstin}
               onChange={e => setCustomer(c => ({ ...c, gstin: e.target.value.toUpperCase().slice(0, 15) }))}
               placeholder="Customer GSTIN" maxLength={15}
-              className="border rounded px-2 py-1 text-sm w-40 font-mono uppercase" />
+              className="border rounded px-2 py-1 text-sm flex-1 min-w-0 sm:flex-none sm:w-40 font-mono uppercase" />
           </div>
           <div className="flex items-center gap-1 min-w-0">
             <span className="text-xs text-gray-400 whitespace-nowrap">Address:</span>
             <input value={customer.address} onChange={e => setCustomer(c => ({ ...c, address: e.target.value }))}
-              placeholder="Address" className="border rounded px-2 py-1 text-sm w-48" />
+              placeholder="Address" className="border rounded px-2 py-1 text-sm flex-1 min-w-0 sm:flex-none sm:w-48" />
           </div>
         </div>
 
         {/* ── Bill items table ─────────────────────────────────────────── */}
-        <div className="flex-1 overflow-y-auto px-4 pt-3">
+        <div className="flex-1 md:overflow-y-auto px-4 pt-3 min-h-[45vh] md:min-h-0">
           <div className="table-scroll">
           <table className="w-full min-w-[560px] md:min-w-[640px] bg-white border rounded-lg text-sm border-collapse billing-table">
             <thead>
@@ -2377,9 +2379,9 @@ export default function BillingPage() {
                       onClick={e => { e.stopPropagation(); openSearch(i) }}
                       onFocus={() => setActiveRow(i)}
                       tabIndex={0}
-                      title="Press F3 or / to search"
+                      title="Tap to search, or press F3 / on a keyboard"
                     >
-                      {item.product_name || 'Press F3 or / to search product…'}
+                      {item.product_name || 'Tap to search product…'}
                     </button>
                     {item.product_name && hasStockQty && (
                       <div className="mt-0.5 text-xs text-gray-500">
@@ -2516,7 +2518,7 @@ export default function BillingPage() {
             onClick={addRow}
             className="mt-2 text-sm text-blue-600 hover:text-blue-800 hover:underline"
           >
-            + Add Row &nbsp;<kbd className="text-xs">F4</kbd>
+            + Add Row &nbsp;<kbd className="hidden md:inline text-xs">F4</kbd>
           </button>
           </div>{/* end table-scroll */}
         </div>
@@ -2525,7 +2527,7 @@ export default function BillingPage() {
         <div className="flex-shrink-0 border-t bg-white px-4 py-3 flex flex-col md:flex-row gap-4">
 
           {/* Left: notes + payment */}
-          <div className="flex-1 space-y-2">
+          <div className="flex-1 space-y-2 order-2 md:order-1">
             <textarea
               value={notes}
               onChange={e => setNotes(e.target.value)}
@@ -2545,15 +2547,13 @@ export default function BillingPage() {
                 />
               </div>
               <div className="flex items-center gap-1.5 pb-1.5">
-                <input 
+                <input
                   id="reverseCharge"
                   type="checkbox"
                   checked={reverseCharge}
                   onChange={e => setReverseCharge(e.target.checked)}
                 />
-                <label htmlFor="reverseCharge" className="text-xs text-gray-600">
-                  GST Reverse Charge
-                </label>
+                <label htmlFor="reverseCharge" className="text-xs text-gray-600">GST Reverse Charge</label>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-0.5">Payment Mode</div>
@@ -2576,32 +2576,32 @@ export default function BillingPage() {
                 />
               </div>
             </div>
-            <div className="flex gap-2 pt-1">
+            <div className="flex flex-wrap gap-2 pt-1">
               <button
                 onClick={() => handleSave(true)}
                 disabled={saving}
-                className="px-4 py-2 bg-blue-600 text-white rounded font-medium hover:bg-blue-700 disabled:opacity-50 text-sm"
+                className="flex-1 sm:flex-none px-4 py-2.5 bg-blue-600 text-white rounded font-medium hover:bg-blue-700 disabled:opacity-50 text-sm"
               >
-                {saving ? 'Saving…' : 'F8: Save + Print'}
+                {saving ? 'Saving…' : <><span className="hidden md:inline">F8: </span>Save + Print</>}
               </button>
               <button
                 onClick={() => handleSave(false)}
                 disabled={saving}
-                className="px-4 py-2 bg-green-600 text-white rounded font-medium hover:bg-green-700 disabled:opacity-50 text-sm"
+                className="flex-1 sm:flex-none px-4 py-2.5 bg-green-600 text-white rounded font-medium hover:bg-green-700 disabled:opacity-50 text-sm"
               >
-                F9: Save
+                <span className="hidden md:inline">F9: </span>Save
               </button>
               <button
                 onClick={handleNewBill}
-                className="px-4 py-2 bg-gray-200 text-gray-700 rounded font-medium hover:bg-gray-300 text-sm"
+                className="flex-1 sm:flex-none px-4 py-2.5 bg-gray-200 text-gray-700 rounded font-medium hover:bg-gray-300 text-sm"
               >
-                F2: New Bill
+                <span className="hidden md:inline">F2: </span>New Bill
               </button>
             </div>
           </div>
 
           {/* Right: totals box */}
-          <div className="w-full md:w-64 bg-gray-50 border rounded-lg px-4 py-3 space-y-1 text-sm">
+          <div className="w-full md:w-64 bg-gray-50 border rounded-lg px-4 py-3 space-y-1 text-sm order-1 md:order-2">
             <div className="flex justify-between">
               <span className="text-gray-500">Subtotal (excl. GST)</span>
               <span>{fmt(totals.subtotal)}</span>

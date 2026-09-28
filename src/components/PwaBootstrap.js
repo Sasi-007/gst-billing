@@ -85,7 +85,7 @@ export default function PwaBootstrap() {
   if (isOnline && pendingCount === 0) return null
 
   return (
-    <div className="fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-lg">
+    <div className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900 px-4 py-2 text-center text-sm font-medium text-white shadow-lg max-w-[92vw] md:bottom-3">
       {!isOnline
         ? 'Offline mode active — saved work will sync when internet returns.'
         : `${pendingCount} queued change${pendingCount === 1 ? '' : 's'} waiting to sync`}

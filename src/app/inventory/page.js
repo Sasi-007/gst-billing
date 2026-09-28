@@ -358,7 +358,7 @@ export default function InventoryPage() {
   return (
     <div className="p-4">
       {/* Header */}
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
         <div>
           <h1 className="text-xl font-bold text-gray-900">Inventory</h1>
           <div className="flex gap-3 text-xs mt-0.5">
@@ -366,7 +366,7 @@ export default function InventoryPage() {
             {lowCount > 0 && <span className="text-yellow-600 font-medium">⚡ {lowCount} low stock</span>}
           </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={downloadCsv}

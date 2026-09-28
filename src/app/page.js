@@ -243,7 +243,8 @@ export default function DashboardPage() {
           <h2 className="font-semibold text-sm text-gray-700">Recent Bills</h2>
           <Link href="/reports" className="text-xs text-blue-600 hover:underline">All reports</Link>
         </div>
-        <table className="w-full text-sm">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[560px] text-sm">
           <thead>
             <tr className="text-xs text-gray-500 border-b bg-gray-50">
               {['Bill No','Date','Customer','Amount','Mode','Status'].map(h => (
@@ -276,6 +277,7 @@ export default function DashboardPage() {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
     </div>
   )

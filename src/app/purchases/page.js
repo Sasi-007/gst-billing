@@ -245,7 +245,7 @@ export default function PurchasesPage() {
 
   return (
     <div className="p-4">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
         <div>
           <h1 className="text-xl font-bold text-gray-900">Purchases</h1>
           <div className="text-xs text-gray-500 mt-0.5">
@@ -253,7 +253,7 @@ export default function PurchasesPage() {
             {unpaidAmt > 0 && <span className="text-red-600 ml-2">· Unpaid: {fmt(unpaidAmt)}</span>}
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             type="button"
             onClick={handleExportPurchases}

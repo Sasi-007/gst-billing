@@ -1101,7 +1101,7 @@ export default function ReportsPage() {
       <h1 className="text-xl font-bold mb-3">Reports</h1>
 
       {/* Date range */}
-      <div className="flex items-center gap-3 mb-4">
+      <div className="flex flex-wrap items-center gap-3 mb-4">
         <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
           className="border rounded-lg px-3 py-2 text-sm" />
         <span className="text-gray-400">to</span>
@@ -1120,10 +1120,10 @@ export default function ReportsPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 mb-4">
+      <div className="flex gap-1 mb-4 overflow-x-auto no-scrollbar -mx-4 px-4 sm:mx-0 sm:px-0">
         {TABS.map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
-            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+            className={`shrink-0 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
               tab === t.key ? 'bg-blue-600 text-white' : 'bg-white border text-gray-600 hover:bg-gray-50'
             }`}>
             {t.label}
