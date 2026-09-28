@@ -2289,14 +2289,14 @@ export default function BillingPage() {
         {/* ── Customer row, items, footer (form view only) ─────────── */}
         {view === 'form' && (<>
         {/* ── Customer row ────────────────────────────────────────────── */}
-        <div className="bg-white border-b px-4 py-2 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2 sm:gap-3 flex-shrink-0">
-          <div className="flex items-center gap-1 min-w-0 flex-wrap">
-            <span className="text-xs text-gray-400 whitespace-nowrap">Customer:</span>
+        <div className="bg-white border-b px-4 py-2 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-2 sm:gap-3 items-center flex-shrink-0">
+          <div className="flex flex-nowrap items-center gap-1 min-w-0">
+            <span className="text-xs text-gray-400 whitespace-nowrap w-16 shrink-0">Customer:</span>
             <input
               id="customer-name"
               value={customer.name}
               onChange={e => setCustomer(c => ({ ...c, name: e.target.value }))}
-              placeholder="Name (optional)" className="border rounded px-2 py-1 text-sm flex-1 min-w-0 sm:flex-none sm:w-40" />
+              placeholder="Name (optional)" className="border rounded px-2 py-1 text-sm flex-1 min-w-0" />
             <button
               type="button"
               onClick={() => {
@@ -2304,30 +2304,30 @@ export default function BillingPage() {
                 setCustomerPickerOpen(true)
                 loadCustomerDirectory({ preferCache: true, silent: true })
               }}
-              className="rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
+              className="shrink-0 rounded border border-blue-200 bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 hover:bg-blue-100"
             >
               Select
             </button>
-            <Link href="/customers" className="text-xs text-gray-500 hover:text-blue-600 hover:underline">
+            <Link href="/customers" className="shrink-0 whitespace-nowrap text-xs text-gray-500 hover:text-blue-600 hover:underline">
               Customers
             </Link>
           </div>
-          <div className="flex items-center gap-1 min-w-0">
-            <span className="text-xs text-gray-400 whitespace-nowrap">Phone:</span>
+          <div className="flex flex-nowrap items-center gap-1 min-w-0">
+            <span className="text-xs text-gray-400 whitespace-nowrap w-16 shrink-0">Phone:</span>
             <input id="customer-phone" value={customer.phone} onChange={e => setCustomer(c => ({ ...c, phone: e.target.value.replace(/\D/g, '').slice(0, 10) }))}
-              placeholder="Phone" className="border rounded px-2 py-1 text-sm flex-1 min-w-0 sm:flex-none sm:w-32" />
+              placeholder="Phone" className="border rounded px-2 py-1 text-sm flex-1 min-w-0" />
           </div>
-          <div className="flex items-center gap-1 min-w-0">
-            <span className="text-xs text-gray-400 whitespace-nowrap">GSTIN:</span>
+          <div className="flex flex-nowrap items-center gap-1 min-w-0">
+            <span className="text-xs text-gray-400 whitespace-nowrap w-16 shrink-0">GSTIN:</span>
             <input value={customer.gstin}
               onChange={e => setCustomer(c => ({ ...c, gstin: e.target.value.toUpperCase().slice(0, 15) }))}
               placeholder="Customer GSTIN" maxLength={15}
-              className="border rounded px-2 py-1 text-sm flex-1 min-w-0 sm:flex-none sm:w-40 font-mono uppercase" />
+              className="border rounded px-2 py-1 text-sm flex-1 min-w-0 font-mono uppercase" />
           </div>
-          <div className="flex items-center gap-1 min-w-0">
-            <span className="text-xs text-gray-400 whitespace-nowrap">Address:</span>
+          <div className="flex flex-nowrap items-center gap-1 min-w-0">
+            <span className="text-xs text-gray-400 whitespace-nowrap w-16 shrink-0">Address:</span>
             <input value={customer.address} onChange={e => setCustomer(c => ({ ...c, address: e.target.value }))}
-              placeholder="Address" className="border rounded px-2 py-1 text-sm flex-1 min-w-0 sm:flex-none sm:w-48" />
+              placeholder="Address" className="border rounded px-2 py-1 text-sm flex-1 min-w-0" />
           </div>
         </div>
 
