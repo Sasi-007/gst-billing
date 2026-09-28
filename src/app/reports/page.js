@@ -11,6 +11,55 @@ import LoadingPlaceholder from '../../components/LoadingPlaceholder'
 import { usePageLoadingState } from '../../context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
 
+function num(value) {
+  return Number(value) || 0
+}
+
+function round2(value) {
+  return Math.round((num(value) + Number.EPSILON) * 100) / 100
+}
+
+function taxableValue(item) {
+  return round2(num(item.taxable_amount) || num(item.base_rate) * num(item.quantity))
+}
+
+function cgstValue(item) {
+  return round2(num(item.cgst_amount) || (num(item.igst_amount) ? 0 : num(item.gst_amount) / 2))
+}
+
+function sgstValue(item) {
+  return round2(num(item.sgst_amount) || (num(item.igst_amount) ? 0 : num(item.gst_amount) / 2))
+}
+
+function igstValue(item) {
+  return round2(num(item.igst_amount))
+}
+
+function formatReportDate(date) {
+  return date ? new Date(date + 'T00:00:00').toLocaleDateString('en-IN') : ''
+}
+
+function csvEscape(value) {
+  const text = value === null || value === undefined ? '' : String(value)
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+function downloadCsv(filename, headers, rows) {
+  const lines = [
+    headers.map(csvEscape).join(','),
+    ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(',')),
+  ]
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
 // ── Sales Summary ──────────────────────────────────────────────────────────
 function SalesSummary({ data, searchTerm }) {
   const bills = Array.isArray(data) ? data : []
@@ -150,6 +199,346 @@ function GSTSummary({ data }) {
       </table>
       <div className="px-4 py-2 text-xs text-gray-400">
         Net GST payable to government = Output GST − Input GST credit
+      </div>
+    </div>
+  )
+}
+
+function GSTAuditorReport({ data, dateFrom, dateTo }) {
+  const salesBills = Array.isArray(data?.salesBills) ? data.salesBills : []
+  const purchaseBills = Array.isArray(data?.purchaseBills) ? data.purchaseBills : []
+  const salesItems = Array.isArray(data?.salesItems) ? data.salesItems : []
+  const purchaseItems = Array.isArray(data?.purchaseItems) ? data.purchaseItems : []
+  const expenses = Array.isArray(data?.expenses) ? data.expenses : []
+
+  const taxMap = {}
+  const hsnMap = {}
+
+  salesItems.forEach((item) => {
+    const rate = String(item.gst_rate || 0)
+    if (!taxMap[rate]) taxMap[rate] = { rate, outwardTaxable: 0, outwardGst: 0, inwardTaxable: 0, inwardGst: 0 }
+    taxMap[rate].outwardTaxable += taxableValue(item)
+    taxMap[rate].outwardGst += num(item.gst_amount)
+
+    const hsn = item.hsn_code || 'Unclassified'
+    const key = `${hsn}:${rate}`
+    if (!hsnMap[key]) hsnMap[key] = { hsn, rate, quantity: 0, taxable: 0, gst: 0, total: 0 }
+    hsnMap[key].quantity += num(item.quantity)
+    hsnMap[key].taxable += taxableValue(item)
+    hsnMap[key].gst += num(item.gst_amount)
+    hsnMap[key].total += num(item.total)
+  })
+
+  purchaseItems.forEach((item) => {
+    const rate = String(item.gst_rate || 0)
+    if (!taxMap[rate]) taxMap[rate] = { rate, outwardTaxable: 0, outwardGst: 0, inwardTaxable: 0, inwardGst: 0 }
+    taxMap[rate].inwardTaxable += taxableValue(item)
+    taxMap[rate].inwardGst += num(item.gst_amount)
+  })
+
+  const taxRows = Object.values(taxMap).sort((a, b) => num(a.rate) - num(b.rate))
+  const hsnRows = Object.values(hsnMap).sort((a, b) => String(a.hsn).localeCompare(String(b.hsn)) || num(a.rate) - num(b.rate))
+  const totalSales = salesBills.reduce((sum, bill) => sum + num(bill.total), 0)
+  const totalPurchases = purchaseBills.reduce((sum, bill) => sum + num(bill.total), 0)
+  const outputGst = salesItems.reduce((sum, item) => sum + num(item.gst_amount), 0)
+  const inputGst = purchaseItems.reduce((sum, item) => sum + num(item.gst_amount), 0)
+  const netPayable = outputGst - inputGst
+  const b2bSalesBills = salesBills.filter((bill) => !!String(bill.customer_gstin || '').trim())
+  const b2cSalesBills = salesBills.filter((bill) => !String(bill.customer_gstin || '').trim())
+  const salesBillById = Object.fromEntries(salesBills.map((bill) => [bill.id, bill]))
+  const purchaseBillById = Object.fromEntries(purchaseBills.map((bill) => [bill.id, bill]))
+  const b2cBillIdSet = new Set(b2cSalesBills.map((bill) => bill.id))
+  const b2cSummaryMap = {}
+
+  const salesRegisterRows = salesBills.map((bill) => ({
+    Date: formatReportDate(bill.date),
+    'Invoice No': bill.bill_no,
+    Customer: bill.customer_name || 'B2C Customer',
+    GSTIN: bill.customer_gstin || '',
+    Type: bill.customer_gstin ? 'B2B' : 'B2C',
+    'Taxable Value': round2(num(bill.subtotal)),
+    CGST: round2(num(bill.cgst_amount) || num(bill.gst_amount) / 2),
+    SGST: round2(num(bill.sgst_amount) || num(bill.gst_amount) / 2),
+    IGST: round2(num(bill.igst_amount)),
+    'Total GST': round2(num(bill.gst_amount)),
+    'Invoice Total': round2(num(bill.total)),
+    'Payment Status': bill.payment_status || '',
+  }))
+  const b2bRegisterRows = salesRegisterRows.filter((row) => row.Type === 'B2B')
+  const b2cRegisterRows = salesRegisterRows.filter((row) => row.Type === 'B2C')
+
+  const purchaseRegisterRows = purchaseBills.map((bill) => ({
+    Date: formatReportDate(bill.date),
+    'Purchase No': bill.bill_no,
+    'Supplier Invoice No': bill.supplier_invoice_no || '',
+    Supplier: bill.suppliers?.name || '',
+    'Supplier GSTIN': bill.suppliers?.gstin || '',
+    Interstate: bill.is_interstate ? 'Yes' : 'No',
+    'Taxable Value': round2(num(bill.subtotal)),
+    CGST: bill.is_interstate ? 0 : round2(num(bill.gst_amount) / 2),
+    SGST: bill.is_interstate ? 0 : round2(num(bill.gst_amount) / 2),
+    IGST: bill.is_interstate ? round2(num(bill.gst_amount)) : 0,
+    'Input GST': round2(num(bill.gst_amount)),
+    'Invoice Total': round2(num(bill.total)),
+    'Payment Status': bill.payment_status || '',
+  }))
+
+  const salesItemRows = salesItems.map((item) => {
+    const bill = salesBillById[item.bill_id] || {}
+    return {
+      Date: formatReportDate(bill.date),
+      'Invoice No': bill.bill_no || '',
+      Customer: bill.customer_name || 'B2C Customer',
+      GSTIN: bill.customer_gstin || '',
+      Product: item.product_name || '',
+      HSN: item.hsn_code || '',
+      Quantity: round2(num(item.quantity)),
+      'GST Rate': `${item.gst_rate || 0}%`,
+      'Taxable Value': taxableValue(item),
+      CGST: round2(num(item.gst_amount) / 2),
+      SGST: round2(num(item.gst_amount) / 2),
+      IGST: 0,
+      'Total GST': round2(num(item.gst_amount)),
+      'Line Total': round2(num(item.total)),
+    }
+  })
+
+  salesItems.forEach((item) => {
+    if (!b2cBillIdSet.has(item.bill_id)) return
+    const rate = String(item.gst_rate || 0)
+    if (!b2cSummaryMap[rate]) b2cSummaryMap[rate] = { rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, gst: 0, total: 0 }
+    b2cSummaryMap[rate].taxable += taxableValue(item)
+    b2cSummaryMap[rate].cgst += round2(num(item.gst_amount) / 2)
+    b2cSummaryMap[rate].sgst += round2(num(item.gst_amount) / 2)
+    b2cSummaryMap[rate].gst += num(item.gst_amount)
+    b2cSummaryMap[rate].total += num(item.total)
+  })
+
+  const b2cSummaryRows = Object.values(b2cSummaryMap)
+    .sort((a, b) => num(a.rate) - num(b.rate))
+    .map((row) => ({
+      'GST Rate': `${row.rate}%`,
+      'Taxable Value': round2(row.taxable),
+      CGST: round2(row.cgst),
+      SGST: round2(row.sgst),
+      IGST: round2(row.igst),
+      'Total GST': round2(row.gst),
+      'Sales Value': round2(row.total),
+    }))
+
+  const purchaseItemRows = purchaseItems.map((item) => {
+    const bill = purchaseBillById[item.purchase_bill_id] || {}
+    return {
+      Date: formatReportDate(bill.date),
+      'Purchase No': bill.bill_no || '',
+      'Supplier Invoice No': bill.supplier_invoice_no || '',
+      Supplier: bill.suppliers?.name || '',
+      'Supplier GSTIN': bill.suppliers?.gstin || '',
+      Product: item.product_name || '',
+      HSN: item.hsn_code || '',
+      Quantity: round2(num(item.quantity)),
+      'GST Rate': `${item.gst_rate || 0}%`,
+      'Taxable Value': taxableValue(item),
+      CGST: cgstValue(item),
+      SGST: sgstValue(item),
+      IGST: igstValue(item),
+      'Input GST': round2(num(item.gst_amount)),
+      'Line Total': round2(num(item.total)),
+    }
+  })
+
+  const taxSummaryRows = taxRows.map((row) => ({
+    'GST Rate': `${row.rate}%`,
+    'Outward Taxable': round2(row.outwardTaxable),
+    'Outward CGST': round2(row.outwardGst / 2),
+    'Outward SGST': round2(row.outwardGst / 2),
+    'Outward GST': round2(row.outwardGst),
+    'Inward Taxable': round2(row.inwardTaxable),
+    'Input GST': round2(row.inwardGst),
+    'Net GST Payable': round2(row.outwardGst - row.inwardGst),
+  }))
+
+  const hsnSummaryRows = hsnRows.map((row) => ({
+    HSN: row.hsn,
+    'GST Rate': `${row.rate}%`,
+    Quantity: round2(row.quantity),
+    'Taxable Value': round2(row.taxable),
+    GST: round2(row.gst),
+    'Sales Value': round2(row.total),
+  }))
+
+  const expenseRows = expenses.map((expense) => ({
+    Date: formatReportDate(expense.expense_date),
+    Title: expense.title,
+    Category: expense.category || '',
+    Amount: round2(expense.amount),
+    'Payment Mode': expense.payment_mode || '',
+    Notes: expense.notes || '',
+  }))
+
+  const prefix = `gst-auditor-${dateFrom}-to-${dateTo}`
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {[
+          { label: 'Sales Turnover', value: fmt(totalSales), cls: 'text-blue-700' },
+          { label: 'Purchase Value', value: fmt(totalPurchases), cls: 'text-purple-700' },
+          { label: 'Output GST', value: fmt(outputGst), cls: 'text-orange-700' },
+          { label: 'Net GST Payable', value: fmt(netPayable), cls: netPayable > 0 ? 'text-red-700' : 'text-green-700' },
+        ].map((card) => (
+          <div key={card.label} className="bg-white border rounded-lg p-3">
+            <div className="text-xs text-gray-500">{card.label}</div>
+            <div className={`text-xl font-bold mt-1 ${card.cls}`}>{card.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="bg-white border rounded-lg p-3">
+          <div className="text-xs text-gray-500">B2C Invoices</div>
+          <div className="text-xl font-bold mt-1 text-green-700">{b2cSalesBills.length}</div>
+          <div className="text-xs text-gray-400">{fmt(b2cSalesBills.reduce((sum, bill) => sum + num(bill.total), 0))}</div>
+        </div>
+        <div className="bg-white border rounded-lg p-3">
+          <div className="text-xs text-gray-500">B2B Invoices</div>
+          <div className="text-xl font-bold mt-1 text-indigo-700">{b2bSalesBills.length}</div>
+          <div className="text-xs text-gray-400">{fmt(b2bSalesBills.reduce((sum, bill) => sum + num(bill.total), 0))}</div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-semibold text-gray-800">GST Auditor Export</div>
+            <div className="text-xs text-gray-500 mt-1">
+              B2C/B2B exports are enabled automatically from billing: invoice with GSTIN = B2B, without GSTIN = B2C.
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={() => downloadCsv(`${prefix}-sales-register.csv`, Object.keys(salesRegisterRows[0] || {
+              Date: '', 'Invoice No': '', Customer: '', GSTIN: '', Type: '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Total GST': '', 'Invoice Total': '', 'Payment Status': '',
+            }), salesRegisterRows)} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Sales CSV</button>
+            {b2cRegisterRows.length > 0 && (
+              <button type="button" onClick={() => downloadCsv(`${prefix}-b2c-sales-register.csv`, Object.keys(b2cRegisterRows[0]), b2cRegisterRows)} className="px-3 py-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">B2C Sales CSV</button>
+            )}
+            {b2cSummaryRows.length > 0 && (
+              <button type="button" onClick={() => downloadCsv(`${prefix}-b2c-summary.csv`, Object.keys(b2cSummaryRows[0]), b2cSummaryRows)} className="px-3 py-2 bg-emerald-600 text-white rounded-lg text-xs font-medium hover:bg-emerald-700">B2C Summary CSV</button>
+            )}
+            {b2bRegisterRows.length > 0 && (
+              <button type="button" onClick={() => downloadCsv(`${prefix}-b2b-sales-register.csv`, Object.keys(b2bRegisterRows[0]), b2bRegisterRows)} className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-xs font-medium hover:bg-indigo-700">B2B Sales CSV</button>
+            )}
+            {salesBills.length > 0 && (
+              <Link href={`/reports/invoice-pack?dateFrom=${dateFrom}&dateTo=${dateTo}`} className="px-3 py-2 bg-red-600 text-white rounded-lg text-xs font-medium hover:bg-red-700">
+                Merged Invoice PDF
+              </Link>
+            )}
+            <button type="button" onClick={() => downloadCsv(`${prefix}-purchase-register.csv`, Object.keys(purchaseRegisterRows[0] || {
+              Date: '', 'Purchase No': '', 'Supplier Invoice No': '', Supplier: '', 'Supplier GSTIN': '', Interstate: '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Input GST': '', 'Invoice Total': '', 'Payment Status': '',
+            }), purchaseRegisterRows)} className="px-3 py-2 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700">Purchases CSV</button>
+            <button type="button" onClick={() => downloadCsv(`${prefix}-sales-items.csv`, Object.keys(salesItemRows[0] || {
+              Date: '', 'Invoice No': '', Customer: '', GSTIN: '', Product: '', HSN: '', Quantity: '', 'GST Rate': '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Total GST': '', 'Line Total': '',
+            }), salesItemRows)} className="px-3 py-2 bg-sky-600 text-white rounded-lg text-xs font-medium hover:bg-sky-700">Sales Items CSV</button>
+            <button type="button" onClick={() => downloadCsv(`${prefix}-purchase-items.csv`, Object.keys(purchaseItemRows[0] || {
+              Date: '', 'Purchase No': '', 'Supplier Invoice No': '', Supplier: '', 'Supplier GSTIN': '', Product: '', HSN: '', Quantity: '', 'GST Rate': '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Input GST': '', 'Line Total': '',
+            }), purchaseItemRows)} className="px-3 py-2 bg-fuchsia-600 text-white rounded-lg text-xs font-medium hover:bg-fuchsia-700">Purchase Items CSV</button>
+            <button type="button" onClick={() => downloadCsv(`${prefix}-tax-summary.csv`, Object.keys(taxSummaryRows[0] || {
+              'GST Rate': '', 'Outward Taxable': '', 'Outward CGST': '', 'Outward SGST': '', 'Outward GST': '', 'Inward Taxable': '', 'Input GST': '', 'Net GST Payable': '',
+            }), taxSummaryRows)} className="px-3 py-2 bg-orange-600 text-white rounded-lg text-xs font-medium hover:bg-orange-700">Tax Summary CSV</button>
+            <button type="button" onClick={() => downloadCsv(`${prefix}-hsn-summary.csv`, Object.keys(hsnSummaryRows[0] || {
+              HSN: '', 'GST Rate': '', Quantity: '', 'Taxable Value': '', GST: '', 'Sales Value': '',
+            }), hsnSummaryRows)} className="px-3 py-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">HSN CSV</button>
+            <button type="button" onClick={() => downloadCsv(`${prefix}-expenses.csv`, Object.keys(expenseRows[0] || {
+              Date: '', Title: '', Category: '', Amount: '', 'Payment Mode': '', Notes: '',
+            }), expenseRows)} className="px-3 py-2 bg-gray-700 text-white rounded-lg text-xs font-medium hover:bg-gray-800">Expenses CSV</button>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl border overflow-x-auto">
+        <div className="px-4 py-3 border-b text-sm font-medium text-gray-700">GST Rate Summary</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-50 text-xs text-gray-500 border-b">
+              {['GST Rate', 'Outward Taxable', 'Outward GST', 'Inward Taxable', 'Input GST', 'Net GST'].map((h) => (
+                <th key={h} className="px-3 py-2 text-right first:text-center">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {taxRows.length === 0 ? (
+              <tr><td colSpan={6} className="px-3 py-6 text-center text-gray-400">No GST transactions found for this period</td></tr>
+            ) : taxRows.map((row) => (
+              <tr key={row.rate} className="border-b hover:bg-gray-50">
+                <td className="px-3 py-1.5 text-center font-medium">{row.rate}%</td>
+                <td className="px-3 py-1.5 text-right">{fmt(row.outwardTaxable)}</td>
+                <td className="px-3 py-1.5 text-right text-orange-700">{fmt(row.outwardGst)}</td>
+                <td className="px-3 py-1.5 text-right">{fmt(row.inwardTaxable)}</td>
+                <td className="px-3 py-1.5 text-right text-blue-700">{fmt(row.inwardGst)}</td>
+                <td className={`px-3 py-1.5 text-right font-semibold ${row.outwardGst - row.inwardGst > 0 ? 'text-red-700' : 'text-green-700'}`}>{fmt(row.outwardGst - row.inwardGst)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="bg-white rounded-xl border overflow-x-auto">
+        <div className="px-4 py-3 border-b text-sm font-medium text-gray-700">B2C Sales Summary</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-50 text-xs text-gray-500 border-b">
+              {['GST Rate', 'Taxable Value', 'CGST', 'SGST', 'IGST', 'Total GST', 'Sales Value'].map((h) => (
+                <th key={h} className="px-3 py-2 text-right first:text-center">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {b2cSummaryRows.length === 0 ? (
+              <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">No B2C invoices found for this period</td></tr>
+            ) : b2cSummaryRows.map((row) => (
+              <tr key={row['GST Rate']} className="border-b hover:bg-gray-50">
+                <td className="px-3 py-1.5 text-center font-medium">{row['GST Rate']}</td>
+                <td className="px-3 py-1.5 text-right">{fmt(row['Taxable Value'])}</td>
+                <td className="px-3 py-1.5 text-right">{fmt(row.CGST)}</td>
+                <td className="px-3 py-1.5 text-right">{fmt(row.SGST)}</td>
+                <td className="px-3 py-1.5 text-right">{fmt(row.IGST)}</td>
+                <td className="px-3 py-1.5 text-right text-orange-700">{fmt(row['Total GST'])}</td>
+                <td className="px-3 py-1.5 text-right font-medium">{fmt(row['Sales Value'])}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="bg-white rounded-xl border overflow-x-auto">
+        <div className="px-4 py-3 border-b text-sm font-medium text-gray-700">HSN Sales Summary</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="bg-gray-50 text-xs text-gray-500 border-b">
+              {['HSN', 'GST Rate', 'Qty', 'Taxable', 'GST', 'Sales Value'].map((h) => (
+                <th key={h} className={`px-3 py-2 ${h === 'HSN' ? 'text-left' : 'text-right'}`}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {hsnRows.length === 0 ? (
+              <tr><td colSpan={6} className="px-3 py-6 text-center text-gray-400">No HSN sales found for this period</td></tr>
+            ) : hsnRows.map((row) => (
+              <tr key={`${row.hsn}-${row.rate}`} className="border-b hover:bg-gray-50">
+                <td className="px-3 py-1.5 font-medium">{row.hsn}</td>
+                <td className="px-3 py-1.5 text-right">{row.rate}%</td>
+                <td className="px-3 py-1.5 text-right">{round2(row.quantity)}</td>
+                <td className="px-3 py-1.5 text-right">{fmt(row.taxable)}</td>
+                <td className="px-3 py-1.5 text-right">{fmt(row.gst)}</td>
+                <td className="px-3 py-1.5 text-right font-medium">{fmt(row.total)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800">
+        ITC is shown from entered GST purchase bills. Final ITC should still be reconciled by the auditor with GSTR-2B on the GST portal.
       </div>
     </div>
   )
@@ -330,9 +719,173 @@ function CreditReportSection({ title, subtitle, accounts, amountClassName, inLab
   )
 }
 
+function billStockCheckGap(row) {
+  try {
+    sessionStorage.setItem('prefillStockCheckItem', JSON.stringify({
+      product_id: row.productId,
+      product_name: row.name,
+      hsn_code: row.hsn,
+      unit: row.unit,
+      gst_rate: row.gstRate,
+      selling_price: row.sellingPrice,
+      quantity: row.otherQty,
+    }))
+  } catch { /* sessionStorage unavailable — link still opens billing */ }
+  window.open('/billing', '_blank')
+}
+
+function StockReconciliation({ data, dateFrom, dateTo }) {
+  const purchaseItems = Array.isArray(data?.purchaseItems) ? data.purchaseItems : []
+  const invoiceItems = Array.isArray(data?.invoiceItems) ? data.invoiceItems : []
+  const otherItems = Array.isArray(data?.otherItems) ? data.otherItems : []
+  const products = Array.isArray(data?.products) ? data.products : []
+  const productById = Object.fromEntries(products.map((product) => [product.id, product]))
+
+  const rowMap = {}
+  function ensureRow(productId) {
+    if (!rowMap[productId]) {
+      const product = productById[productId] || {}
+      rowMap[productId] = {
+        productId,
+        name: product.name || 'Unknown product',
+        hsn: product.hsn_code || '',
+        gstRate: num(product.gst_rate),
+        unit: product.unit || 'pcs',
+        sellingPrice: num(product.selling_price),
+        currentStock: num(product.stock_qty),
+        purchasedQty: 0,
+        invoicedQty: 0,
+        otherQty: 0,
+      }
+    }
+    return rowMap[productId]
+  }
+
+  purchaseItems.forEach((item) => {
+    if (!item.product_id) return
+    ensureRow(item.product_id).purchasedQty += num(item.quantity)
+  })
+  invoiceItems.forEach((item) => {
+    if (!item.product_id) return
+    ensureRow(item.product_id).invoicedQty += num(item.quantity)
+  })
+  otherItems.forEach((item) => {
+    if (!item.product_id) return
+    ensureRow(item.product_id).otherQty += num(item.quantity)
+  })
+
+  const rows = Object.values(rowMap)
+    .map((row) => ({ ...row, gapValue: round2(row.otherQty * row.sellingPrice) }))
+    .sort((a, b) => b.otherQty - a.otherQty || b.purchasedQty - a.purchasedQty)
+
+  const totalPurchased = rows.reduce((sum, row) => sum + row.purchasedQty, 0)
+  const totalInvoiced = rows.reduce((sum, row) => sum + row.invoicedQty, 0)
+  const totalGapQty = rows.reduce((sum, row) => sum + row.otherQty, 0)
+  const totalGapValue = rows.reduce((sum, row) => sum + row.gapValue, 0)
+  const gapRows = rows.filter((row) => row.otherQty > 0)
+
+  const prefix = `stock-check-${dateFrom}-to-${dateTo}`
+  const exportRows = rows.map((row) => ({
+    Product: row.name,
+    HSN: row.hsn,
+    'GST Rate': `${row.gstRate}%`,
+    'Purchased Qty': row.purchasedQty,
+    'GST Invoiced Qty': row.invoicedQty,
+    'Uninvoiced Qty': row.otherQty,
+    'Est. Uninvoiced Value': row.gapValue,
+    'Current Stock': row.currentStock,
+  }))
+
+  return (
+    <div className="space-y-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        {[
+          { label: 'Purchased Qty (Period)', value: totalPurchased.toLocaleString('en-IN'), cls: 'text-purple-700' },
+          { label: 'GST Invoiced Qty (Period)', value: totalInvoiced.toLocaleString('en-IN'), cls: 'text-blue-700' },
+          { label: 'Uninvoiced Qty (Period)', value: totalGapQty.toLocaleString('en-IN'), cls: totalGapQty > 0 ? 'text-red-700' : 'text-green-700' },
+          { label: 'Est. Uninvoiced Value', value: fmt(totalGapValue), cls: totalGapValue > 0 ? 'text-red-700' : 'text-green-700' },
+        ].map((card) => (
+          <div key={card.label} className="bg-white border rounded-lg p-3">
+            <div className="text-xs text-gray-500">{card.label}</div>
+            <div className={`text-xl font-bold mt-1 ${card.cls}`}>{card.value}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-xs text-amber-800">
+        This compares products purchased and sold in this period against GST invoices raised in the same period.
+        <strong> Uninvoiced Qty</strong> is stock that left (via quotation/estimate bills or other recorded sales) without
+        a matching GST invoice — likely missed small-customer bills. Current Stock is the live system stock, shown for reference only.
+      </div>
+
+      <div className="bg-white rounded-xl border overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b">
+          <div className="text-sm font-semibold text-gray-800">Stock vs GST Invoice Coverage</div>
+          <button
+            type="button"
+            onClick={() => downloadCsv(`${prefix}.csv`, Object.keys(exportRows[0] || {
+              Product: '', HSN: '', 'GST Rate': '', 'Purchased Qty': '', 'GST Invoiced Qty': '', 'Uninvoiced Qty': '', 'Est. Uninvoiced Value': '', 'Current Stock': '',
+            }), exportRows)}
+            className="px-3 py-2 bg-gray-800 text-white rounded-lg text-xs font-medium hover:bg-gray-900"
+          >
+            Export CSV
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-gray-50 text-xs text-gray-500 border-b">
+                {['Product', 'HSN', 'GST%', 'Purchased', 'GST Invoiced', 'Uninvoiced', 'Est. Value', 'Current Stock', ''].map((h) => (
+                  <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr><td colSpan={9} className="px-3 py-6 text-center text-gray-400">No purchase or sales activity for this period</td></tr>
+              ) : rows.map((row) => (
+                <tr key={row.productId} className={`border-b hover:bg-gray-50 ${row.otherQty > 0 ? 'bg-red-50' : ''}`}>
+                  <td className="px-3 py-1.5 font-medium text-gray-900">{row.name}</td>
+                  <td className="px-3 py-1.5 text-gray-500">{row.hsn || '—'}</td>
+                  <td className="px-3 py-1.5">{row.gstRate}%</td>
+                  <td className="px-3 py-1.5 text-right">{row.purchasedQty}</td>
+                  <td className="px-3 py-1.5 text-right text-blue-700">{row.invoicedQty}</td>
+                  <td className={`px-3 py-1.5 text-right font-semibold ${row.otherQty > 0 ? 'text-red-700' : 'text-gray-400'}`}>{row.otherQty}</td>
+                  <td className="px-3 py-1.5 text-right">{row.gapValue > 0 ? fmt(row.gapValue) : '—'}</td>
+                  <td className="px-3 py-1.5 text-right">{row.currentStock}</td>
+                  <td className="px-3 py-1.5 text-right">
+                    {row.otherQty > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => billStockCheckGap(row)}
+                        className="text-blue-600 hover:underline text-xs"
+                      >
+                        Bill {row.otherQty} {row.unit}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {gapRows.length > 0 && (
+        <div className="text-xs text-gray-400 px-1">
+          Tip: Open a New GST Invoice, search each flagged product above and bill the shown quantity as a consolidated
+          B2C counter sale to bring GST records in line with actual stock movement.
+        </div>
+      )}
+    </div>
+  )
+}
+
 const TABS = [
   { key:'sales',       label:'Sales Report' },
   { key:'gst',         label:'GST Summary' },
+  { key:'auditor',     label:'GST Auditor' },
+  { key:'stockcheck',  label:'Stock Check' },
   { key:'purchases',   label:'Purchase Report' },
   { key:'credits',     label:'Credit Report' },
   { key:'topproducts', label:'Top Products' },
@@ -346,6 +899,38 @@ async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
   if (tab === 'purchases') {
     const { data } = await supabase.from('purchase_bills').select('*, suppliers(name)').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo).order('date')
     return data || []
+  }
+  if (tab === 'stockcheck') {
+    const [{ data: purchaseBills }, { data: salesBills }] = await Promise.all([
+      supabase.from('purchase_bills').select('id').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo),
+      supabase.from('bills').select('id,bill_type').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo),
+    ])
+    const purchaseBillIds = (purchaseBills || []).map(b => b.id)
+    const invoiceBillIds = (salesBills || []).filter(b => b.bill_type === 'invoice').map(b => b.id)
+    const otherBillIds = (salesBills || []).filter(b => b.bill_type !== 'invoice').map(b => b.id)
+
+    const [{ data: purchaseItems }, { data: invoiceItems }, { data: otherItems }] = await Promise.all([
+      purchaseBillIds.length ? supabase.from('purchase_bill_items').select('product_id,quantity').in('purchase_bill_id', purchaseBillIds) : Promise.resolve({ data: [] }),
+      invoiceBillIds.length ? supabase.from('bill_items').select('product_id,quantity').in('bill_id', invoiceBillIds) : Promise.resolve({ data: [] }),
+      otherBillIds.length ? supabase.from('bill_items').select('product_id,quantity').in('bill_id', otherBillIds) : Promise.resolve({ data: [] }),
+    ])
+
+    const productIds = [...new Set([
+      ...(purchaseItems || []).map(i => i.product_id),
+      ...(invoiceItems || []).map(i => i.product_id),
+      ...(otherItems || []).map(i => i.product_id),
+    ].filter(Boolean))]
+
+    const { data: products } = productIds.length
+      ? await supabase.from('products').select('id,name,hsn_code,gst_rate,unit,stock_qty,selling_price').eq('shop_id', shopId).in('id', productIds)
+      : { data: [] }
+
+    return {
+      purchaseItems: purchaseItems || [],
+      invoiceItems: invoiceItems || [],
+      otherItems: otherItems || [],
+      products: products || [],
+    }
   }
   if (tab === 'credits') {
     const [{ data: accounts }, { data: entries }] = await Promise.all([
@@ -368,6 +953,49 @@ async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
     ])
     return { sales: sales || [], purchases: purchases || [] }
   }
+  if (tab === 'auditor') {
+    const [{ data: salesBills }, { data: purchaseBills }, { data: expenses }] = await Promise.all([
+      supabase
+        .from('bills')
+        .select('id,bill_no,date,customer_name,customer_gstin,subtotal,cgst_amount,sgst_amount,igst_amount,gst_amount,total,payment_status')
+        .eq('shop_id', shopId)
+        .eq('bill_type', 'invoice')
+        .gte('date', dateFrom)
+        .lte('date', dateTo)
+        .order('date'),
+      supabase
+        .from('purchase_bills')
+        .select('id,bill_no,supplier_invoice_no,date,subtotal,gst_amount,total,payment_status,is_interstate,suppliers(name,gstin)')
+        .eq('shop_id', shopId)
+        .gte('date', dateFrom)
+        .lte('date', dateTo)
+        .order('date'),
+      supabase
+        .from('expenses')
+        .select('expense_date,title,category,amount,payment_mode,notes')
+        .eq('shop_id', shopId)
+        .gte('expense_date', dateFrom)
+        .lte('expense_date', dateTo)
+        .order('expense_date'),
+    ])
+    const salesBillIds = (salesBills || []).map(b => b.id)
+    const purchaseBillIds = (purchaseBills || []).map(b => b.id)
+    const [{ data: salesItems }, { data: purchaseItems }] = await Promise.all([
+      salesBillIds.length
+        ? supabase.from('bill_items').select('bill_id,product_name,hsn_code,quantity,base_rate,gst_rate,gst_amount,total').in('bill_id', salesBillIds)
+        : Promise.resolve({ data: [] }),
+      purchaseBillIds.length
+        ? supabase.from('purchase_bill_items').select('purchase_bill_id,product_name,hsn_code,quantity,base_rate,taxable_amount,gst_rate,gst_amount,cgst_amount,sgst_amount,igst_amount,total').in('purchase_bill_id', purchaseBillIds)
+        : Promise.resolve({ data: [] }),
+    ])
+    return {
+      salesBills: salesBills || [],
+      purchaseBills: purchaseBills || [],
+      salesItems: salesItems || [],
+      purchaseItems: purchaseItems || [],
+      expenses: expenses || [],
+    }
+  }
   if (tab === 'topproducts') {
     const { data: bills } = await supabase.from('bills').select('id').eq('shop_id', shopId).eq('bill_type', 'invoice').gte('date', dateFrom).lte('date', dateTo)
     const billIds = (bills || []).map(b => b.id)
@@ -385,6 +1013,8 @@ async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
 }
 function emptyDataForTab(tab) {
   if (tab === 'gst') return { sales: [], purchases: [] }
+  if (tab === 'auditor') return { salesBills: [], purchaseBills: [], salesItems: [], purchaseItems: [], expenses: [] }
+  if (tab === 'stockcheck') return { purchaseItems: [], invoiceItems: [], otherItems: [], products: [] }
   if (tab === 'credits') return { accounts: [], allEntries: [], periodEntries: [] }
   return []
 }
@@ -399,7 +1029,7 @@ export default function ReportsPage() {
   const loadedLiveTickRef = useRef(0)
   const cacheKey = shop?.id ? `reports:${shop.id}:${tab}:${dateFrom}:${dateTo}` : ''
   const initialCache = readPageCache(cacheKey)
-  const [data,     setData]     = useState(() => initialCache?.data || emptyDataForTab('sales'))
+  const [data,     setData]     = useState(() => initialCache?.data || emptyDataForTab(tab))
   const [loading,  setLoading]  = useState(() => !initialCache)
   usePageLoadingState('reports-page', loading)
 
@@ -447,7 +1077,7 @@ export default function ReportsPage() {
   useEffect(() => {
     if (!shop?.id) return
 
-    const tables = ['bills', 'bill_items', 'purchase_bills', 'purchase_bill_items', 'credit_accounts', 'credit_entries']
+    const tables = ['bills', 'bill_items', 'purchase_bills', 'purchase_bill_items', 'products', 'expenses', 'credit_accounts', 'credit_entries']
     const channel = supabase.channel(`reports-live:${shop.id}`)
     tables.forEach((table) => {
       channel.on('postgres_changes', {
@@ -524,6 +1154,8 @@ export default function ReportsPage() {
         <>
           {tab === 'sales'       && <SalesSummary data={data} searchTerm={search} />}
           {tab === 'gst'         && <GSTSummary data={data} />}
+          {tab === 'auditor'     && <GSTAuditorReport data={data} dateFrom={dateFrom} dateTo={dateTo} />}
+          {tab === 'stockcheck'  && <StockReconciliation data={data} dateFrom={dateFrom} dateTo={dateTo} />}
           {tab === 'purchases'   && <PurchaseSummary data={data} searchTerm={search} />}
           {tab === 'credits'     && <CreditSummary data={data} searchTerm={search} />}
           {tab === 'topproducts' && <TopProducts data={data} />}

@@ -115,6 +115,107 @@ async function loadGst(admin, shopId, dateFrom, dateTo) {
   }
 }
 
+async function loadAuditor(admin, shopId, dateFrom, dateTo) {
+  const [
+    { data: salesBills, error: salesBillsErr },
+    { data: purchase_bills, error: purchaseBillsErr },
+    { data: expenses, error: expensesErr },
+  ]  = await Promise.all([
+    admin
+      .from('bills')
+      .select('id,bill_no,date,customer_name,customer_gstin,subtotal,cgst_amount,sgst_amount,igst_amount,gst_amount,total,payment_status')
+      .eq('shop_id', shopId)
+      .eq('bill_type', 'invoice')
+      .gte('date', dateFrom)
+      .lte('date',dateTo)
+      .order('date'),
+    admin
+      .from('expenses')
+      .select('expense_date,title,category,amount,payment_mode,notes')
+      .eq('shop_id',shopId)
+      .gte('expense_date', dateFrom)
+      .lte('expense_date', dateTo)
+      .order('expense_date'),
+  ])
+
+  if (salesBillsErr) throw salesBillsErr
+  if (purchaseBillsErr) throw purchaseBillsErr
+  if (expensesErr) throw expensesErr
+
+  const salesBillIds = (salesBills || []).map((bill) => bill.id)
+  const purchaseBillIds = (purchaseBills || []).map((bill) => bill.id)
+
+  const [{ data: salesItems, error: salesItemsErr}, { data: purchaseItems, error: purchaseItemsErr}] = await Promise.all([
+    salesBillIds.length 
+      ? admin.from('bill_items').select('bill_id, product_name, hsn_code,quantity,base_rate,gst_rate,gst_amount,total').in('bill_id', salesBillIds)
+      : Promise.resolve({ data: [], error: null}),
+    purchaseBillIds.length
+      ? admin.from('purchase_bill_items').select('purchase_bill_id,product_name,hsn_code,quantity,base_rate,taxable_amount,gst_rate,gst_amount,cgst_amount,sgst_amount,igst_amount,total').in('purchase_bill_id', purchaseBillIds)
+    : Promise.resolve({ data:[], error: null}),
+  ])
+
+  if(salesItemsErr) throw salesItemsErr
+  if(purchaseItemsErr) throw purchaseItemsErr
+
+  return {
+    salesBills: salesBills || [],
+    purchaseBills: purchaseBills || [],
+    salesItems: salesItems || [],
+    purchaseItems: purchaseItems || [],
+    expenses: expenses || [],
+  }
+}
+
+async function loadStockCheck(admin, shopId, dateFrom, dateTo) {
+  const [{ data: purchaseBills, error: purchaseBillsErr }, { data: salesBills, error: salesBillsErr }] = await Promise.all([
+    admin.from('purchase_bills').select('id').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo),
+    admin.from('bills').select('id,bill_type').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo),
+  ])
+  if (purchaseBillsErr) throw purchaseBillsErr
+  if (salesBillsErr) throw salesBillsErr
+
+  const purchaseBillIds = (purchaseBills || []).map((bill) => bill.id)
+  const invoiceBillIds = (salesBills || []).filter((bill) => bill.bill_type === 'invoice').map((bill) => bill.id)
+  const otherBillIds = (salesBills || []).filter((bill) => bill.bill_type !== 'invoice').map((bill) => bill.id)
+
+  const [
+    { data: purchaseItems, error: purchaseItemsErr },
+    { data: invoiceItems, error: invoiceItemsErr },
+    { data: otherItems, error: otherItemsErr },
+  ] = await Promise.all([
+    purchaseBillIds.length
+      ? admin.from('purchase_bill_items').select('product_id,quantity').in('purchase_bill_id', purchaseBillIds)
+      : Promise.resolve({ data: [], error: null }),
+    invoiceBillIds.length
+      ? admin.from('bill_items').select('product_id,quantity').in('bill_id', invoiceBillIds)
+      : Promise.resolve({ data: [], error: null }),
+    otherBillIds.length
+      ? admin.from('bill_items').select('product_id,quantity').in('bill_id', otherBillIds)
+      : Promise.resolve({ data: [], error: null }),
+  ])
+  if (purchaseItemsErr) throw purchaseItemsErr
+  if (invoiceItemsErr) throw invoiceItemsErr
+  if (otherItemsErr) throw otherItemsErr
+
+  const productIds = [...new Set([
+    ...(purchaseItems || []).map((item) => item.product_id),
+    ...(invoiceItems || []).map((item) => item.product_id),
+    ...(otherItems || []).map((item) => item.product_id),
+  ].filter(Boolean))]
+
+  const { data: products, error: productsErr } = productIds.length
+    ? await admin.from('products').select('id,name,hsn_code,gst_rate,unit,stock_qty,selling_price').eq('shop_id', shopId).in('id', productIds)
+    : { data: [], error: null }
+  if (productsErr) throw productsErr
+
+  return {
+    purchaseItems: purchaseItems || [],
+    invoiceItems: invoiceItems || [],
+    otherItems: otherItems || [],
+    products: products || [],
+  }
+}
+
 async function loadPurchases(admin, shopId, dateFrom, dateTo) {
   const { data, error } = await admin
     .from('purchase_bills')
@@ -200,7 +301,7 @@ export async function GET(request) {
       return NextResponse.json({ error: 'shopId, dateFrom and dateTo are required' }, { status: 400 })
     }
 
-    const allowedTabs = new Set(['sales', 'gst', 'purchases', 'credits', 'topproducts'])
+    const allowedTabs = new Set(['sales', 'gst', 'auditor', 'stockcheck', 'purchases', 'credits', 'topproducts'])
     if (!allowedTabs.has(tab)) {
       return NextResponse.json({ error: 'Invalid report tab' }, { status: 400 })
     }
@@ -227,6 +328,8 @@ export async function GET(request) {
     let data = []
     if (tab === 'sales') data = await loadSales(client, shopId, dateFrom, dateTo)
     else if (tab === 'gst') data = await loadGst(client, shopId, dateFrom, dateTo)
+    else if (tab === 'auditor') data = await loadAuditor(client, shopId, dateFrom, dateTo)
+    else if (tab === 'stockcheck') data = await loadStockCheck(client, shopId, dateFrom, dateTo)
     else if (tab === 'purchases') data = await loadPurchases(client, shopId, dateFrom, dateTo)
     else if (tab === 'credits') data = await loadCredits(client, shopId, dateFrom, dateTo)
     else if (tab === 'topproducts') data = await loadTopProducts(client, shopId, dateFrom, dateTo)

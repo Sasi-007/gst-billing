@@ -25,6 +25,10 @@ export default function SettingsPage() {
   const [saved,  setSaved]  = useState(false)
   const [error,  setError]  = useState('')
   const [warning, setWarning] = useState('')
+  const [resettingInvoiceCounter, setResettingInvoiceCounter] = useState(false)
+  const [invoiceCounterNotice, setInvoiceCounterNotice] = useState('')
+  const [resettingPurchaseCounter, setResettingPurchaseCounter] = useState(false)
+  const [purchaseCounterNotice, setPurchaseCounterNotice] = useState('')
 
   // Load current shop data into form
   useEffect(() => {
@@ -41,6 +45,8 @@ export default function SettingsPage() {
     setSaving(true)
     setError('')
     setWarning('')
+    setInvoiceCounterNotice('')
+    setPurchaseCounterNotice('')
     const payload = {
       name:             form.name,
       address:          form.address          || null,
@@ -88,6 +94,144 @@ export default function SettingsPage() {
     setSaved(true)
     setTimeout(() => setSaved(false), 3000)
     setSaving(false)
+  }
+
+  async function updateShopCounter(payload) {
+    const { data: updated, error: updateErr } = await supabase
+      .from('shops')
+      .update({ ...payload, updated_at: new Date().toISOString() })
+      .eq('id', shop.id)
+      .select()
+      .single()
+
+    if (updateErr) throw updateErr
+    if (updated) setShop({ ...shop, ...updated })
+  }
+
+  async function resetInvoiceCounter() {
+    if (!shop?.id) return
+    if (!window.confirm('Reset invoice numbering to start again from INV-0001? This is allowed only when there are no invoices.')) return
+
+    setResettingInvoiceCounter(true)
+    setError('')
+    setWarning('')
+    setInvoiceCounterNotice('')
+    setPurchaseCounterNotice('')
+
+    const { count, error: lookupErr } = await supabase
+      .from('bills')
+      .select('id', { count: 'exact', head: true })
+      .eq('shop_id', shop.id)
+      .eq('bill_type', 'invoice')
+
+    if (lookupErr) {
+      setError(lookupErr.message)
+      setResettingInvoiceCounter(false)
+      return
+    }
+
+    if (Number(count || 0) > 0) {
+      setInvoiceCounterNotice(`Not reset: this shop still has ${count} invoice${count === 1 ? '' : 's'} in the database, possibly outside the current date filter. Use force reset only for demo/testing if duplicates are acceptable.`)
+      setResettingInvoiceCounter(false)
+      return
+    }
+
+    try {
+      await updateShopCounter({ bill_counter: 0 })
+      setSaved(true)
+      setInvoiceCounterNotice('Invoice counter reset. Next invoice will be INV-0001.')
+      setTimeout(() => setSaved(false), 3000)
+    } catch (updateErr) {
+      setError(updateErr.message)
+    } finally {
+      setResettingInvoiceCounter(false)
+    }
+  }
+
+  async function forceResetInvoiceCounter() {
+    if (!shop?.id) return
+    const confirmation = window.prompt('Force reset can create duplicate invoice numbers if old invoices exist. Type RESET to force next invoice number to INV-0001.')
+    if (confirmation !== 'RESET') return
+
+    setResettingInvoiceCounter(true)
+    setError('')
+    setWarning('')
+    setInvoiceCounterNotice('')
+    setPurchaseCounterNotice('')
+
+    try {
+      await updateShopCounter({ bill_counter: 0 })
+      setSaved(true)
+      setInvoiceCounterNotice('Invoice counter force-reset. Next invoice will try INV-0001.')
+      setTimeout(() => setSaved(false), 3000)
+    } catch (updateErr) {
+      setError(updateErr.message)
+    } finally {
+      setResettingInvoiceCounter(false)
+    }
+  }
+
+  async function resetPurchaseCounter() {
+    if (!shop?.id) return
+    if (!window.confirm('Reset purchase numbering to start again from PUR-0001? This is allowed only when there are no purchase bills.')) return
+
+    setResettingPurchaseCounter(true)
+    setError('')
+    setWarning('')
+    setInvoiceCounterNotice('')
+    setPurchaseCounterNotice('')
+
+    const { count, error: lookupErr } = await supabase
+      .from('purchase_bills')
+      .select('id', { count: 'exact', head: true })
+      .eq('shop_id', shop.id)
+
+    if (lookupErr) {
+      setError(lookupErr.message)
+      setResettingPurchaseCounter(false)
+      return
+    }
+
+    if (Number(count || 0) > 0) {
+      setPurchaseCounterNotice(`Not reset: this shop still has ${count} purchase bill${count === 1 ? '' : 's'} in the database, possibly outside the current date filter. Use force reset only for demo/testing if duplicates are acceptable.`)
+      setResettingPurchaseCounter(false)
+      return
+    }
+
+    try {
+      await updateShopCounter({ purchase_counter: 0 })
+      setSaved(true)
+      setPurchaseCounterNotice('Purchase counter reset. Next purchase will be PUR-0001.')
+      setTimeout(() => setSaved(false), 3000)
+    } catch (updateErr) {
+      setError(updateErr.message)
+    } finally {
+      setResettingPurchaseCounter(false)
+    }
+  }
+
+  async function forceResetPurchaseCounter() {
+    if (!shop?.id) return
+    const confirmation = window.prompt('Force reset can create duplicate purchase numbers if old purchases exist. Type RESET to force next purchase number to PUR-0001.')
+    if (confirmation !== 'RESET') return
+
+    setResettingPurchaseCounter(true)
+    setError('')
+    setWarning('')
+    setInvoiceCounterNotice('')
+    setPurchaseCounterNotice('')
+
+    try {
+      await updateShopCounter({ purchase_counter: 0 })
+      setSaved(true)
+      setPurchaseCounterNotice('Purchase counter force-reset. Next purchase will try PUR-0001.')
+      setTimeout(() => setSaved(false), 3000)
+    } catch (updateErr) {
+      setError(updateErr.message)
+    } finally {
+      setResettingPurchaseCounter(false)
+      return
+    }
   }
 
   const f = (label, key, props = {}) => (
@@ -160,10 +304,58 @@ export default function SettingsPage() {
             <div>
               {f('Invoice Prefix', 'bill_prefix', { placeholder:'INV' })}
               <p className="text-xs text-gray-400 mt-0.5">Bills will be numbered INV-0001, INV-0002…</p>
+              <button
+                type="button"
+                onClick={resetInvoiceCounter}
+                disabled={resettingInvoiceCounter}
+                className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+              >
+                {resettingInvoiceCounter ? 'Resetting…' : 'Reset Invoice Number'}
+              </button>
+              <p className="text-xs text-gray-400 mt-1">
+                Current counter: {Number(shop?.bill_counter || 0)}. Reset is blocked if any invoice exists.
+              </p>
+              {invoiceCounterNotice && (
+                <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {invoiceCounterNotice}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={forceResetInvoiceCounter}
+                disabled={resettingInvoiceCounter}
+                className="mt-2 text-xs font-medium text-red-600 hover:underline disabled:opacity-50"
+              >
+                Force reset for demo/testing
+              </button>
             </div>
             <div>
               {f('Purchase Prefix', 'purchase_prefix', { placeholder:'PUR' })}
               <p className="text-xs text-gray-400 mt-0.5">Purchases: PUR-0001…</p>
+              <button
+                type="button"
+                onClick={resetPurchaseCounter}
+                disabled={resettingPurchaseCounter}
+                className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+              >
+                {resettingPurchaseCounter ? 'Resetting…' : 'Reset Purchase Number'}
+              </button>
+              <p className="text-xs text-gray-400 mt-1">
+                Current counter: {Number(shop?.purchase_counter || 0)}. Reset is blocked if any purchase bill exists.
+              </p>
+              {purchaseCounterNotice && (
+                <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                  {purchaseCounterNotice}
+                </div>
+              )}
+              <button
+                type="button"
+                onClick={forceResetPurchaseCounter}
+                disabled={resettingPurchaseCounter}
+                className="mt-2 text-xs font-medium text-red-600 hover:underline disabled:opacity-50"
+              >
+                Force reset for demo/testing
+              </button>
             </div>
           </div>
         </div>

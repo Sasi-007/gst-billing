@@ -21,6 +21,7 @@ import {
   removePendingAction,
   updatePendingAction,
 } from '@/lib/offlineBilling'
+import { syncPurchaseCreditEntry } from '@/lib/purchaseCredit'
 
 function isOnline() {
   return typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -33,7 +34,10 @@ function emptyItem() {
   return {
     _id: uid(), product_id: null, product_name: '', hsn_code: '',
     unit: 'pcs', quantity: '', rate: '', mrp: '', gst_rate: 0,
-    sch_disc_pct: '', sch_disc_amount: 0, cash_disc_pct: '', cash_disc_amount: 0, taxable_override: '', base_amount: 0, taxable_amount: 0, gst_amount: 0, cgst_amount: 0, sgst_amount: 0, igst_amount: 0, total: 0,
+    sch_disc_pct: '', sch_disc_amount: 0, cash_disc_pct: '', cash_disc_amount: 0,
+    taxable_override: '',
+    base_amount: 0, taxable_amount: 0, gst_amount: 0,
+    cgst_amount: 0, sgst_amount: 0, igst_amount: 0, total: 0,
   }
 }
 
@@ -41,31 +45,104 @@ function focusId(id) {
   setTimeout(() => { const el = document.getElementById(id); if (el) { el.focus(); el.select?.() } }, 30)
 }
 
+function csvEscape(value) {
+  const text = value === null || value === undefined ? '' : String(value)
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+function parseCsv(text) {
+  const rows = []
+  let row = []
+  let field = ''
+  let quoted = false
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i]
+    const next = text[i + 1]
+
+    if (quoted) {
+      if (char === '"' && next === '"') {
+        field += '"'
+        i += 1
+      } else if (char === '"') {
+        quoted = false
+      } else {
+        field += char
+      }
+      continue
+    }
+
+    if (char === '"') {
+      quoted = true
+    } else if (char === ',') {
+      row.push(field)
+      field = ''
+    } else if (char === '\n') {
+      row.push(field)
+      rows.push(row)
+      row = []
+      field = ''
+    } else if (char !== '\r') {
+      field += char
+    }
+  }
+
+  row.push(field)
+  if (row.some((value) => String(value || '').trim())) rows.push(row)
+  return rows
+}
+
+function csvRowsToObjects(text) {
+  const rows = parseCsv(text)
+  const headers = (rows[0] || []).map((header) => String(header || '').trim().toLowerCase())
+  return rows.slice(1).map((row) => Object.fromEntries(
+    headers.map((header, index) => [header, String(row[index] || '').trim()])
+  ))
+}
+
+function downloadCsv(filename, headers, rows) {
+  const lines = [
+    headers.map(csvEscape).join(','),
+    ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(',')),
+  ]
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
 export default function NewPurchasePage() {
   const router = useRouter()
   const searchParams = useSearchParams()
+  const importMode = searchParams.get('import') === '1'
 
-  const [items, setItems] = useState([emptyItem()])
-  const [suppId, setSuppId] = useState('')
-  const [suppInv, setSuppInv] = useState('')
-  const [date, setDate] = useState(todayStr())
-  const [payMode, setPayMode] = useState('Credit')
-  const [paidAmt, setPaidAmt] = useState('')
-  const [notes, setNotes] = useState('')
+  const [items,      setItems]     = useState([emptyItem()])
+  const [suppId,     setSuppId]    = useState('')
+  const [suppInv,    setSuppInv]   = useState('')
+  const [date,       setDate]      = useState(todayStr())
+  const [payMode,    setPayMode]   = useState('Credit')
+  const [paidAmt,    setPaidAmt]   = useState('')
+  const [notes,      setNotes]     = useState('')
   const [isInterstate, setIsInterstate] = useState(false)
-  const [roundOff, setRoundOff] = useState('')
-  const [suppliers, setSuppliers] = useState([])
-  const [settings, setSettings] = useState(null)
+  const [roundOff,   setRoundOff]  = useState('')
+  const [suppliers,  setSuppliers] = useState([])
+  const [settings,   setSettings]  = useState(null)
 
   const { shop } = useShop()
 
   const [searchOpen, setSearchOpen] = useState(false)
-  const [activeRow, setActiveRow] = useState(0)
-  const [saving, setSaving] = useState(false)
-  const [toast, setToast] = useState(null)
+  const [activeRow,  setActiveRow]  = useState(0)
+  const [saving,     setSaving]     = useState(false)
+  const [toast,      setToast]      = useState(null)
   const [editPurchaseId, setEditPurchaseId] = useState(null)
   const [offlineNotice, setOfflineNotice] = useState('')
   const syncInProgressRef = useRef(false)
+  const importInputRef = useRef(null)
 
   useEffect(() => {
     if (!shop?.id) return
@@ -75,7 +152,7 @@ export default function NewPurchasePage() {
       return
     }
 
-    supabase.from('suppliers').select('id,name').eq('is_active', true).order('name')
+    supabase.from('suppliers').select('id,name,phone').eq('is_active', true).order('name')
       .then(({ data }) => setSuppliers(data || []))
       .catch(() => setSuppliers([]))
     supabase.from('shops').select('*').eq('id', shop?.id || '').single()
@@ -221,6 +298,20 @@ export default function NewPurchasePage() {
             const queuedStockDeltaMap = buildQuantityMap(record.lineItems || [])
             await syncProductPricingFromLatestPurchases(shop.id, Object.keys(queuedStockDeltaMap))
             invalidatePurchaseImpactCache(shop.id)
+            try {
+              await syncPurchaseCreditEntry({
+                shopId: shop.id,
+                purchaseId: saved.id,
+                billNo,
+                billDate: purchaseRow.date,
+                supplierId: purchaseRow.supplier_id,
+                payMode: purchaseRow.payment_mode,
+                paidAmount: purchaseRow.paid_amount,
+                totalAmount: purchaseRow.total,
+              })
+            } catch (syncErr) {
+              console.warn('Purchase credit sync failed after queued purchase save:', syncErr)
+            }
 
             await removePendingAction(record.id)
           } catch (error) {
@@ -253,8 +344,8 @@ export default function NewPurchasePage() {
       parseFloat(item.rate) || 0,
       parseFloat(item.quantity) || 0,
       parseFloat(item.gst_rate) || 0,
-      parseFloat(item.sch_disc_pct) || 0,
-      parseFloat(item.cash_disc_pct) || 0,
+      parseFloat(item.sch_disc_amount) || 0,
+      parseFloat(item.cash_disc_amount) || 0,
       isInterstate,
       item.taxable_override,
     )
@@ -289,16 +380,16 @@ export default function NewPurchasePage() {
       const n = [...prev]
       n[activeRow] = {
         ...n[activeRow],
-        product_id: null,
+        product_id:   null,
         product_name: name,
-        unit: 'pcs',
-        quantity: 1,
-        rate: '',
-        mrp: '',
-        gst_rate: 0,
-        base_amount: 0,
-        gst_amount: 0,
-        total: 0,
+        unit:         'pcs',
+        quantity:     1,
+        rate:         '',
+        mrp:          '',
+        gst_rate:     0,
+        base_amount:  0,
+        gst_amount:   0,
+        total:        0,
       }
       return n
     })
@@ -319,6 +410,131 @@ export default function NewPurchasePage() {
     setActiveRow(Math.max(0, i - 1))
   }
 
+  function exportPurchaseTemplate() {
+    const headers = ['product_name', 'hsn_code', 'unit', 'quantity', 'base_rate', 'mrp', 'gst_rate', 'scheme_discount', 'cash_discount', 'taxable_amount']
+    downloadCsv('purchase-items-template.csv', headers, [{
+      product_name: 'Sample Product',
+      hsn_code: '100630',
+      unit: 'pcs',
+      quantity: 1,
+      base_rate: 100,
+      mrp: 120,
+      gst_rate: 5,
+      scheme_discount: 0,
+      cash_discount: 0,
+      taxable_amount: '',
+    }])
+  }
+
+  function exportCurrentItems() {
+    const headers = ['product_name', 'hsn_code', 'unit', 'quantity', 'base_rate', 'mrp', 'gst_rate', 'scheme_discount', 'cash_discount', 'taxable_amount', 'gst_amount', 'net_amount']
+    const rows = filledItems.map((item) => ({
+      product_name: item.product_name || '',
+      hsn_code: item.hsn_code || '',
+      unit: item.unit || 'pcs',
+      quantity: item.quantity || '',
+      base_rate: item.rate || '',
+      mrp: item.mrp || '',
+      gst_rate: item.gst_rate || 0,
+      scheme_discount: item.sch_disc_amount || 0,
+      cash_discount: item.cash_disc_amount || 0,
+      taxable_amount: item.taxable_amount || '',
+      gst_amount: item.gst_amount || 0,
+      net_amount: item.total || 0,
+    }))
+    downloadCsv(`purchase-items-${date || todayStr()}.csv`, headers, rows)
+  }
+
+  async function handleImportItems(event) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    try {
+      const text = await file.text()
+      const rows = csvRowsToObjects(text)
+      if (rows.length === 0) {
+        showToast('CSV has no item rows', 'error')
+        return
+      }
+
+      const names = [...new Set(rows.map((row) => row.product_name || row.name).filter(Boolean))]
+      const hsnCodes = [...new Set(rows.map((row) => row.hsn_code || row.hsn).filter(Boolean))]
+      const nameMap = {}
+      const hsnGroups = {}
+      if (shop?.id && (names.length > 0 || hsnCodes.length > 0) && isOnline()) {
+        const [{ data: nameRows, error: nameErr }, { data: hsnRows, error: hsnErr }] = await Promise.all([
+          names.length > 0
+            ? supabase.from('products').select('id,name,hsn_code,unit,purchase_price,mrp,gst_rate')
+              .eq('shop_id', shop.id).in('name', names)
+            : Promise.resolve({ data: [] }),
+          hsnCodes.length > 0
+            ? supabase.from('products').select('id,name,hsn_code,unit,purchase_price,mrp,gst_rate')
+              .eq('shop_id', shop.id).in('hsn_code', hsnCodes)
+            : Promise.resolve({ data: [] }),
+        ])
+        if (nameErr) throw nameErr
+        if (hsnErr) throw hsnErr
+
+        for (const product of (nameRows || [])) {
+          nameMap[String(product.name || '').trim().toLowerCase()] = product
+        }
+        // Fallback grouping by HSN — only used when a name doesn't match directly
+        // and exactly one product shares that HSN code (avoids picking the wrong item).
+        for (const product of (hsnRows || [])) {
+          const key = String(product.hsn_code || '').trim().toLowerCase()
+          if (!key) continue
+          if (!hsnGroups[key]) hsnGroups[key] = []
+          hsnGroups[key].push(product)
+        }
+      }
+
+      let hsnFallbackCount = 0
+      const imported = rows.map((row) => {
+        const productName = row.product_name || row.name || ''
+        const hsnCode = String(row.hsn_code || row.hsn || '').trim().toLowerCase()
+        let product = nameMap[String(productName).trim().toLowerCase()] || null
+        if (!product && hsnCode && hsnGroups[hsnCode]?.length === 1) {
+          product = hsnGroups[hsnCode][0]
+          hsnFallbackCount += 1
+        }
+        const rate = parseFloat(row.base_rate || row.rate || row.purchase_price || product?.purchase_price || 0) || 0
+        const quantity = parseFloat(row.quantity || row.qty || 1) || 1
+        const gstRate = parseFloat(row.gst_rate || row.gst || product?.gst_rate || 0) || 0
+        const schDisc = parseFloat(row.scheme_discount || row.sch_disc_amount || 0) || 0
+        const cashDisc = parseFloat(row.cash_discount || row.cash_disc_amount || 0) || 0
+        const taxableOverride = row.taxable_amount || ''
+        return recalc({
+          ...emptyItem(),
+          product_id: product?.id || null,
+          product_name: productName || product?.name || '',
+          hsn_code: row.hsn_code || row.hsn || product?.hsn_code || '',
+          unit: row.unit || product?.unit || 'pcs',
+          quantity,
+          rate,
+          mrp: parseFloat(row.mrp || product?.mrp || rate) || 0,
+          gst_rate: gstRate,
+          sch_disc_amount: schDisc,
+          cash_disc_amount: cashDisc,
+          taxable_override: taxableOverride,
+        })
+      }).filter((item) => item.product_name && Number(item.quantity) > 0)
+
+      if (imported.length === 0) {
+        showToast('No valid purchase items found in CSV', 'error')
+        return
+      }
+
+      setItems(imported)
+      setActiveRow(0)
+      const unmatchedCount = imported.filter((item) => !item.product_id).length
+      const hsnNote = hsnFallbackCount ? ` (${hsnFallbackCount} matched by HSN code)` : ''
+      showToast(`Imported ${imported.length} item${imported.length === 1 ? '' : 's'}${unmatchedCount ? ` (${unmatchedCount} not matched to inventory)` : ''}${hsnNote}`)
+    } catch (error) {
+      showToast('Import failed: ' + (error?.message || 'Invalid CSV'), 'error')
+    }
+  }
+
   const filledItems = items.filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
   const totals = calcBillTotals(filledItems)
   const roundOffAmount = parseFloat(roundOff) || 0
@@ -330,15 +546,13 @@ export default function NewPurchasePage() {
     const newItems = scanResult.items.map(item => {
       const base = emptyItem()
       const calc = calcPurchaseItem(item.rate || 0, item.quantity || 1, item.gst_rate || 0, 0, 0, isInterstate)
-      return {
-        ...base, product_name: item.name, hsn_code: item.hsn_code || '',
+      return { ...base, product_name: item.name, hsn_code: item.hsn_code || '',
         unit: item.unit || 'pcs', quantity: item.quantity || 1,
-        rate: item.rate || 0, mrp: item.mrp || item.rate || 0, gst_rate: item.gst_rate || 0, ...calc
-      }
+        rate: item.rate || 0, mrp: item.mrp || item.rate || 0, gst_rate: item.gst_rate || 0, ...calc }
     })
     setItems(newItems)
     if (scanResult.invoice_number) setSuppInv(scanResult.invoice_number)
-    if (scanResult.invoice_date) setDate(scanResult.invoice_date)
+    if (scanResult.invoice_date)   setDate(scanResult.invoice_date)
     // Try to match supplier by GSTIN
     if (scanResult.supplier_gstin) {
       const matched = suppliers.find(s =>
@@ -357,9 +571,9 @@ export default function NewPurchasePage() {
         if (editPurchaseId) throw new Error('Editing purchases offline is not available yet')
         const tempNo = makeTempBillNo('OFF')
         const purchaseRow = {
-          shop_id: shop.id,
-          bill_no: tempNo,
-          supplier_id: suppId || null,
+          shop_id:            shop.id,
+          bill_no:            tempNo,
+          supplier_id:        suppId || null,
           supplier_invoice_no: suppInv || null,
           date,
           subtotal: totals.subtotal,
@@ -440,8 +654,8 @@ export default function NewPurchasePage() {
       }
 
       const purchaseRow = {
-        shop_id: shop.id,
-        bill_no: no,
+        shop_id:            shop.id,
+        bill_no:            no,
         supplier_id: suppId || null,
         supplier_invoice_no: suppInv || null,
         date,
@@ -455,6 +669,7 @@ export default function NewPurchasePage() {
         payment_status: paid >= grandTotal ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
         notes: notes || null,
       }
+      const selectedSupplier = suppliers.find((supplier) => supplier.id === (suppId || '')) || null
 
       let purchaseId = editPurchaseId
       if (editPurchaseId) {
@@ -484,7 +699,7 @@ export default function NewPurchasePage() {
 
       const { error: itemErr } = await supabase.from('purchase_bill_items').insert(
         filledItems.map((item, i) => ({
-          shop_id: shop.id,
+          shop_id:         shop.id,
           purchase_bill_id: purchaseId,
           product_id: item.product_id,
           sl_no: i + 1,
@@ -513,7 +728,30 @@ export default function NewPurchasePage() {
       await syncProductPricingFromLatestPurchases(shop.id, [...productIds])
       invalidatePurchaseImpactCache(shop.id)
 
-      showToast(editPurchaseId ? `✓ ${no} updated` : `✓ ${no} saved`)
+      let creditSyncError = null
+      try {
+        await syncPurchaseCreditEntry({
+          shopId: shop.id,
+          purchaseId,
+          billNo: no,
+          billDate: purchaseRow.date,
+          supplierId: purchaseRow.supplier_id,
+          supplierName: selectedSupplier?.name || '',
+          supplierPhone: selectedSupplier?.phone || '',
+          payMode: purchaseRow.payment_mode,
+          paidAmount: purchaseRow.paid_amount,
+          totalAmount: purchaseRow.total,
+        })
+      } catch (syncErr) {
+        creditSyncError = syncErr
+      }
+
+      showToast(
+        creditSyncError
+          ? `${editPurchaseId ? no + ' updated' : no + ' saved'}, but Credit Book sync will refresh on reopen`
+          : editPurchaseId ? `✓ ${no} updated` : `✓ ${no} saved`,
+        creditSyncError ? 'error' : 'success'
+      )
       setTimeout(() => router.push(`/purchases/${purchaseId}`), 700)
     } catch (err) {
       showToast('Error: ' + err.message, 'error')
@@ -526,7 +764,7 @@ export default function NewPurchasePage() {
   useEffect(() => {
     function onKey(e) {
       if (searchOpen) return
-      if (e.key === 'F3' || (e.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName))) {
+      if (e.key === 'F3' || (e.key === '/' && !['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName))) {
         e.preventDefault(); openSearch(activeRow)
       }
       if (e.key === 'F4') { e.preventDefault(); addRow() }
@@ -535,15 +773,16 @@ export default function NewPurchasePage() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchOpen, activeRow, items, settings, filledItems, totals])
 
   return (
     <>
       {searchOpen && <ProductSearch onSelect={handleProductSelect} onAddFreeText={handleFreeTextItem} onClose={() => setSearchOpen(false)} />}
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow text-white text-sm font-medium ${toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'
-          }`}>{toast.msg}</div>
+        <div className={`fixed top-4 right-4 z-50 px-4 py-2 rounded-lg shadow text-white text-sm font-medium ${
+          toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'
+        }`}>{toast.msg}</div>
       )}
 
       <div className="flex flex-col h-full">
@@ -602,8 +841,8 @@ export default function NewPurchasePage() {
                     parseFloat(item.rate) || 0,
                     parseFloat(item.quantity) || 0,
                     parseFloat(item.gst_rate) || 0,
-                    parseFloat(item.sch_disc_pct) || 0,
-                    parseFloat(item.cash_disc_pct) || 0,
+                    parseFloat(item.sch_disc_amount) || 0,
+                    parseFloat(item.cash_disc_amount) || 0,
                     next,
                     item.taxable_override,
                   )
@@ -616,8 +855,44 @@ export default function NewPurchasePage() {
         </div>
 
         {/* AI Bill Scanner */}
-        <div className="px-4 pt-3">
+        <div className="px-4 pt-3 space-y-2">
           <BillScanner onApply={handleScanApply} />
+          {importMode && (
+            <div className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
+              Select your purchase items CSV here. Use Download Template if you need the correct column format.
+            </div>
+          )}
+          <div className={`flex flex-wrap gap-2 ${importMode ? 'rounded-lg border border-blue-200 bg-blue-50 p-2' : ''}`}>
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={handleImportItems}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => importInputRef.current?.click()}
+              className="px-3 py-1.5 rounded-lg border bg-white text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Import Items CSV
+            </button>
+            <button
+              type="button"
+              onClick={exportPurchaseTemplate}
+              className="px-3 py-1.5 rounded-lg border bg-white text-xs font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Download Template
+            </button>
+            <button
+              type="button"
+              onClick={exportCurrentItems}
+              disabled={filledItems.length === 0}
+              className="px-3 py-1.5 rounded-lg border bg-white text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Export Items CSV
+            </button>
+          </div>
         </div>
 
         {/* Items table */}
@@ -632,16 +907,16 @@ export default function NewPurchasePage() {
                 <th className="px-2 py-2 text-center w-14">Unit</th>
                 <th className="px-2 py-2 text-right w-24">Base Rate (₹)</th>
                 <th className="px-2 py-2 text-right w-24">MRP (₹)</th>
-                <th className="px-2 py-2 text-center w-20">Sch Disc (₹)</th>
-                <th className="px-2 py-2 text-center w-20">Cash Disc (₹)</th>
+                <th className="px-2 py-2 text-center w-16">Sch Disc (₹)</th>
+                <th className="px-2 py-2 text-center w-16">Cash Disc (₹)</th>
                 <th className="px-2 py-2 text-center w-16">GST%</th>
-                <th className="px-2 py-2 text-right w-24">Taxable Amount (₹)</th>
+                <th className="px-2 py-2 text-right w-24">Taxable Amt (₹)</th>
                 {isInterstate ? (
                   <th className="px-2 py-2 text-right w-24">IGST (₹)</th>
                 ) : (
                   <>
-                    <th className="px-2 py-2 text-right w-24">CGST (₹)</th>
-                    <th className="px-2 py-2 text-right w-24">SGST (₹)</th>
+                    <th className="px-2 py-2 text-right w-20">CGST (₹)</th>
+                    <th className="px-2 py-2 text-right w-20">SGST (₹)</th>
                   </>
                 )}
                 <th className="px-2 py-2 text-right w-24">Net Amt (₹)</th>
@@ -692,14 +967,14 @@ export default function NewPurchasePage() {
                       onChange={e => updateItem(i, 'sch_disc_amount', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`cashdisc-${i}`) } }}
-                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" placeholder="0" />
+                      className="w-full border rounded px-1 py-0.5 text-center" min="0" step="0.01" placeholder="0" />
                   </td>
                   <td className="px-1 py-1">
                     <input id={`cashdisc-${i}`} type="number" value={item.cash_disc_amount}
                       onChange={e => updateItem(i, 'cash_disc_amount', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
-                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`gst-${i}`) } }}
-                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" placeholder="0" />
+                      onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addRow() } }}
+                      className="w-full border rounded px-1 py-0.5 text-center" min="0" step="0.01" placeholder="0" />
                   </td>
                   <td className="px-1 py-1">
                     <select value={item.gst_rate} onChange={e => updateItem(i, 'gst_rate', parseFloat(e.target.value))}
@@ -711,8 +986,10 @@ export default function NewPurchasePage() {
                     <input type="number" value={item.taxable_override}
                       onChange={e => updateItem(i, 'taxable_override', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
-                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" placeholder={item.taxable_amount > 0 ? fmt(item.taxable_amount) : '0'}
-                      title="Auto-calculated from RatexQty-Discounts. Type here only if the paper Invoice's Taxable Amt differs (due to supplier's rounded rate)." />
+                      className="w-full border rounded px-1 py-0.5 text-right"
+                      min="0" step="0.01"
+                      placeholder={item.taxable_amount > 0 ? fmt(item.taxable_amount) : '0'}
+                      title="Auto-calculated from Rate×Qty−Discounts. Type here only if the paper invoice's Taxable Amt differs (due to supplier's rounded rate)." />
                   </td>
                   {isInterstate ? (
                     <td className="px-2 py-1 text-right text-gray-600">{item.igst_amount > 0 ? fmt(item.igst_amount) : '—'}</td>
@@ -747,7 +1024,7 @@ export default function NewPurchasePage() {
                 <div className="text-xs text-gray-500 mb-0.5">Payment Mode</div>
                 <select value={payMode} onChange={e => setPayMode(e.target.value)}
                   className="border rounded px-2 py-1 text-sm">
-                  {['Credit', 'Cash', 'UPI', 'Card', 'Cheque'].map(m => <option key={m}>{m}</option>)}
+                  {['Credit','Cash','UPI','Card','Cheque'].map(m => <option key={m}>{m}</option>)}
                 </select>
               </div>
               <div>
@@ -795,7 +1072,7 @@ export default function NewPurchasePage() {
             </div>
           </div>
         </div>
-      </div >
+      </div>
     </>
   )
 }

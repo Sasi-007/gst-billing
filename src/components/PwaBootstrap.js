@@ -72,14 +72,12 @@ export default function PwaBootstrap() {
     refreshPendingCount()
     const interval = window.setInterval(refreshPendingCount, 5000)
     window.addEventListener('online', refreshPendingCount)
-    window.addEventListener('focus', refreshPendingCount)
     window.addEventListener('offline-queue-changed', refreshPendingCount)
 
     return () => {
       cancelled = true
       window.clearInterval(interval)
       window.removeEventListener('online', refreshPendingCount)
-      window.removeEventListener('focus', refreshPendingCount)
       window.removeEventListener('offline-queue-changed', refreshPendingCount)
     }
   }, [shop?.id])

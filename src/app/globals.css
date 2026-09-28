@@ -97,6 +97,16 @@ kbd {
     display: block !important;
   }
 
+  .invoice-pack-print > .print-only {
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .invoice-pack-print > .print-only:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
   body {
     background: white;
     margin: 0;

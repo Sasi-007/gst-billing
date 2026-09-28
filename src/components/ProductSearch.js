@@ -5,7 +5,30 @@ import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
 import { loadProductSnapshot, saveProductSnapshot } from '@/lib/offlineBilling'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { getProductSubtitle } from '@/lib/productNames'
+
+const PRODUCT_SEARCH_COLUMNS = 'id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,search_text'
+const PRODUCT_SEARCH_LIMIT = 50
+
+function tokenizeProductSearch(product) {
+  return [
+    product.name,
+    product.local_name,
+    product.brand,
+    product.hsn_code,
+    product.search_text,
+    ...(Array.isArray(product.search_aliases) ? product.search_aliases : []),
+  ].join(' ').toLowerCase().split(/[\s,;|/\\()[\]{}._-]+/).filter(Boolean)
+}
+
+function matchesProductSearch(product, query, terms) {
+  const barcode = String(product.barcode || '').toLowerCase()
+  if (barcode && barcode.includes(query)) return true
+
+  const tokens = tokenizeProductSearch(product)
+  return terms.every((term) => tokens.some((token) => token.startsWith(term)))
+}
 
 /**
  * Full-screen modal product search.
@@ -17,13 +40,14 @@ import { getProductSubtitle } from '@/lib/productNames'
 export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
   const [query,   setQuery]   = useState('')
   const [results, setResults] = useState([])
-  const [products, setProducts] = useState([])
   const [cursor,  setCursor]  = useState(0)
   const [loading, setLoading] = useState(false)
   const [purchaseHints, setPurchaseHints] = useState({})
   const [inputUnlocked, setInputUnlocked] = useState(false)
+  const debouncedQuery = useDebouncedValue(query, 180)
   const inputRef  = useRef(null)
   const itemRefs  = useRef([])
+  const offlineProductsRef = useRef([])
   const { shop } = useShop()
 
   useEffect(() => {
@@ -37,28 +61,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     async function loadProducts() {
       const cachedProducts = await loadProductSnapshot(shop.id)
       if (!cancelled && cachedProducts.length > 0) {
-        setProducts(cachedProducts)
-      }
-
-      if (!navigator.onLine) return
-
-      setLoading(true)
-      try {
-        const { data, error } = await supabase
-          .from('products')
-          .select('id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,search_text')
-          .eq('shop_id', shop.id)
-          .eq('is_active', true)
-          .order('name')
-        if (error) throw error
-        if (cancelled) return
-        const rows = data || []
-        setProducts(rows)
-        await saveProductSnapshot(shop.id, rows)
-      } catch {
-        if (!cancelled && cachedProducts.length === 0) setProducts([])
-      } finally {
-        if (!cancelled) setLoading(false)
+        offlineProductsRef.current = cachedProducts
       }
     }
 
@@ -75,26 +78,97 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     }
 
     const terms = q.split(/\s+/).filter(Boolean)
-    const rows = products
-      .filter((product) => {
-        const haystack = [
-          product.name,
-          product.local_name,
-          product.brand,
-          product.barcode,
-          product.hsn_code,
-          product.search_text,
-          ...(Array.isArray(product.search_aliases) ? product.search_aliases : []),
-        ].join(' ').toLowerCase()
-        return terms.every((term) => haystack.includes(term))
-      })
-      .slice(0, 12)
+    const offlineRows = offlineProductsRef.current
+      .filter((product) => matchesProductSearch(product, q, terms))
+      .slice(0, PRODUCT_SEARCH_LIMIT)
 
-    setResults(rows)
-    setCursor(0)
-    setPurchaseHints({})
-    loadPurchaseHints(rows)
-  }, [query, products]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (offlineRows.length > 0) {
+      setResults(offlineRows)
+      setCursor(0)
+      setPurchaseHints({})
+      loadPurchaseHints(offlineRows)
+    }
+  }, [query]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const q = debouncedQuery.trim().toLowerCase()
+    if (!q) {
+      setResults([])
+      setPurchaseHints({})
+      setLoading(false)
+      return
+    }
+
+    const terms = q.split(/\s+/).filter(Boolean)
+    const offlineRows = offlineProductsRef.current
+      .filter((product) => matchesProductSearch(product, q, terms))
+      .slice(0, PRODUCT_SEARCH_LIMIT)
+
+    if (!navigator.onLine) {
+      setResults(offlineRows)
+      setCursor(0)
+      setPurchaseHints({})
+      loadPurchaseHints(offlineRows)
+      return
+    }
+
+    let cancelled = false
+    async function searchProducts() {
+      setLoading(true)
+      try {
+        const searchTerm = q.replace(/[%,]/g, ' ').trim()
+        if (!searchTerm) {
+          setResults([])
+          setPurchaseHints({})
+          return
+        }
+        const spacedSearchTerm = ` ${searchTerm}`
+        const { data, error } = await supabase
+          .from('products')
+          .select(PRODUCT_SEARCH_COLUMNS)
+          .eq('shop_id', shop.id)
+          .eq('is_active', true)
+          .or(`search_text.ilike.${searchTerm}%,search_text.ilike.%${spacedSearchTerm}%,name.ilike.${searchTerm}%,local_name.ilike.${searchTerm}%,brand.ilike.${searchTerm}%,barcode.ilike.%${searchTerm}%,hsn_code.ilike.${searchTerm}%`)
+          .order('name')
+          .limit(PRODUCT_SEARCH_LIMIT)
+
+        if (error) throw error
+        if (cancelled) return
+        const rows = (data || []).filter((product) => matchesProductSearch(product, q, terms))
+        setResults(rows)
+        setCursor(0)
+        setPurchaseHints({})
+        loadPurchaseHints(rows)
+        if (rows.length > 0) {
+          const merged = mergeProductSnapshots(offlineProductsRef.current, rows)
+          offlineProductsRef.current = merged
+          await saveProductSnapshot(shop.id, merged)
+        }
+      } catch {
+        if (cancelled) return
+        setResults(offlineRows)
+        setCursor(0)
+        setPurchaseHints({})
+        loadPurchaseHints(offlineRows)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    }
+
+    searchProducts()
+    return () => { cancelled = true }
+  }, [debouncedQuery, shop?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  function mergeProductSnapshots(currentProducts, nextProducts) {
+    const map = new Map()
+    for (const product of currentProducts || []) {
+      if (product?.id) map.set(product.id, product)
+    }
+    for (const product of nextProducts || []) {
+      if (product?.id) map.set(product.id, product)
+    }
+    return [...map.values()].slice(-1000)
+  }
 
   async function loadPurchaseHints(products) {
     const productIds = products.map((product) => product.id).filter(Boolean)

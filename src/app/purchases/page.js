@@ -10,13 +10,48 @@ import { useShop } from '@/context/ShopContext'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import Link from 'next/link'
+import { syncPurchaseCreditEntry } from '@/lib/purchaseCredit'
+
+const PAYMENT_MODES = ['Credit', 'Cash', 'UPI', 'Card', 'Cheque']
+
+function csvEscape(value) {
+  const text = value === null || value === undefined ? '' : String(value)
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+function downloadCsv(filename, headers, rows) {
+  const lines = [
+    headers.map(csvEscape).join(','),
+    ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(',')),
+  ]
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function formatDate(date) {
+  return date ? new Date(date + 'T00:00:00').toLocaleDateString('en-IN') : ''
+}
+
+function normalizePaymentModeForDb(value, fallback = 'credit') {
+  const mode = String(value || '').trim().toLowerCase()
+  if (!mode) return fallback
+  if (mode === 'gpay') return 'upi'
+  return mode
+}
 
 function isOnline() {
   return typeof navigator !== 'undefined' ? navigator.onLine : true
 }
 
 async function fetchPurchasesDirect(shopId, dateFrom, dateTo, search) {
-  let q = supabase.from('purchase_bills').select('*, suppliers(name)').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo).order('date', { ascending: false }).order('created_at', { ascending: false }).limit(200)
+  let q = supabase.from('purchase_bills').select('*, suppliers(name,phone,gstin)').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo).order('date', { ascending: false }).order('created_at', { ascending: false }).limit(200)
   if (search) q = q.ilike('bill_no', `%${search}%`)
   const { data } = await q
   return { bills: data || [] }
@@ -30,6 +65,9 @@ export default function PurchasesPage() {
   const [liveTick, setLiveTick] = useState(0)
   const [offlineNotice, setOfflineNotice] = useState('')
   const [error, setError] = useState('')
+  const [paymentDrafts, setPaymentDrafts] = useState({})
+  const [paymentModes, setPaymentModes] = useState({})
+  const [updatingBillId, setUpdatingBillId] = useState(null)
   const loadedTick = useRef(0)
   const debouncedSearch = useDebouncedValue(search)
   const cacheKey = shop?.id ? `purchases:${shop.id}:${dateFrom}:${dateTo}:${debouncedSearch}` : ''
@@ -110,6 +148,101 @@ export default function PurchasesPage() {
   const totalAmt = bills.reduce((s, b) => s + (b.total || 0), 0)
   const unpaidAmt = bills.filter(b => b.payment_status !== 'paid').reduce((s, b) => s + ((b.total || 0) - (b.paid_amount || 0)), 0)
 
+  function handleExportPurchases() {
+    const rows = bills.map((bill) => ({
+      'Bill No': bill.bill_no,
+      Date: formatDate(bill.date),
+      Supplier: bill.suppliers?.name || '',
+      'Supplier Phone': bill.suppliers?.phone || '',
+      'Supplier GSTIN': bill.suppliers?.gstin || '',
+      'Supplier Invoice No': bill.supplier_invoice_no || '',
+      Subtotal: Number(bill.subtotal || 0),
+      GST: Number(bill.gst_amount || 0),
+      Total: Number(bill.total || 0),
+      Paid: Number(bill.paid_amount || 0),
+      Due: getDueAmount(bill),
+      'Payment Mode': bill.payment_mode || '',
+      Status: bill.payment_status || '',
+      Notes: bill.notes || '',
+    }))
+    downloadCsv(`purchases-${dateFrom}-to-${dateTo}.csv`, Object.keys(rows[0] || {
+      'Bill No': '', Date: '', Supplier: '', 'Supplier Phone': '', 'Supplier GSTIN': '', 'Supplier Invoice No': '', Subtotal: '', GST: '', Total: '', Paid: '', Due: '', 'Payment Mode': '', Status: '', Notes: '',
+    }), rows)
+  }
+
+  function getDueAmount(bill) {
+    return Math.max(0, Number(bill.total || 0) - Number(bill.paid_amount || 0))
+  }
+
+  function getPaymentStatus(total, paid) {
+    if (paid >= total) return 'paid'
+    if (paid > 0) return 'partial'
+    return 'unpaid'
+  }
+
+  async function handleRecordPayment(bill) {
+    if (!shop?.id || !bill?.id) return
+    const due = getDueAmount(bill)
+    if (due <= 0) return
+
+    const draftValue = paymentDrafts[bill.id] ?? ''
+    const amountToAdd = Number(draftValue)
+    if (!Number.isFinite(amountToAdd) || amountToAdd <= 0) {
+      setError('Enter a valid payment amount greater than 0')
+      return
+    }
+
+    const currentPaid = Number(bill.paid_amount || 0)
+    const total = Number(bill.total || 0)
+    const nextPaid = Math.min(total, currentPaid + amountToAdd)
+    const selectedMode = normalizePaymentModeForDb(paymentModes[bill.id] || bill.payment_mode || 'credit')
+    const nextStatus = getPaymentStatus(total, nextPaid)
+
+    setUpdatingBillId(bill.id)
+    const { error: updateErr } = await supabase
+      .from('purchase_bills')
+      .update({
+        paid_amount: nextPaid,
+        payment_mode: selectedMode,
+        payment_status: nextStatus,
+      })
+      .eq('id', bill.id)
+      .eq('shop_id', shop.id)
+
+    if (updateErr) {
+      setError(updateErr.message || 'Failed to update payment')
+      setUpdatingBillId(null)
+      return
+    }
+
+    let syncError = null
+    try {
+      await syncPurchaseCreditEntry({
+        shopId: shop.id,
+        purchaseId: bill.id,
+        billNo: bill.bill_no,
+        billDate: bill.date,
+        supplierId: bill.supplier_id,
+        supplierName: bill.suppliers?.name || '',
+        supplierPhone: bill.suppliers?.phone || '',
+        payMode: selectedMode,
+        paidAmount: nextPaid,
+        totalAmount: total,
+      })
+    } catch (syncErr) {
+      syncError = syncErr
+    }
+
+    setError(syncError?.message || '')
+    setBills((prevBills) => prevBills.map((row) => (
+      row.id === bill.id
+        ? { ...row, paid_amount: nextPaid, payment_mode: selectedMode, payment_status: nextStatus }
+        : row
+    )))
+    setPaymentDrafts((prev) => ({ ...prev, [bill.id]: '' }))
+    setUpdatingBillId(null)
+  }
+
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-3">
@@ -120,10 +253,24 @@ export default function PurchasesPage() {
             {unpaidAmt > 0 && <span className="text-red-600 ml-2">· Unpaid: {fmt(unpaidAmt)}</span>}
           </div>
         </div>
-        <Link href="/purchases/new"
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
-          + New Purchase
-        </Link>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={handleExportPurchases}
+            disabled={bills.length === 0}
+            className="px-4 py-2 bg-white border text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium disabled:opacity-50"
+          >
+            Export CSV
+          </button>
+          <Link href="/purchases/new?import=1"
+            className="px-4 py-2 bg-white border text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium">
+            Import CSV
+          </Link>
+          <Link href="/purchases/new"
+            className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium">
+            + New Purchase
+          </Link>
+        </div>
       </div>
 
       {offlineNotice && (
@@ -161,7 +308,7 @@ export default function PurchasesPage() {
           <table className="w-full min-w-[700px] text-sm">
             <thead>
               <tr className="bg-gray-50 text-gray-600 text-xs border-b">
-                {['Bill No','Date','Supplier','Sup. Invoice','Subtotal','GST','Total','Paid','Status',''].map(h => (
+                {['Bill No','Date','Supplier','Sup. Invoice','Subtotal','GST','Total','Paid','Due','Mode','Status','Action'].map(h => (
                   <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -181,6 +328,20 @@ export default function PurchasesPage() {
                   <td className="px-3 py-2 text-right">{fmt(b.gst_amount)}</td>
                   <td className="px-3 py-2 text-right font-medium">{fmt(b.total)}</td>
                   <td className="px-3 py-2 text-right">{fmt(b.paid_amount)}</td>
+                  <td className="px-3 py-2 text-right">{fmt(getDueAmount(b))}</td>
+                  <td className="px-3 py-2">
+                    <select
+                      value={String(paymentModes[b.id] || b.payment_mode || 'credit').toLowerCase()}
+                      onChange={(e) => setPaymentModes((prev) => ({ ...prev, [b.id]: e.target.value }))}
+                      className="border rounded px-2 py-1 text-xs bg-white"
+                    >
+                      {PAYMENT_MODES.map((mode) => (
+                        <option key={mode} value={mode.toLowerCase()}>
+                          {mode}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
                   <td className="px-3 py-2">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${
                       b.payment_status === 'paid'    ? 'bg-green-100 text-green-700'
@@ -191,8 +352,33 @@ export default function PurchasesPage() {
                     </span>
                   </td>
                   <td className="px-3 py-2">
-                    <Link href={`/purchases/${b.id}`}
-                      className="text-blue-600 hover:underline text-xs">View</Link>
+                    <div className="flex items-center gap-2">
+                      {getDueAmount(b) > 0 ? (
+                        <>
+                          <input
+                            type="number"
+                            value={paymentDrafts[b.id] ?? ''}
+                            onChange={(e) => setPaymentDrafts((prev) => ({ ...prev, [b.id]: e.target.value }))}
+                            placeholder="Paid now"
+                            className="w-24 border rounded px-2 py-1 text-xs"
+                            min="0"
+                            step="0.01"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleRecordPayment(b)}
+                            disabled={updatingBillId === b.id}
+                            className="px-2 py-1 rounded bg-green-600 text-white text-xs hover:bg-green-700 disabled:opacity-60"
+                          >
+                            {updatingBillId === b.id ? 'Saving…' : 'Record'}
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-xs text-gray-400">Settled</span>
+                      )}
+                      <Link href={`/purchases/${b.id}`}
+                        className="text-blue-600 hover:underline text-xs">View</Link>
+                    </div>
                   </td>
                 </tr>
               ))}

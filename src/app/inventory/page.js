@@ -28,6 +28,7 @@ const CSV_COLUMNS = [
   'hsn_code',
   'is_active',
 ]
+const INVENTORY_LIST_LIMIT = 50
 
 function escapeCsv(value) {
   const text = Array.isArray(value) ? value.join(', ') : String(value ?? '')
@@ -169,7 +170,7 @@ export default function InventoryPage() {
       .select('id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code,category_id,supplier_id,is_active,suppliers(name),categories(name)')
       .eq('shop_id', shop.id)
       .order('name')
-      .limit(200)
+      .limit(INVENTORY_LIST_LIMIT)
 
     if (debouncedSearch) {
       const term = debouncedSearch.toLowerCase()
@@ -177,6 +178,8 @@ export default function InventoryPage() {
     }
     if (filter === 'low')     q = q.gt('min_stock', 0)   // further filtered client-side
     if (filter === 'out')     q = q.lte('stock_qty', 0)
+    if (filter === 'nongst')     q = q.eq('gst_rate', 0)
+    if (filter === 'gst')     q = q.gt('gst_rate', 0)
     if (filter === 'inactive')q = q.eq('is_active', false)
     else                      q = q.eq('is_active', true)
     if (catId)                q = q.eq('category_id', catId)
@@ -438,6 +441,8 @@ export default function InventoryPage() {
           <option value="all">All Active</option>
           <option value="low">Low Stock</option>
           <option value="out">Out of Stock</option>
+          <option value="gst">GST Items Only</option>
+          <option value="nongst">Non-GST (0%)</option>
           <option value="inactive">Inactive</option>
         </select>
       </div>
@@ -476,7 +481,11 @@ export default function InventoryPage() {
                     <td className="px-3 py-2 text-right text-gray-500">{fmt(p.purchase_price)}</td>
                     <td className="px-3 py-2 text-right">{fmt(p.mrp)}</td>
                     <td className="px-3 py-2 text-right font-medium text-blue-700">{fmt(p.selling_price || p.mrp)}</td>
-                    <td className="px-3 py-2 text-center">{p.gst_rate}%</td>
+                    <td className="px-3 py-2 text-center">
+                      {Number(p.gst_rate) > 0
+                        ? `${p.gst_rate}%`
+                        : <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">Non-GST</span>}
+                    </td>
                     <td className={`px-3 py-2 text-right font-semibold ${
                       isOut ? 'text-red-600' : isLow ? 'text-yellow-600' : 'text-green-700'
                     }`}>

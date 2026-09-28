@@ -8,7 +8,7 @@ import { fmt, numToWords } from '@/lib/gst'
 export default function PrintTemplate({ data }) {
   if (!data) return null
   const s = data.shop || data.settings || {}
-  const template = s?.print_template || 'standard'
+  const template = data.printTemplate || s?.print_template || 'standard'
 
   if (template === 'thermal_80mm') {
     return <ThermalReceiptTemplate data={data} />
@@ -82,10 +82,12 @@ function StandardInvoiceTemplate({ data }) {
           </div>
         )}
 
-        <div className="inv-customer" style={{ display: 'flex', justifyContent: 'space-between' }}>
-          {bill.place_of_supply && <span>Place of Supply: <strong>{bill.place_of_supply}</strong></span>}
-          <span>GST Payable on Reverse Charge: <strong>{bill.reverse_charge ? 'Yes' : 'No'}</strong></span>
-        </div>
+        {(bill.place_of_supply || bill.reverse_charge) && (
+          <div className="inv-customer" style={{ display: 'flex', justifyContent: 'space-between' }}>
+            {bill.place_of_supply && <span>Place of Supply: <strong>{bill.place_of_supply}</strong></span>}
+            {bill.reverse_charge && <span>GST Payable on Reverse Charge: <strong>Yes</strong></span>}
+          </div>
+        )}
 
         {/* ── Items ───────────────────────────────────── */}
         <table className="inv-table">

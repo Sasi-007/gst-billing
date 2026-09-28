@@ -19,6 +19,7 @@ export function ShopProvider({ children }) {
 
   // Prevent duplicate initial loading
   const initialised = useRef(false)
+  const currentUserIdRef = useRef(null)
 
   useEffect(() => {
     let mounted = true
@@ -42,8 +43,13 @@ export function ShopProvider({ children }) {
 
       if (session?.user) {
         setUser(session.user)
-        loadShops(session.user.id)
+
+        if (currentUserIdRef.current !== session.user.id) {
+          currentUserIdRef.current = session.user.id
+          loadShops(session.user.id)
+        }
       } else {
+        currentUserIdRef.current = null
         setUser(null)
         setShop(null)
         setAllShops([])
@@ -101,9 +107,11 @@ export function ShopProvider({ children }) {
     } = await supabase.auth.getSession()
 
     if (session?.user) {
+      currentUserIdRef.current = session.user.id
       setUser(session.user)
       await loadShops(session.user.id)
     } else {
+      currentUserIdRef.current = null
       setUser(null)
       setShop(null)
       setAllShops([])
@@ -192,6 +200,7 @@ export function ShopProvider({ children }) {
       localStorage.removeItem('activeShopId')
     }
 
+    currentUserIdRef.current = null
     setUser(null)
     setShop(null)
     setAllShops([])

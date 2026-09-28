@@ -29,7 +29,6 @@ import {
   makeTempBillNo,
   removePendingBill,
   saveBillingDraft,
-  saveProductSnapshot,
   updatePendingBill,
 } from '@/lib/offlineBilling'
 import { getBillProductName } from '@/lib/productNames'
@@ -74,6 +73,31 @@ function focusId(id) {
   }, 30)
 }
 
+function csvEscape(value) {
+  const text = value === null || value === undefined ? '' : String(value)
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+}
+
+function downloadCsv(filename, headers, rows) {
+  const lines = [
+    headers.map(csvEscape).join(','),
+    ...rows.map((row) => headers.map((header) => csvEscape(row[header])).join(',')),
+  ]
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
+
+function formatDate(date) {
+  return date ? new Date(date + 'T00:00:00').toLocaleDateString('en-IN') : ''
+}
+
 function getProfitPreview(item) {
   const purchasePrice = parseFloat(item.purchase_price)
   const quantity = parseFloat(item.quantity)
@@ -86,12 +110,13 @@ function getProfitPreview(item) {
   const effectiveSellingPrice = total / quantity
   const profitPerUnit = effectiveSellingPrice - purchasePrice
   const totalProfit = profitPerUnit * quantity
-  const marginPct = (profitPerUnit / purchasePrice) * 100
+  const marginPct = (profitPerUnit / effectiveSellingPrice) * 100
 
   return {
     totalProfit,
     marginPct,
     purchasePrice,
+    totalCost: purchasePrice * quantity,
     isLoss: totalProfit < 0,
   }
 }
@@ -272,6 +297,22 @@ async function isSharedAutoInvoiceAccount(shopId, accountId, billId) {
   return taggedBillIds.some((taggedBillId) => taggedBillId !== billId)
 }
 
+function isMissingOptionalBillSchemaError(error) {
+  const message = String(error?.message || error || '').toLowerCase()
+  return (
+    isMissingCustomerSchemaError(error) ||
+    (message.includes('place_of_supply') && message.includes('could not find')) ||
+    (message.includes('place_of_supply') && message.includes('does not exist')) ||
+    (message.includes('reverse_charge') && message.includes('could not find')) ||
+    (message.includes('reverse_charge') && message.includes('does not exist'))
+  )
+}
+
+function withoutOptionalBillSchemaFields(payload) {
+  const { customer_id, place_of_supply, reverse_charge, ...legacyPayload } = payload
+  return legacyPayload
+}
+
 async function updateBillWithCustomerCompatibility(shopId, billId, payload) {
   const { error } = await supabase
     .from('bills')
@@ -279,9 +320,9 @@ async function updateBillWithCustomerCompatibility(shopId, billId, payload) {
     .eq('id', billId)
     .eq('shop_id', shopId)
   if (!error) return
-  if (!isMissingCustomerSchemaError(error)) throw error
+  if (!isMissingOptionalBillSchemaError(error)) throw error
 
-  const { customer_id, ...legacyPayload } = payload
+  const legacyPayload = withoutOptionalBillSchemaFields(payload)
   const { error: retryError } = await supabase
     .from('bills')
     .update(legacyPayload)
@@ -297,9 +338,9 @@ async function insertBillWithCustomerCompatibility(payload) {
     .select()
     .single()
   if (!error) return data
-  if (!isMissingCustomerSchemaError(error)) throw error
+  if (!isMissingOptionalBillSchemaError(error)) throw error
 
-  const { customer_id, ...legacyPayload } = payload
+  const legacyPayload = withoutOptionalBillSchemaFields(payload)
   const { data: legacyData, error: legacyError } = await supabase
     .from('bills')
     .insert(legacyPayload)
@@ -671,28 +712,6 @@ export default function BillingPage() {
       conversionSource,
     })
   }, [shop?.id, items, customer, billDate, billNo, billType, payMode, paidAmt, notes, placeOfSupply, reverseCharge, conversionSource])
-  useEffect(() => {
-    if (!shop?.id || !mounted || !navigator.onLine) return
-
-    let cancelled = false
-    async function syncProducts() {
-      try {
-        const { data, error } = await supabase
-          .from('products')
-          .select('id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,search_text')
-          .eq('shop_id', shop.id)
-          .eq('is_active', true)
-        if (error) return
-        if (cancelled) return
-        await saveProductSnapshot(shop.id, data || [])
-      } catch (err) {
-        console.warn('Product snapshot sync failed:', err)
-      }
-    }
-
-    syncProducts()
-    return () => { cancelled = true }
-  }, [mounted, shop?.id])
 
   useEffect(() => {
     if (!shop?.id || !mounted) return
@@ -1140,6 +1159,35 @@ export default function BillingPage() {
     if (type) { setBillType(type); sessionStorage.removeItem('defaultBillType') }
   }, [])
 
+  // ── Pick up a flagged Stock Check item to prefill (uninvoiced qty) ───────
+  useEffect(() => {
+    const raw = sessionStorage.getItem('prefillStockCheckItem')
+    if (!raw) return
+    sessionStorage.removeItem('prefillStockCheckItem')
+    let prefill
+    try { prefill = JSON.parse(raw) } catch { return }
+    if (!prefill) return
+
+    setBillType('invoice')
+    const rate = prefill.selling_price || 0
+    setItems(() => {
+      const item = {
+        ...emptyItem(),
+        product_id:   prefill.product_id || null,
+        product_name: prefill.product_name || '',
+        hsn_code:     prefill.hsn_code || '',
+        unit:         prefill.unit || 'pcs',
+        mrp:          rate,
+        rate,
+        gst_rate:     prefill.gst_rate || 0,
+        quantity:     prefill.quantity || 1,
+      }
+      return [recalc(item)]
+    })
+    showToast(`Prefilled ${prefill.product_name || 'item'} — verify rate/qty before saving`)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // ── Toast helper ──────────────────────────────────────────────────────────
   function showToast(msg, type = 'success') {
     setToast({ msg, type })
@@ -1429,6 +1477,49 @@ export default function BillingPage() {
     router.push('/billing/invoice-number-updater')
   }
 
+  function getHistoryExportBills() {
+    if (historySelectedBillIds.length === 0) return historyBills
+    const selectedIds = new Set(historySelectedBillIds)
+    return historyBills.filter((bill) => selectedIds.has(bill.id))
+  }
+
+  function handleExportHistoryCsv() {
+    const exportBills = getHistoryExportBills()
+    const rows = exportBills.map((bill) => ({
+      Date: formatDate(bill.date),
+      'Bill No': bill.bill_no,
+      Type: bill.bill_type || '',
+      Customer: bill.customer_name || '',
+      Phone: bill.customer_phone || '',
+      GSTIN: bill.customer_gstin || '',
+      'Taxable Value': Number(bill.subtotal || 0),
+      CGST: Number(bill.cgst_amount || 0),
+      SGST: Number(bill.sgst_amount || 0),
+      IGST: Number(bill.igst_amount || 0),
+      GST: Number(bill.gst_amount || 0),
+      Discount: Number(bill.discount_amount || 0),
+      Total: Number(bill.total || 0),
+      Paid: Number(bill.paid_amount || 0),
+      Due: getHistoryDueAmount(bill),
+      'Payment Mode': bill.payment_mode || '',
+      Status: bill.payment_status || '',
+      Notes: bill.notes || '',
+    }))
+    downloadCsv(`${billType}-export.csv`, Object.keys(rows[0] || {
+      Date: '', 'Bill No': '', Type: '', Customer: '', Phone: '', GSTIN: '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', GST: '', Discount: '', Total: '', Paid: '', Due: '', 'Payment Mode': '', Status: '', Notes: '',
+    }), rows)
+  }
+
+  function getHistoryInvoicePackHref() {
+    const invoiceIds = getHistoryExportBills()
+      .filter((bill) => bill.bill_type === 'invoice')
+      .map((bill) => bill.id)
+
+    return invoiceIds.length > 0
+      ? `/reports/invoice-pack?ids=${encodeURIComponent(invoiceIds.join(','))}`
+      : '/reports/invoice-pack'
+  }
+
   async function handleHistoryPrint(bill) {
     if (!shop?.id || !bill?.id) return
 
@@ -1611,6 +1702,32 @@ export default function BillingPage() {
   // ── Save ───────────────────────────────────────────────────────────────────
   async function handleSave(withPrint = false) {
     if (filledItems.length === 0) { showToast('Add at least one item', 'error'); return }
+
+    // ── Guard against selling more than what's currently in stock ──────────
+    // Only applies to actual GST invoices — a Quotation/Estimate is just a
+    // proposal to the customer and shouldn't require stock to be on hand yet.
+    // Skipped when editing an existing bill, since the loaded stock_qty there
+    // already reflects this bill's own original quantity being subtracted.
+    if (billType === 'invoice' && !editBillId) {
+      const qtyByProduct = {}
+      const stockByProduct = {}
+      const nameByProduct = {}
+      filledItems.forEach((item) => {
+        if (!item.product_id) return
+        const qty = parseFloat(item.quantity) || 0
+        qtyByProduct[item.product_id] = (qtyByProduct[item.product_id] || 0) + qty
+        if (typeof item.stock_qty === 'number') stockByProduct[item.product_id] = item.stock_qty
+        nameByProduct[item.product_id] = item.product_name || nameByProduct[item.product_id]
+      })
+      const shortages = Object.keys(qtyByProduct)
+        .filter((pid) => stockByProduct[pid] !== undefined && qtyByProduct[pid] > stockByProduct[pid])
+        .map((pid) => `${nameByProduct[pid] || 'item'} (need ${qtyByProduct[pid]}, have ${stockByProduct[pid]})`)
+      if (shortages.length > 0) {
+        showToast(`Insufficient stock — ${shortages.join('; ')}`, 'error')
+        return
+      }
+    }
+
     const isCreditMode = String(payMode || '').toLowerCase() === 'credit'
     if (isCreditMode && !String(customer.name || '').trim()) {
       showToast('Customer name is required for credit bills', 'error')
@@ -2022,6 +2139,22 @@ export default function BillingPage() {
               </button>
               <button
                 type="button"
+                onClick={handleExportHistoryCsv}
+                disabled={historyBills.length === 0}
+                className="px-3 py-2 rounded-lg border bg-white text-gray-700 text-sm font-medium hover:bg-gray-50 disabled:opacity-60"
+              >
+                Export CSV{historySelectedBillIds.length ? ` (${historySelectedBillIds.length})` : ''}
+              </button>
+              {billType === 'invoice' && historyBills.length > 0 && (
+                <Link
+                  href={getHistoryInvoicePackHref()}
+                  className="px-3 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700"
+                >
+                  Export PDF{historySelectedBillIds.length ? ` (${historySelectedBillIds.length})` : ''}
+                </Link>
+              )}
+              <button
+                type="button"
                 onClick={handleDeleteSelectedHistoryBills}
                 disabled={historyDeleting || historySelectedBillIds.length === 0}
                 className="px-3 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 disabled:opacity-60"
@@ -2353,7 +2486,8 @@ export default function BillingPage() {
                     {item.total > 0 ? fmt(item.total) : '—'}
                     {profitPreview && (
                       <div className={`mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold leading-tight ${profitPreview.isLoss ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-700'}`}>
-                        <span>Cost {fmt(profitPreview.purchasePrice)}</span>
+                        <span>Purchase {fmt(profitPreview.purchasePrice)}/unit</span>
+                        <span>Cost {fmt(profitPreview.totalCost)}</span>
                         <span>·</span>
                         <span>{profitPreview.isLoss ? 'Loss' : 'Profit'} {fmt(Math.abs(profitPreview.totalProfit))}</span>
                         <span>({profitPreview.marginPct.toFixed(1)}%)</span>
