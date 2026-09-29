@@ -5,6 +5,7 @@ import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { monthStartStr, todayStr } from '@/lib/finance'
 import { readPageCache, writePageCache } from '@/lib/pageCache'
+import { clearPageVisits, getFrequentPages } from '@/lib/pageVisits'
 import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import Link from 'next/link'
@@ -82,7 +83,18 @@ export default function DashboardPage() {
   const [recentBills,setRecentBills]= useState(() => initialCache?.recentBills || [])
   const [loading,    setLoading]    = useState(() => !initialCache)
   const [error,      setError]      = useState('')
+  const [frequentPages, setFrequentPages] = useState(() => getFrequentPages(7))
   usePageLoadingState('dashboard-page', loading)
+
+  // localStorage is unavailable during SSR, so hydrate the real ranking on mount.
+  useEffect(() => {
+    setFrequentPages(getFrequentPages(7))
+  }, [])
+
+  function resetFrequentPages() {
+    clearPageVisits()
+    setFrequentPages(getFrequentPages(7))
+  }
 
   useEffect(() => {
     if (!shop?.id) return   // wait until shop is loaded
@@ -192,26 +204,30 @@ export default function DashboardPage() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Quick actions */}
+        {/* Frequently used pages */}
         <div className="bg-white rounded-xl border p-4">
-          <h2 className="font-semibold text-sm mb-3 text-gray-700">Quick Actions</h2>
+          <div className="flex items-center justify-between mb-3">
+            <h2 className="font-semibold text-sm text-gray-700">⭐ Frequently Used</h2>
+            {frequentPages.some(p => p.count > 0) && (
+              <button
+                type="button"
+                onClick={resetFrequentPages}
+                className="text-xs text-gray-400 hover:text-red-600 hover:underline"
+              >
+                Reset
+              </button>
+            )}
+          </div>
           <div className="grid grid-cols-2 gap-2">
-            {[
-              { href:'/billing',     icon:'🧾', label:'New Bill',        cls:'bg-blue-600 text-white' },
-              { href:'/purchases/new',icon:'🛒',label:'New Purchase',    cls:'bg-purple-600 text-white' },
-              { href:'/inventory/new',icon:'📦',label:'Add Product',     cls:'bg-green-600 text-white' },
-              { href:'/credits',     icon:'📒', label:'Credit Book',     cls:'bg-cyan-600 text-white' },
-              { href:'/suppliers',   icon:'🏪', label:'Suppliers',       cls:'bg-gray-700 text-white' },
-              { href:'/reports',     icon:'📈', label:'Reports',         cls:'bg-orange-600 text-white' },
-              { href:'/inventory',   icon:'📋', label:'View Inventory',  cls:'bg-teal-600 text-white' },
-            ].map(a => (
+            {frequentPages.map(a => (
               <Link key={a.href} href={a.href}
                 className={`flex items-center gap-2 px-3 py-2.5 rounded-lg text-sm font-medium transition-opacity hover:opacity-90 ${a.cls}`}>
                 <span>{a.icon}</span>
-                <span>{a.label}</span>
+                <span className="truncate">{a.label}</span>
               </Link>
             ))}
           </div>
+          <p className="mt-2 text-[11px] text-gray-400">Ordered by how often you open each page.</p>
         </div>
 
         {/* Low stock */}
@@ -244,7 +260,7 @@ export default function DashboardPage() {
           <Link href="/reports" className="text-xs text-blue-600 hover:underline">All reports</Link>
         </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[560px] text-sm">
+        <table className="w-full min-w-[560px] text-sm">
           <thead>
             <tr className="text-xs text-gray-500 border-b bg-gray-50">
               {['Bill No','Date','Customer','Amount','Mode','Status'].map(h => (

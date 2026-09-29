@@ -27,6 +27,12 @@ export default function AppShell({ children }) {
     setSidebarMode(legacyHidden ? 'hidden' : DEFAULT_SIDEBAR_MODE)
   }, [])
 
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    document.body.classList.toggle('app-shell-locked', !isPublic && !loading)
+    return () => document.body.classList.remove('app-shell-locked')
+  }, [isPublic, loading])
+
   function updateSidebarMode(nextMode) {
     setSidebarMode(nextMode)
     if (typeof window !== 'undefined') {
@@ -57,12 +63,12 @@ export default function AppShell({ children }) {
         onSetMode={updateSidebarMode}
       />
       {/* pb-16 = space for mobile bottom nav bar */}
-      <main className="relative flex-1 overflow-y-auto pb-16 md:pb-0 min-w-0">
+      <main className="relative flex-1 overflow-y-auto overscroll-contain pb-16 lg:pb-0 pt-[calc(56px+env(safe-area-inset-top))] lg:pt-0 min-w-0">
         {sidebarMode === 'hidden' && (
           <button
             type="button"
             onClick={() => updateSidebarMode('expanded')}
-            className="hidden md:inline-flex fixed left-3 top-3 z-30 items-center gap-2 rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
+            className="hidden lg:inline-flex fixed left-3 top-3 z-30 items-center gap-2 rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm hover:bg-gray-50"
           >
             <span>☰</span>
             <span>Show Menu</span>

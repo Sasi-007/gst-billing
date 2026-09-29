@@ -81,6 +81,41 @@ kbd {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
+/* ── Installed PWA gesture handling ─────────────── */
+
+/* In standalone mode iOS forwards unhandled horizontal swipes and overscroll
+   to the system (back/forward, app switcher), which drags the whole app.
+   Pinning the document and containing overscroll keeps gestures inside the UI. */
+html,
+body {
+  overscroll-behavior: none;
+}
+
+/* Scoped to authenticated app pages, which scroll inside <main>. Public pages
+   (login/onboarding/storefront) keep normal document scrolling. */
+@media (display-mode: standalone) {
+  body.app-shell-locked {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    touch-action: pan-y;
+  }
+}
+
+/* Horizontal scrollers must swallow their own swipes so the gesture never
+   bubbles up to the system back/forward handler. */
+.table-scroll,
+.no-scrollbar,
+.sidebar-scrollbar {
+  overscroll-behavior: contain;
+}
+
+.table-scroll {
+  touch-action: pan-x pan-y;
+}
+
 /* ── Print layout ───────────────────────────────── */
 
 @media print {
