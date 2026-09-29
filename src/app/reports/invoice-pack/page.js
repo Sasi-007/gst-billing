@@ -7,6 +7,7 @@ import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { todayStr } from '@/lib/finance'
+import { printWithContent } from '@/lib/print'
 import { useShop } from '@/context/ShopContext'
 import PrintTemplate from '@/components/PrintTemplate'
 
@@ -161,7 +162,7 @@ export default function InvoicePackPage() {
               </Link>
               <button
                 type="button"
-                onClick={() => window.print()}
+                onClick={() => printWithContent()}
                 disabled={bills.length === 0}
                 className="rounded-lg bg-red-600 px-3 py-2 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-300"
               >

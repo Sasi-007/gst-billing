@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
+import { printWithContent } from '@/lib/print'
 import { useShop } from '@/context/ShopContext'
 import PrintTemplate from '@/components/PrintTemplate'
 
@@ -109,7 +110,7 @@ export default function BillDetailsPage() {
       return
     }
 
-    setPrintData({
+    printWithContent(() => setPrintData({
       bill,
       items,
       shop: printShop,
@@ -120,8 +121,7 @@ export default function BillDetailsPage() {
         total: Number(bill.total || 0),
         gstBreakdown,
       },
-    })
-    setTimeout(() => window.print(), 120)
+    }))
   }
 
   async function handleDelete() {

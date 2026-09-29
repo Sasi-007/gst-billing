@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
+import { printWithContent } from '@/lib/print'
 import { useShop } from '@/context/ShopContext'
 import {
   buildQuantityMap,
@@ -90,9 +91,8 @@ export default function PurchaseDetailsPage() {
   }
 
   function handlePrint() {
-    setPrintOpen(true)
-    setTimeout(() => window.print(), 120)
-    setTimeout(() => setPrintOpen(false), 500)
+    window.addEventListener('afterprint', () => setPrintOpen(false), {once: true })
+    printWithContent(() => setPrintOpen(true))
   }
 
   if (loading) return <div className="p-4 text-gray-500">Loading purchase details…</div>

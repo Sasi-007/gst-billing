@@ -119,14 +119,18 @@ body {
 /* ── Print layout ───────────────────────────────── */
 
 @media print {
+  @page {
+    margin: 0;
+  }
+
   @page thermalReceipt {
     size: 80mm auto;
-    margin: 2mm;
+    margin: 0;
   }
 
   @page standardInvoice {
     size: A4 portrait;
-    margin: 10mm;
+    margin: 0;
   }
 
   * {
@@ -164,7 +168,7 @@ body {
     page: thermalReceipt;
     width: 76mm;
     margin: 0 auto;
-    padding: 0;
+    padding: 2mm 0;
     font-size: 10px;
     line-height: 1.22;
     color: #000;
@@ -442,6 +446,7 @@ body {
   .invoice .inv-totals {
     display: flex;
     justify-content: space-between;
+    align-items: flex-start;
     gap: 16px;
     margin-top: 6px;
   }
@@ -500,7 +505,7 @@ body {
     background: #f9f9f9;
     border-left: 3px solid #333;
     padding: 3px 8px;
-    margin: 6px 0;
+    margin: 6px 0 0;
   }
 
   .invoice .inv-notes {

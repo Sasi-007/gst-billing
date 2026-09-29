@@ -161,6 +161,9 @@ function StandardInvoiceTemplate({ data }) {
                 )}
               </tbody>
             </table>
+            <div className="inv-words">
+              Amount in words: <em>{numToWords(totals.total)}</em>
+            </div>
           </div>
 
           {/* Amount box */}
@@ -180,11 +183,6 @@ function StandardInvoiceTemplate({ data }) {
               <span>{totals.total.toFixed(2)}</span>
             </div>
           </div>
-        </div>
-
-        {/* Amount in words */}
-        <div className="inv-words">
-          Amount in words: <em>{numToWords(totals.total)}</em>
         </div>
 
         {bill.notes && <div className="inv-notes">Note: {bill.notes}</div>}

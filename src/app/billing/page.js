@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
+import { printWithContent } from '@/lib/print'
 import { todayStr } from '@/lib/finance'
 import {
   ensureCustomerRecord,
@@ -1542,7 +1543,8 @@ export default function BillingPage() {
       }
 
       const printShop = await getLatestShopForPrint(shop)
-      setPrintData({
+      window.addEventListener('afterprint', () => setPrintData(null), { once: true })
+      printWithContent(() => setPrintData({
         bill,
         items: lineItems || [],
         shop: printShop,
@@ -1553,9 +1555,7 @@ export default function BillingPage() {
           total: Number(bill.total || 0),
           gstBreakdown,
         },
-      })
-      window.addEventListener('afterprint', () => setPrintData(null), { once: true })
-      setTimeout(() => window.print(), 120)
+      }))
     } catch (error) {
       showToast('Print failed: ' + (error?.message || 'Unknown error'), 'error')
     } finally {
@@ -1914,8 +1914,7 @@ export default function BillingPage() {
         }
         window.addEventListener('afterprint', clearAfterPrint, { once: true })
         const printShop = await getLatestShopForPrint(shop)
-        setPrintData({ bill: { ...billRow, id: savedId }, items: filledItems, shop: printShop, totals })
-        setTimeout(() => window.print(), 200)
+        printWithContent(() => setPrintData({ bill: { ...billRow, id: savedId }, items: filledItems, shop: printShop, totals }))
       } else {
         resetBillForm()
       }
