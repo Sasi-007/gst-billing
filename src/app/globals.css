@@ -358,6 +358,13 @@ body {
     margin: 0 0 3px;
   }
 
+  .invoice .inv-shop .inv-logo {
+    max-height: 18mm;
+    max-width: 55mm;
+    object-fit: contain;
+    margin-bottom: 4px;
+  }
+
   .invoice .inv-shop p {
     margin: 2px 0;
     font-size: 11px;

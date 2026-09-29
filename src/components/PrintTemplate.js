@@ -40,6 +40,9 @@ function StandardInvoiceTemplate({ data }) {
         {/* ── Header ──────────────────────────────────── */}
         <div className="inv-header">
           <div className="inv-shop">
+            {s?.logo_url && (
+              <img className="inv-logo" src={s.logo_url} alt={`${s?.name || s?.shop_name || 'Shop' } logo`} />
+            )}
             <h1>{s?.name || s?.shop_name || 'My Shop'}</h1>
             {s?.address && <p>{s.address}</p>}
             {(s?.city || s?.state) && (
@@ -185,11 +188,6 @@ function StandardInvoiceTemplate({ data }) {
         </div>
 
         {bill.notes && <div className="inv-notes">Note: {bill.notes}</div>}
-
-        <div className="inv-signatory" style={{ marginTop: '40px', textAlign: 'right'}}>
-          <div>For {s?.name || s?.shop_name || 'My Shop'}</div>
-          <div style={{ marginTop: '40px' }}>Authorised Signatory</div>
-        </div>
 
       </div>
     </div>

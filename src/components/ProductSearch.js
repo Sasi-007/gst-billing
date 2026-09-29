@@ -176,6 +176,13 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     return [...map.values()].slice(-1000)
   }
 
+  function getLandingRate(row) {
+    const qty = Number(row?.quantity || 0)
+    const netTotal = Number(row?.total || 0)
+    if (qty > 0 && netTotal > 0) return Math.round((netTotal / qty) * 100)/100
+    return Number(row?.rate || 0)
+  }
+
   async function loadPurchaseHints(products) {
     const productIds = products.map((product) => product.id).filter(Boolean)
     if (!shop?.id || productIds.length === 0) {
@@ -186,7 +193,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     try {
       const { data: itemRows, error: itemErr } = await supabase
         .from('purchase_bill_items')
-        .select('product_id,rate,mrp,purchase_bill_id,created_at')
+        .select('product_id,rate,mrp,quantity,total,purchase_bill_id,created_at')
         .eq('shop_id', shop.id)
         .in('product_id', productIds)
         .order('created_at', { ascending: false })
@@ -206,7 +213,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
       if (purchaseBillIds.length === 0) {
         setPurchaseHints(Object.fromEntries(
           [...latestByProduct.entries()].map(([productId, row]) => [productId, {
-            rate: row.rate,
+            rate: getLandingRate(row),
             mrp: row.mrp,
             billNo: '',
             billDate: '',
@@ -231,7 +238,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
         [...latestByProduct.entries()].map(([productId, row]) => {
           const bill = billMap.get(row.purchase_bill_id)
           return [productId, {
-            rate: row.rate,
+            rate: getLandingRate(row),
             mrp: row.mrp,
             billNo: bill?.bill_no || '',
             billDate: bill?.date || '',
