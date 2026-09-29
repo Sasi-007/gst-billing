@@ -119,18 +119,25 @@ export default function InventoryPage() {
   const [search,   setSearch]   = useState('')
   const [filter,   setFilter]   = useState('all')
   const [catId,    setCatId]    = useState('')
+  const [page,     setPage]     = useState(0)
   const debouncedSearch = useDebouncedValue(search)
-  const cacheKey = shop?.id ? `inventory:${shop.id}:${debouncedSearch}:${filter}:${catId}` : ''
+  const cacheKey = shop?.id ? `inventory:${shop.id}:${debouncedSearch}:${filter}:${catId}:${page}` : ''
   const catsCacheKey = shop?.id ? `inventory-categories:${shop.id}` : ''
   const initialListCache = readPageCache(cacheKey)
   const initialCatsCache = readPageCache(catsCacheKey)
   const [products, setProducts] = useState(() => initialListCache?.products || [])
+  const [totalCount, setTotalCount] = useState(() => initialListCache?.totalCount ?? null)
   const [loading,  setLoading]  = useState(() => !initialListCache)
   const [cats,     setCats]     = useState(() => initialCatsCache?.cats || [])
   const [csvBusy, setCsvBusy] = useState(false)
   const [csvMessage, setCsvMessage] = useState('')
   const csvInputRef = useRef(null)
   usePageLoadingState('inventory-page', loading)
+
+  // Any change to search/filter/category should reset back to page 1.
+  useEffect(() => {
+    setPage(0)
+  }, [debouncedSearch, filter, catId])
 
   useEffect(() => {
     if (!shop?.id) return
@@ -150,27 +157,12 @@ export default function InventoryPage() {
       })
   }, [catsCacheKey, shop?.id])
 
-  const load = useCallback(async () => {
-    if (!shop?.id) {
-      setProducts([])
-      setLoading(false)
-      return
-    }
-
-    const cached = readPageCache(cacheKey)
-    if (cached?.products) {
-      setProducts(cached.products)
-      setLoading(false)
-    } else {
-      setLoading(true)
-    }
-
+  function buildProductsQuery({ select, count }) {
     let q = supabase
       .from('products')
-      .select('id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code,category_id,supplier_id,is_active,suppliers(name),categories(name)')
+      .select(select, count ? { count } : undefined)
       .eq('shop_id', shop.id)
       .order('name')
-      .limit(INVENTORY_LIST_LIMIT)
 
     if (debouncedSearch) {
       const term = debouncedSearch.toLowerCase()
@@ -178,19 +170,48 @@ export default function InventoryPage() {
     }
     if (filter === 'low')     q = q.gt('min_stock', 0)   // further filtered client-side
     if (filter === 'out')     q = q.lte('stock_qty', 0)
-    if (filter === 'nongst')     q = q.eq('gst_rate', 0)
+    if (filter === 'instock') q = q.neq('stock_qty', 0)
+    if (filter === 'nongst')  q = q.eq('gst_rate', 0)
     if (filter === 'gst')     q = q.gt('gst_rate', 0)
     if (filter === 'inactive')q = q.eq('is_active', false)
     else                      q = q.eq('is_active', true)
     if (catId)                q = q.eq('category_id', catId)
 
-    const { data } = await q
+    return q
+  }
+
+  const load = useCallback(async () => {
+    if (!shop?.id) {
+      setProducts([])
+      setTotalCount(0)
+      setLoading(false)
+      return
+    }
+
+    const cached = readPageCache(cacheKey)
+    if (cached?.products) {
+      setProducts(cached.products)
+      setTotalCount(cached.totalCount ?? null)
+      setLoading(false)
+    } else {
+      setLoading(true)
+    }
+
+    const from = page * INVENTORY_LIST_LIMIT
+    const to = from + INVENTORY_LIST_LIMIT - 1
+    const q = buildProductsQuery({
+      select: 'id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code,category_id,supplier_id,is_active,suppliers(name),categories(name)',
+      count: 'exact',
+    }).range(from, to)
+
+    const { data, count } = await q
     let rows = data || []
     if (filter === 'low') rows = rows.filter(p => p.stock_qty <= p.min_stock)
     setProducts(rows)
-    writePageCache(cacheKey, { products: rows })
+    setTotalCount(typeof count === 'number' ? count : null)
+    writePageCache(cacheKey, { products: rows, totalCount: count })
     setLoading(false)
-  }, [cacheKey, catId, debouncedSearch, filter, shop?.id])
+  }, [cacheKey, catId, debouncedSearch, filter, page, shop?.id])
 
   useEffect(() => { load() }, [load])
 
@@ -199,23 +220,53 @@ export default function InventoryPage() {
     load()
   }
 
-  function downloadCsv() {
-    const csvRows = [
-      CSV_COLUMNS.join(','),
-      ...products.map((product) => CSV_COLUMNS.map((column) => {
-        if (column === 'category') return escapeCsv(product.categories?.name || '')
-        return escapeCsv(product[column])
-      }).join(',')),
-    ]
-    const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8' })
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = `inventory-${shop?.name || 'shop'}-${new Date().toISOString().slice(0, 10)}.csv`
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-    URL.revokeObjectURL(url)
+  async function fetchAllMatchingProducts() {
+    const CSV_BATCH_SIZE = 1000
+    const select = 'name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,categories(name)'
+    const all = []
+    let from = 0
+
+    // Paginate in batches so the export isn't bound by PostgREST's default row cap.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const to = from + CSV_BATCH_SIZE - 1
+      const { data, error } = await buildProductsQuery({ select }).range(from, to)
+      if (error) throw error
+      const rows = data || []
+      all.push(...rows)
+      if (rows.length < CSV_BATCH_SIZE) break
+      from += CSV_BATCH_SIZE
+    }
+
+    return filter === 'low' ? all.filter(p => p.stock_qty <= p.min_stock) : all
+  }
+
+  async function downloadCsv() {
+    setCsvBusy(true)
+    setCsvMessage('')
+    try {
+      const allProducts = await fetchAllMatchingProducts()
+      const csvRows = [
+        CSV_COLUMNS.join(','),
+        ...allProducts.map((product) => CSV_COLUMNS.map((column) => {
+          if (column === 'category') return escapeCsv(product.categories?.name || '')
+          return escapeCsv(product[column])
+        }).join(',')),
+      ]
+      const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `inventory-${shop?.name || 'shop'}-${new Date().toISOString().slice(0, 10)}.csv`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (error) {
+      setCsvMessage(`CSV export failed: ${error.message}`)
+    } finally {
+      setCsvBusy(false)
+    }
   }
 
   function downloadSampleCsv() {
@@ -370,9 +421,10 @@ export default function InventoryPage() {
           <button
             type="button"
             onClick={downloadCsv}
-            className="px-4 py-2 bg-white border text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium"
+            disabled={csvBusy}
+            className="px-4 py-2 bg-white border text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium disabled:opacity-60"
           >
-            Download CSV
+            {csvBusy ? 'Preparing…' : 'Download CSV'}
           </button>
           <button
             type="button"
@@ -441,74 +493,160 @@ export default function InventoryPage() {
           <option value="all">All Active</option>
           <option value="low">Low Stock</option>
           <option value="out">Out of Stock</option>
+          <option value="instock">In Stock (Qty ≠ 0)</option>
           <option value="gst">GST Items Only</option>
           <option value="nongst">Non-GST (0%)</option>
           <option value="inactive">Inactive</option>
         </select>
       </div>
 
-      {/* Table */}
+      {/* Product list */}
       {loading ? (
         <LoadingPlaceholder label="Loading inventory" rows={4} fullPage />
       ) : products.length === 0 ? (
         <div className="text-center text-gray-400 py-10">No products found</div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border bg-white">
-          <table className="w-full min-w-[900px] text-sm">
-            <thead>
-              <tr className="bg-gray-50 text-gray-600 text-xs border-b">
-                {['Product','Brand','Barcode','Cat','Unit','Purchase','MRP','Selling','GST%','Stock','Supplier',''].map(h => (
-                  <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {products.map(p => {
-                const isOut = p.stock_qty <= 0
-                const isLow = !isOut && p.min_stock > 0 && p.stock_qty <= p.min_stock
-                return (
-                  <tr key={p.id}
-                    className={`border-b hover:bg-gray-50 ${isOut ? 'bg-red-50' : isLow ? 'bg-yellow-50' : ''}`}
-                  >
-                    <td className="px-3 py-2 max-w-[220px]" title={[p.name, p.local_name].filter(Boolean).join(' / ')}>
-                      <div className="font-medium truncate">{p.name}</div>
+        <div className="rounded-lg border bg-white">
+          {/* Mobile: stacked cards */}
+          <div className="md:hidden divide-y">
+            {products.map(p => {
+              const isOut = p.stock_qty <= 0
+              const isLow = !isOut && p.min_stock > 0 && p.stock_qty <= p.min_stock
+              return (
+                <div key={p.id} className={`p-3 ${isOut ? 'bg-red-50' : isLow ? 'bg-yellow-50' : ''}`}>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-medium text-gray-900 truncate">{p.name}</div>
                       {p.local_name && <div className="text-xs text-gray-500 truncate">{p.local_name}</div>}
-                    </td>
-                    <td className="px-3 py-2 text-gray-500">{p.brand || '—'}</td>
-                    <td className="px-3 py-2 font-mono text-xs text-gray-500">{p.barcode || '—'}</td>
-                    <td className="px-3 py-2 text-xs text-gray-500">{p.categories?.name || '—'}</td>
-                    <td className="px-3 py-2 text-center text-xs">{p.unit}</td>
-                    <td className="px-3 py-2 text-right text-gray-500">{fmt(p.purchase_price)}</td>
-                    <td className="px-3 py-2 text-right">{fmt(p.mrp)}</td>
-                    <td className="px-3 py-2 text-right font-medium text-blue-700">{fmt(p.selling_price || p.mrp)}</td>
-                    <td className="px-3 py-2 text-center">
-                      {Number(p.gst_rate) > 0
-                        ? `${p.gst_rate}%`
-                        : <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">Non-GST</span>}
-                    </td>
-                    <td className={`px-3 py-2 text-right font-semibold ${
+                      <div className="text-xs text-gray-400 mt-0.5 flex flex-wrap gap-x-2">
+                        {p.brand && <span>{p.brand}</span>}
+                        {p.categories?.name && <span>{p.categories.name}</span>}
+                        {p.barcode && <span className="font-mono">{p.barcode}</span>}
+                      </div>
+                    </div>
+                    <div className={`shrink-0 text-right font-semibold ${
                       isOut ? 'text-red-600' : isLow ? 'text-yellow-600' : 'text-green-700'
                     }`}>
-                      {p.stock_qty}
+                      {p.stock_qty} {p.unit}
                       {isOut && ' ⚠'}
-                    </td>
-                    <td className="px-3 py-2 text-xs text-gray-400">{p.suppliers?.name || '—'}</td>
-                    <td className="px-3 py-2 text-right">
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between mt-2 text-sm">
+                    <div className="flex items-center gap-3">
+                      <span className="text-gray-500">Pur: {fmt(p.purchase_price)}</span>
+                      <span className="text-gray-500">MRP: {fmt(p.mrp)}</span>
+                      <span className="font-medium text-blue-700">Sell: {fmt(p.selling_price || p.mrp)}</span>
+                    </div>
+                    {Number(p.gst_rate) > 0
+                      ? <span className="text-xs text-gray-500">{p.gst_rate}%</span>
+                      : <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">Non-GST</span>}
+                  </div>
+                  <div className="flex items-center justify-between mt-2">
+                    <span className="text-xs text-gray-400 truncate">{p.suppliers?.name || '—'}</span>
+                    <div className="flex items-center gap-3 shrink-0">
                       <Link href={`/inventory/${p.id}`}
-                        className="text-blue-600 hover:underline text-xs mr-2">Edit</Link>
+                        className="text-blue-600 hover:underline text-xs">Edit</Link>
                       <button
                         onClick={() => toggleActive(p.id, !p.is_active)}
                         className={`text-xs ${p.is_active ? 'text-gray-400 hover:text-red-500' : 'text-green-600 hover:text-green-700'}`}
                       >
                         {p.is_active ? 'Disable' : 'Enable'}
                       </button>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
-          <div className="px-3 py-2 text-xs text-gray-400">{products.length} products</div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Desktop/tablet: table */}
+          <div className="hidden md:block overflow-x-auto">
+            <table className="w-full min-w-[900px] text-sm">
+              <thead>
+                <tr className="bg-gray-50 text-gray-600 text-xs border-b">
+                  {['Product','Brand','Barcode','Cat','Unit','Purchase','MRP','Selling','GST%','Stock','Supplier',''].map(h => (
+                    <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {products.map(p => {
+                  const isOut = p.stock_qty <= 0
+                  const isLow = !isOut && p.min_stock > 0 && p.stock_qty <= p.min_stock
+                  return (
+                    <tr key={p.id}
+                      className={`border-b hover:bg-gray-50 ${isOut ? 'bg-red-50' : isLow ? 'bg-yellow-50' : ''}`}
+                    >
+                      <td className="px-3 py-2 max-w-[220px]" title={[p.name, p.local_name].filter(Boolean).join(' / ')}>
+                        <div className="font-medium truncate">{p.name}</div>
+                        {p.local_name && <div className="text-xs text-gray-500 truncate">{p.local_name}</div>}
+                      </td>
+                      <td className="px-3 py-2 text-gray-500">{p.brand || '—'}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-gray-500">{p.barcode || '—'}</td>
+                      <td className="px-3 py-2 text-xs text-gray-500">{p.categories?.name || '—'}</td>
+                      <td className="px-3 py-2 text-center text-xs">{p.unit}</td>
+                      <td className="px-3 py-2 text-right text-gray-500">{fmt(p.purchase_price)}</td>
+                      <td className="px-3 py-2 text-right">{fmt(p.mrp)}</td>
+                      <td className="px-3 py-2 text-right font-medium text-blue-700">{fmt(p.selling_price || p.mrp)}</td>
+                      <td className="px-3 py-2 text-center">
+                        {Number(p.gst_rate) > 0
+                          ? `${p.gst_rate}%`
+                          : <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">Non-GST</span>}
+                      </td>
+                      <td className={`px-3 py-2 text-right font-semibold ${
+                        isOut ? 'text-red-600' : isLow ? 'text-yellow-600' : 'text-green-700'
+                      }`}>
+                        {p.stock_qty}
+                        {isOut && ' ⚠'}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-gray-400">{p.suppliers?.name || '—'}</td>
+                      <td className="px-3 py-2 text-right">
+                        <Link href={`/inventory/${p.id}`}
+                          className="text-blue-600 hover:underline text-xs mr-2">Edit</Link>
+                        <button
+                          onClick={() => toggleActive(p.id, !p.is_active)}
+                          className={`text-xs ${p.is_active ? 'text-gray-400 hover:text-red-500' : 'text-green-600 hover:text-green-700'}`}
+                        >
+                          {p.is_active ? 'Disable' : 'Enable'}
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 py-2 border-t text-xs text-gray-500">
+            <span>
+              {totalCount != null
+                ? `Showing ${products.length === 0 ? 0 : page * INVENTORY_LIST_LIMIT + 1}–${page * INVENTORY_LIST_LIMIT + products.length} of ${totalCount} products`
+                : `${products.length} products`}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPage(p => Math.max(0, p - 1))}
+                disabled={page === 0}
+                className="px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                ← Prev
+              </button>
+              <span className="text-gray-600">Page {page + 1}{totalCount != null ? ` of ${Math.max(1, Math.ceil(totalCount / INVENTORY_LIST_LIMIT))}` : ''}</span>
+              <button
+                type="button"
+                onClick={() => setPage(p => p + 1)}
+                disabled={
+                  totalCount != null
+                    ? page * INVENTORY_LIST_LIMIT + products.length >= totalCount
+                    : products.length < INVENTORY_LIST_LIMIT
+                }
+                className="px-3 py-1.5 rounded-lg border bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

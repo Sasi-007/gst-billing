@@ -6,8 +6,6 @@ import { supabase } from '../lib/supabase'
 
 const ShopContext = createContext(null)
 
-const PUBLIC_PATHS = ['/login', '/onboarding', '/store']
-
 export function ShopProvider({ children }) {
   const [shop, setShop] = useState(null)
   const [user, setUser] = useState(null)
@@ -69,9 +67,10 @@ export function ShopProvider({ children }) {
   useEffect(() => {
     if (loading) return
 
-    const isPublic = PUBLIC_PATHS.some((path) =>
-      pathname.startsWith(path)
-    )
+    const isLoginPage = pathname.startsWith('/login')
+    const isOnboardingPage = pathname.startsWith('/onboarding')
+    const isStorePage = pathname.startsWith('/store')
+    const isPublic = isLoginPage || isOnboardingPage || isStorePage
 
     const isApi = pathname.startsWith('/api')
 
@@ -84,19 +83,15 @@ export function ShopProvider({ children }) {
       return
     }
 
-    // Logged in but no shop yet
-    if (
-      user &&
-      !shop &&
-      !pathname.startsWith('/onboarding') &&
-      !isPublic
-    ) {
+    // Logged in but no shop yet — send to onboarding, even from /login
+    // (only skip this if already on /onboarding or the public /store page)
+    if (user && !shop && !isOnboardingPage && !isStorePage) {
       router.replace('/onboarding')
       return
     }
 
     // Logged in and has shop, but currently on login/onboarding
-    if (user && shop && isPublic) {
+    if (user && shop && (isLoginPage || isOnboardingPage)) {
       router.replace('/')
     }
   }, [loading, user, shop, pathname, router])
