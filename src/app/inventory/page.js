@@ -8,7 +8,10 @@ import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { useShop } from '@/context/ShopContext'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
+import InventoryFilterPanel from '@/components/InventoryFilterPanel'
+import { countRules, emptyFilterTree, filterTreeToPostgrest, makeGroup, makeRule, treeHasField } from '@/lib/inventoryFilters'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 
 const CSV_COLUMNS = [
   'name',
@@ -29,6 +32,7 @@ const CSV_COLUMNS = [
   'is_active',
 ]
 const INVENTORY_LIST_LIMIT = 50
+const LIST_SELECT = 'id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code,category_id,supplier_id,is_active,suppliers(name),categories(name)'
 
 function escapeCsv(value) {
   const text = Array.isArray(value) ? value.join(', ') : String(value ?? '')
@@ -114,14 +118,32 @@ function normalizeBillNameMode(value) {
   return ['english', 'local', 'both'].includes(mode) ? mode : 'english'
 }
 
+function supplierFilterTree(supplierId) {
+  const rule = makeRule('supplier_id')
+  rule.value = supplierId
+  return makeGroup('and', [rule])
+}
+
 export default function InventoryPage() {
   const { shop } = useShop()
+  const searchParams = useSearchParams()
+  const supplierParam = searchParams?.get('supplier') || ''
   const [search,   setSearch]   = useState('')
   const [filter,   setFilter]   = useState('all')
   const [catId,    setCatId]    = useState('')
   const [page,     setPage]     = useState(0)
+  // Seeded on the first render so a ?supplier= deep link never fetches unfiltered.
+  const [advTree,  setAdvTree]  = useState(() => (
+    supplierParam ? supplierFilterTree(supplierParam) : emptyFilterTree()
+  ))
+  const [showAdvanced, setShowAdvanced] = useState(Boolean(supplierParam))
+  const [queryError, setQueryError] = useState('')
+  const [selected, setSelected] = useState(() => new Map())
   const debouncedSearch = useDebouncedValue(search)
-  const cacheKey = shop?.id ? `inventory:${shop.id}:${debouncedSearch}:${filter}:${catId}:${page}` : ''
+  const advFilter = filterTreeToPostgrest(advTree)
+  const advCount = countRules(advTree)
+  const advUsesActive = treeHasField(advTree, 'is_active')
+  const cacheKey = shop?.id ? `inventory:${shop.id}:${debouncedSearch}:${filter}:${catId}:${advFilter}:${page}` : ''
   const catsCacheKey = shop?.id ? `inventory-categories:${shop.id}` : ''
   const initialListCache = readPageCache(cacheKey)
   const initialCatsCache = readPageCache(catsCacheKey)
@@ -129,7 +151,10 @@ export default function InventoryPage() {
   const [totalCount, setTotalCount] = useState(() => initialListCache?.totalCount ?? null)
   const [loading,  setLoading]  = useState(() => !initialListCache)
   const [cats,     setCats]     = useState(() => initialCatsCache?.cats || [])
+  const [suppliers, setSuppliers] = useState(() => initialCatsCache?.suppliers || [])
   const [csvBusy, setCsvBusy] = useState(false)
+  // Guards against a slower earlier request overwriting newer results.
+  const loadSeq = useRef(0)
   const [csvMessage, setCsvMessage] = useState('')
   const csvInputRef = useRef(null)
   usePageLoadingState('inventory-page', loading)
@@ -137,24 +162,36 @@ export default function InventoryPage() {
   // Any change to search/filter/category should reset back to page 1.
   useEffect(() => {
     setPage(0)
-  }, [debouncedSearch, filter, catId])
+  }, [debouncedSearch, filter, catId, advFilter])
+
+  // Deep link: /inventory?supplier=<id> pre-applies a supplier condition.
+  // The initial value is seeded in useState, so this only handles later changes.
+  const appliedSupplierParam = useRef(supplierParam)
+  useEffect(() => {
+    if (appliedSupplierParam.current === supplierParam) return
+    appliedSupplierParam.current = supplierParam
+    if (!supplierParam) return
+    setAdvTree(supplierFilterTree(supplierParam))
+    setShowAdvanced(true)
+  }, [supplierParam])
 
   useEffect(() => {
     if (!shop?.id) return
 
     const cached = readPageCache(catsCacheKey)
     if (cached?.cats) setCats(cached.cats)
+    if (cached?.suppliers) setSuppliers(cached.suppliers)
 
-    supabase
-      .from('categories')
-      .select('id,name,shop_id')
-      .eq('shop_id', shop.id)
-      .order('name')
-      .then(({ data }) => {
-        const nextCats = data || []
-        setCats(nextCats)
-        writePageCache(catsCacheKey, { cats: nextCats })
-      })
+    Promise.all([
+      supabase.from('categories').select('id,name,shop_id').eq('shop_id', shop.id).order('name'),
+      supabase.from('suppliers').select('id,name').eq('shop_id', shop.id).eq('is_active', true).order('name'),
+    ]).then(([catsRes, suppliersRes]) => {
+      const nextCats = catsRes.data || []
+      const nextSuppliers = suppliersRes.data || []
+      setCats(nextCats)
+      setSuppliers(nextSuppliers)
+      writePageCache(catsCacheKey, { cats: nextCats, suppliers: nextSuppliers })
+    })
   }, [catsCacheKey, shop?.id])
 
   function buildProductsQuery({ select, count }) {
@@ -174,8 +211,9 @@ export default function InventoryPage() {
     if (filter === 'nongst')  q = q.eq('gst_rate', 0)
     if (filter === 'gst')     q = q.gt('gst_rate', 0)
     if (filter === 'inactive')q = q.eq('is_active', false)
-    else                      q = q.eq('is_active', true)
+    else if (!advUsesActive)  q = q.eq('is_active', true)
     if (catId)                q = q.eq('category_id', catId)
+    if (advFilter)            q = q.or(advFilter)
 
     return q
   }
@@ -199,19 +237,29 @@ export default function InventoryPage() {
 
     const from = page * INVENTORY_LIST_LIMIT
     const to = from + INVENTORY_LIST_LIMIT - 1
+    const seq = ++loadSeq.current
     const q = buildProductsQuery({
-      select: 'id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code,category_id,supplier_id,is_active,suppliers(name),categories(name)',
+      select: LIST_SELECT,
       count: 'exact',
     }).range(from, to)
 
-    const { data, count } = await q
+    const { data, count, error } = await q
+    if (seq !== loadSeq.current) return
+    if (error) {
+      setQueryError(error.message)
+      setProducts([])
+      setTotalCount(0)
+      setLoading(false)
+      return
+    }
+    setQueryError('')
     let rows = data || []
     if (filter === 'low') rows = rows.filter(p => p.stock_qty <= p.min_stock)
     setProducts(rows)
     setTotalCount(typeof count === 'number' ? count : null)
     writePageCache(cacheKey, { products: rows, totalCount: count })
     setLoading(false)
-  }, [cacheKey, catId, debouncedSearch, filter, page, shop?.id])
+  }, [cacheKey, catId, debouncedSearch, filter, page, shop?.id, advFilter, advUsesActive])
 
   useEffect(() => { load() }, [load])
 
@@ -220,9 +268,42 @@ export default function InventoryPage() {
     load()
   }
 
-  async function fetchAllMatchingProducts() {
+  function toggleSelect(product) {
+    setSelected((prev) => {
+      const next = new Map(prev)
+      if (next.has(product.id)) next.delete(product.id)
+      else next.set(product.id, product)
+      return next
+    })
+  }
+
+  function toggleSelectPage() {
+    setSelected((prev) => {
+      const next = new Map(prev)
+      const allSelected = products.length > 0 && products.every((p) => next.has(p.id))
+      for (const product of products) {
+        if (allSelected) next.delete(product.id)
+        else next.set(product.id, product)
+      }
+      return next
+    })
+  }
+
+  async function selectAllMatching() {
+    setCsvBusy(true)
+    setCsvMessage('')
+    try {
+      const rows = await fetchAllMatchingProducts()
+      setSelected(new Map(rows.map((row) => [row.id, row])))
+    } catch (error) {
+      setCsvMessage(`Select all failed: ${error.message}`)
+    } finally {
+      setCsvBusy(false)
+    }
+  }
+
+  async function fetchAllMatchingProducts(select = LIST_SELECT) {
     const CSV_BATCH_SIZE = 1000
-    const select = 'name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,categories(name)'
     const all = []
     let from = 0
 
@@ -241,31 +322,53 @@ export default function InventoryPage() {
     return filter === 'low' ? all.filter(p => p.stock_qty <= p.min_stock) : all
   }
 
+  function rowsToCsvBlob(rows) {
+    const csvRows = [
+      CSV_COLUMNS.join(','),
+      ...rows.map((product) => CSV_COLUMNS.map((column) => {
+        if (column === 'category') return escapeCsv(product.categories?.name || '')
+        return escapeCsv(product[column])
+      }).join(',')),
+    ]
+    return new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8' })
+  }
+
+  function saveBlob(blob, filename) {
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = filename
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    URL.revokeObjectURL(url)
+  }
+
+  function csvFileName(scope) {
+    return `inventory-${scope}-${shop?.name || 'shop'}-${new Date().toISOString().slice(0, 10)}.csv`
+  }
+
   async function downloadCsv() {
     setCsvBusy(true)
     setCsvMessage('')
     try {
       const allProducts = await fetchAllMatchingProducts()
-      const csvRows = [
-        CSV_COLUMNS.join(','),
-        ...allProducts.map((product) => CSV_COLUMNS.map((column) => {
-          if (column === 'category') return escapeCsv(product.categories?.name || '')
-          return escapeCsv(product[column])
-        }).join(',')),
-      ]
-      const blob = new Blob([csvRows.join('\n')], { type: 'text/csv;charset=utf-8' })
-      const url = URL.createObjectURL(blob)
-      const link = document.createElement('a')
-      link.href = url
-      link.download = `inventory-${shop?.name || 'shop'}-${new Date().toISOString().slice(0, 10)}.csv`
-      document.body.appendChild(link)
-      link.click()
-      link.remove()
-      URL.revokeObjectURL(url)
+      saveBlob(rowsToCsvBlob(allProducts), csvFileName('filtered'))
     } catch (error) {
       setCsvMessage(`CSV export failed: ${error.message}`)
     } finally {
       setCsvBusy(false)
+    }
+  }
+
+  function downloadSelectedCsv() {
+    const rows = Array.from(selected.values())
+    if (!rows.length) return
+    setCsvMessage('')
+    try {
+      saveBlob(rowsToCsvBlob(rows), csvFileName(`selected-${rows.length}`))
+    } catch (error) {
+      setCsvMessage(`CSV export failed: ${error.message}`)
     }
   }
 
@@ -405,6 +508,8 @@ export default function InventoryPage() {
 
   const lowCount = products.filter(p => p.stock_qty > 0 && p.stock_qty <= p.min_stock).length
   const outCount = products.filter(p => p.stock_qty <= 0).length
+  const selectedCount = selected.size
+  const allPageSelected = products.length > 0 && products.every(p => selected.has(p.id))
 
   return (
     <div className="p-4">
@@ -420,11 +525,19 @@ export default function InventoryPage() {
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
+            onClick={downloadSelectedCsv}
+            disabled={selectedCount === 0}
+            className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 text-sm font-medium disabled:opacity-40"
+          >
+            Download Selected{selectedCount ? ` (${selectedCount})` : ''}
+          </button>
+          <button
+            type="button"
             onClick={downloadCsv}
             disabled={csvBusy}
             className="px-4 py-2 bg-white border text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium disabled:opacity-60"
           >
-            {csvBusy ? 'Preparing…' : 'Download CSV'}
+            {csvBusy ? 'Preparing…' : 'Download Filtered CSV'}
           </button>
           <button
             type="button"
@@ -498,6 +611,70 @@ export default function InventoryPage() {
           <option value="nongst">Non-GST (0%)</option>
           <option value="inactive">Inactive</option>
         </select>
+        <button
+          type="button"
+          onClick={() => setShowAdvanced(v => !v)}
+          className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+            advCount > 0 ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          {showAdvanced ? '▲' : '▼'} Advanced Filters{advCount > 0 ? ` (${advCount})` : ''}
+        </button>
+        {advCount > 0 && !showAdvanced && (
+          <button
+            type="button"
+            onClick={() => setAdvTree(emptyFilterTree())}
+            className="px-3 py-2 rounded-lg text-sm border text-gray-600 hover:bg-gray-50"
+          >
+            Clear advanced
+          </button>
+        )}
+      </div>
+
+      {showAdvanced && (
+        <div className="mb-3">
+          <InventoryFilterPanel
+            appliedTree={advTree}
+            onApply={setAdvTree}
+            onClear={() => setAdvTree(emptyFilterTree())}
+            sources={{ categories: cats, suppliers }}
+            resultCount={totalCount}
+            queryError={queryError}
+          />
+        </div>
+      )}
+
+      {/* Selection toolbar */}
+      <div className="flex flex-wrap items-center gap-3 mb-3 text-xs text-gray-600">
+        <label className="inline-flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={allPageSelected}
+            onChange={toggleSelectPage}
+            className="h-4 w-4"
+          />
+          Select page ({products.length})
+        </label>
+        <button
+          type="button"
+          onClick={selectAllMatching}
+          disabled={csvBusy}
+          className="text-blue-600 hover:underline disabled:opacity-50"
+        >
+          Select all {totalCount != null ? totalCount : ''} matching
+        </button>
+        {selectedCount > 0 && (
+          <>
+            <span className="font-medium text-gray-800">{selectedCount} selected</span>
+            <button
+              type="button"
+              onClick={() => setSelected(new Map())}
+              className="text-gray-500 hover:text-red-600"
+            >
+              Clear selection
+            </button>
+          </>
+        )}
       </div>
 
       {/* Product list */}
@@ -515,7 +692,14 @@ export default function InventoryPage() {
               return (
                 <div key={p.id} className={`p-3 ${isOut ? 'bg-red-50' : isLow ? 'bg-yellow-50' : ''}`}>
                   <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
+                    <input
+                      type="checkbox"
+                      checked={selected.has(p.id)}
+                      onChange={() => toggleSelect(p)}
+                      className="mt-1 h-4 w-4 shrink-0"
+                      aria-label={`Select ${p.name}`}
+                    />
+                    <div className="min-w-0 flex-1">
                       <div className="font-medium text-gray-900 truncate">{p.name}</div>
                       {p.local_name && <div className="text-xs text-gray-500 truncate">{p.local_name}</div>}
                       <div className="text-xs text-gray-400 mt-0.5 flex flex-wrap gap-x-2">
@@ -564,6 +748,15 @@ export default function InventoryPage() {
             <table className="w-full min-w-[900px] text-sm">
               <thead>
                 <tr className="bg-gray-50 text-gray-600 text-xs border-b">
+                  <th className="px-3 py-2 w-8">
+                    <input
+                      type="checkbox"
+                      checked={allPageSelected}
+                      onChange={toggleSelectPage}
+                      className="h-4 w-4"
+                      aria-label="Select all rows on this page"
+                    />
+                  </th>
                   {['Product','Brand','Barcode','Cat','Unit','Purchase','MRP','Selling','GST%','Stock','Supplier',''].map(h => (
                     <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
                   ))}
@@ -575,8 +768,17 @@ export default function InventoryPage() {
                   const isLow = !isOut && p.min_stock > 0 && p.stock_qty <= p.min_stock
                   return (
                     <tr key={p.id}
-                      className={`border-b hover:bg-gray-50 ${isOut ? 'bg-red-50' : isLow ? 'bg-yellow-50' : ''}`}
+                      className={`border-b hover:bg-gray-50 ${isOut ? 'bg-red-50' : isLow ? 'bg-yellow-50' : ''} ${selected.has(p.id) ? 'bg-blue-50' : ''}`}
                     >
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(p.id)}
+                          onChange={() => toggleSelect(p)}
+                          className="h-4 w-4"
+                          aria-label={`Select ${p.name}`}
+                        />
+                      </td>
                       <td className="px-3 py-2 max-w-[220px]" title={[p.name, p.local_name].filter(Boolean).join(' / ')}>
                         <div className="font-medium truncate">{p.name}</div>
                         {p.local_name && <div className="text-xs text-gray-500 truncate">{p.local_name}</div>}

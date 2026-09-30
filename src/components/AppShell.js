@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react'
 import { useShop } from '@/context/ShopContext'
 import LoadingPlaceholder from './LoadingPlaceholder'
 import Sidebar from './Sidebar'
+import CommandPalette from './CommandPalette'
 import { usePathname } from 'next/navigation'
 
 const PUBLIC_PATHS = ['/login', '/onboarding', '/store']
@@ -14,6 +15,32 @@ export default function AppShell({ children }) {
   const pathname    = usePathname()
   const isPublic    = PUBLIC_PATHS.some(p => pathname.startsWith(p))
   const [sidebarMode, setSidebarMode] = useState(DEFAULT_SIDEBAR_MODE)
+  const [paletteOpen, setPaletteOpen] = useState(false)
+
+  useEffect(() => {
+    if (isPublic || loading) return
+    function onKey(e) {
+      const isTypingTarget = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target?.tagName || '') || e.target?.isContentEditable
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setPaletteOpen(true)
+        return
+      }
+      if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingTarget) {
+        e.preventDefault()
+        setPaletteOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [isPublic, loading])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    function onOpen() { setPaletteOpen(true) }
+    window.addEventListener('open-command-palette', onOpen)
+    return () => window.removeEventListener('open-command-palette', onOpen)
+  }, [])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -76,6 +103,7 @@ export default function AppShell({ children }) {
         )}
         {children}
       </main>
+      <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>
   )
 }

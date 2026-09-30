@@ -24,7 +24,7 @@ const NAV = [
   { href: '/expenses',  icon: '💸', label: 'Expenses',   key: 'x' },
   { href: '/investments', icon: '🏦', label: 'Investments', key: 'n' },
   { href: '/drawings',  icon: '↗️', label: 'Drawings',   key: 'g' },
-  { href: '/banking',   icon: '🏛️', label: 'Banking',    key: 'k' },
+  { href: '/banking',   icon: '🏛️', label: 'Banking',    key: 'l' },
   { href: '/summary',   icon: '🧮', label: 'Summary',    key: 'm' },
   { href: '/reports',   icon: '📈', label: 'Reports',    key: 't' },
   { href: '/settings',  icon: '⚙️', label: 'Settings',   key: null },
@@ -70,6 +70,7 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
   useEffect(() => {
     function onKey(e) {
       if (!e.ctrlKey) return
+      if (e.key.toLowerCase() === 'k') return // reserved for the global search palette
       const match = NAV.find(n => n.key && n.key === e.key.toLowerCase())
       if (match) {
         e.preventDefault()
@@ -80,10 +81,14 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [router])
 
+  function openPalette() {
+    setMenuOpen(false)
+    window.dispatchEvent(new Event('open-command-palette'))
+  }
+
   useEffect(() => {
     setMenuOpen(false)
   }, [pathname, searchParams])
-
   useEffect(() => {
     recordPageVisit(pathname, searchParams?.toString() || '')
   }, [pathname, searchParams])
@@ -191,6 +196,18 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
         )}
 
         <nav className="flex-1 py-3 px-2 overflow-y-auto sidebar-scrollbar">
+          <button
+            type="button"
+            onClick={openPalette}
+            title={isCollapsed ? 'Search anything (Ctrl+K)' : undefined}
+            className={`mb-3 flex w-full items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 py-2 text-sm text-gray-400 hover:bg-gray-700 hover:text-white ${
+              isCollapsed ? 'justify-center px-2' : 'px-3'
+            }`}
+          >
+            <span className="text-base leading-none">🔍</span>
+            {!isCollapsed && <span className="flex-1 truncate text-left">Search anything…</span>}
+            {!isCollapsed && <span className="text-xs text-gray-600">^K</span>}
+          </button>
           {NAV_SECTIONS.map((section) => (
             <div key={section.title} className={isCollapsed ? '' : 'mb-3'}>
               {!isCollapsed && (
@@ -239,16 +256,26 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
           <div className="truncate text-sm font-bold">{shop?.name || 'GST Billing'}</div>
           <div className="truncate text-[11px] text-gray-400">{shop?.city || 'Grocery Store'}</div>
         </div>
-        <button
-          type="button"
-          onClick={() => setMenuOpen(true)}
-          aria-label="Open menu"
-          aria-expanded={menuOpen}
-          className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-gray-700"
-        >
-          <span>☰</span>
-          <span>Menu</span>
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={openPalette}
+            aria-label="Search anything"
+            className="flex items-center rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-gray-700"
+          >
+            <span>🔍</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setMenuOpen(true)}
+            aria-label="Open menu"
+            aria-expanded={menuOpen}
+            className="flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm font-medium text-gray-100 hover:bg-gray-700"
+          >
+            <span>☰</span>
+            <span>Menu</span>
+          </button>
+        </div>
       </header>
 
       {/* ── Mobile / tablet slide-over menu ────────────────────── */}
@@ -298,6 +325,14 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
             )}
 
             <nav className="flex-1 overflow-y-auto px-2 py-3 sidebar-scrollbar">
+              <button
+                type="button"
+                onClick={openPalette}
+                className="mb-3 flex w-full items-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2.5 text-sm text-gray-400 hover:bg-gray-700 hover:text-white"
+              >
+                <span className="text-base leading-none">🔍</span>
+                <span className="flex-1 truncate text-left">Search anything…</span>
+              </button>
               {NAV_SECTIONS.map(section => (
                 <div key={section.title} className="mb-3">
                   <div className="px-3 pb-1 text-[10px] uppercase tracking-widest text-gray-500">{section.title}</div>

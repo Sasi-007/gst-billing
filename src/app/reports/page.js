@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react'
 import Link from 'next/link'
+import { useSearchParams } from 'next/navigation'
 import { supabase } from '../../lib/supabase'
 import { fmt } from '../../lib/gst'
 import { calculateCreditBalance, formatSettlementLabel, groupCreditEntriesByAccount } from '../../lib/credits'
@@ -1021,7 +1022,9 @@ function emptyDataForTab(tab) {
 
 export default function ReportsPage() {
   const { shop, loading: shopLoading } = useShop()
-  const [tab,      setTab]      = useState('sales')
+  const searchParams = useSearchParams()
+  const tabParam = searchParams?.get('tab') || ''
+  const [tab,      setTab]      = useState(() => (TABS.some(t => t.key === tabParam) ? tabParam : 'sales'))
   const [dateFrom, setDateFrom] = useState(monthStartStr())
   const [dateTo,   setDateTo]   = useState(todayStr())
   const [search,   setSearch]   = useState('')
@@ -1032,6 +1035,11 @@ export default function ReportsPage() {
   const [data,     setData]     = useState(() => initialCache?.data || emptyDataForTab(tab))
   const [loading,  setLoading]  = useState(() => !initialCache)
   usePageLoadingState('reports-page', loading)
+
+  // Deep links such as /reports?tab=gst select the matching tab.
+  useEffect(() => {
+    if (tabParam && TABS.some(t => t.key === tabParam)) setTab(tabParam)
+  }, [tabParam])
 
   useEffect(() => {
     if (!shop?.id) return
