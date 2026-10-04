@@ -321,7 +321,7 @@ function ThermalReceiptTemplate({ data }) {
             <span>Balance : {Number(Math.max(0, (totals.total || 0) - (bill.paid_amount ?? totals.total ?? 0))).toFixed(2)}</span>
           </div>
           {bill.reverse_charge && <p>GST Payable on Reverse Charge: Yes</p>}
-          <p>{s?.footer_text || 'THANK YOU FOR SHOPPING WITH US'}</p>
+          <p>{'THANK YOU FOR SHOPPING'}</p>
           <p>VISIT US AGAIN !</p>
         </footer>
       </div>

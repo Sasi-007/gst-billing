@@ -533,6 +533,9 @@ export default function BillingPage() {
   const [searchOpen,  setSearchOpen]  = useState(false)
   const [activeRow,   setActiveRow]   = useState(0)
   const [printData,   setPrintData]   = useState(null)
+  // `null` = follow the shop's default print template from Settings.
+  // Selecting a value here only affects this bill's print, it never updates Settings.
+  const [printTemplateChoice, setPrintTemplateChoice] = useState(null)
   const [saving,      setSaving]      = useState(false)
   const [toast,       setToast]       = useState(null)
   const [mounted,     setMounted]     = useState(false)
@@ -1638,12 +1641,13 @@ export default function BillingPage() {
 
   // ── Free-text item (not in inventory) ────────────────────────────────────
   function handleFreeTextItem(name) {
+    const capitalizedName = name ? name.charAt(0).toUpperCase() + name.slice(1) : name
     setItems(prev => {
       const next = [...prev]
       next[activeRow] = {
         ...next[activeRow],
         product_id:   null,
-        product_name: name,
+        product_name: capitalizedName,
         unit:         'pcs',
         quantity:     1,
         purchase_price: '',
@@ -1688,6 +1692,7 @@ export default function BillingPage() {
     setReverseCharge(false)
     setActiveRow(0)
     setPrintData(null)
+    setPrintTemplateChoice(null)
     setSearchOpen(false)
     setConversionSource(null)
   }
@@ -1841,8 +1846,13 @@ export default function BillingPage() {
           }
           window.addEventListener('afterprint', clearAfterPrint, { once: true })
           const printShop = await getLatestShopForPrint(shop)
-          setPrintData({ bill: { ...billRow, id: queuedBill.id }, items: filledItems, shop: printShop, totals })
-          setTimeout(() => window.print(), 200)
+          printWithContent(() => setPrintData({
+            bill: { ...billRow, id: queuedBill.id },
+            items: filledItems,
+            shop: printShop,
+            totals,
+            printTemplate: printTemplateChoice || printShop?.print_template || 'standard',
+          }))
         } else {
           resetBillForm()
         }
@@ -1914,7 +1924,13 @@ export default function BillingPage() {
         }
         window.addEventListener('afterprint', clearAfterPrint, { once: true })
         const printShop = await getLatestShopForPrint(shop)
-        printWithContent(() => setPrintData({ bill: { ...billRow, id: savedId }, items: filledItems, shop: printShop, totals }))
+        printWithContent(() => setPrintData({
+          bill: { ...billRow, id: savedId },
+          items: filledItems,
+          shop: printShop,
+          totals,
+          printTemplate: printTemplateChoice || printShop?.print_template || 'standard',
+        }))
       } else {
         resetBillForm()
       }
@@ -2573,6 +2589,18 @@ export default function BillingPage() {
                   placeholder={String(totals.total)}
                   className="border rounded px-2 py-1 text-sm w-28"
                 />
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">Print Template</div>
+                <select
+                  value={printTemplateChoice || shop?.print_template || 'standard'}
+                  onChange={e => setPrintTemplateChoice(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm"
+                  title="Only applies to this bill's print — Settings default is unchanged"
+                >
+                  <option value="standard">Standard GST invoice</option>
+                  <option value="thermal_80mm">Thermal grocery receipt - 80mm</option>
+                </select>
               </div>
             </div>
             <div className="flex flex-wrap gap-2 pt-1">

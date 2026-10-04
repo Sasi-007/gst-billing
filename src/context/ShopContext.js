@@ -97,15 +97,25 @@ export function ShopProvider({ children }) {
   }, [loading, user, shop, pathname, router])
 
   async function loadSession() {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession()
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession()
 
-    if (session?.user) {
-      currentUserIdRef.current = session.user.id
-      setUser(session.user)
-      await loadShops(session.user.id)
-    } else {
+      if (session?.user) {
+        currentUserIdRef.current = session.user.id
+        setUser(session.user)
+        await loadShops(session.user.id)
+      } else {
+        currentUserIdRef.current = null
+        setUser(null)
+        setShop(null)
+        setAllShops([])
+        setLoading(false)
+      }
+    } catch (err) {
+      // Network/auth failure — don't leave the app stuck on "Loading workspace…"
+      console.error('Error loading session:', err)
       currentUserIdRef.current = null
       setUser(null)
       setShop(null)
@@ -117,52 +127,58 @@ export function ShopProvider({ children }) {
   async function loadShops(userId) {
     setLoading(true)
 
-    const { data, error } = await supabase
-      .from('user_shops')
-      .select('role, shops(*)')
-      .eq('user_id', userId)
+    try {
+      const { data, error } = await supabase
+        .from('user_shops')
+        .select('role, shops(*)')
+        .eq('user_id', userId)
 
-    if (error) {
-      console.error('Error loading shops:', error)
+      if (error) {
+        console.error('Error loading shops:', error)
+        setAllShops([])
+        setShop(null)
+        return
+      }
+
+      const shops = (data || [])
+        .filter((row) => row.shops)
+        .map((row) => ({
+          ...row.shops,
+          role: row.role,
+        }))
+
+      setAllShops(shops)
+
+      if (shops.length > 0) {
+        const lastId =
+          typeof window !== 'undefined'
+            ? localStorage.getItem('activeShopId')
+            : null
+
+        const active =
+          shops.find((s) => s.id === lastId) || shops[0]
+
+        setShop(active)
+
+        // Make sure a valid shop is persisted
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('activeShopId', active.id)
+        }
+      } else {
+        setShop(null)
+
+        if (typeof window !== 'undefined') {
+          localStorage.removeItem('activeShopId')
+        }
+      }
+    } catch (err) {
+      // Network failure — don't leave the app stuck on "Loading workspace…"
+      console.error('Error loading shops:', err)
       setAllShops([])
       setShop(null)
+    } finally {
       setLoading(false)
-      return
     }
-
-    const shops = (data || [])
-      .filter((row) => row.shops)
-      .map((row) => ({
-        ...row.shops,
-        role: row.role,
-      }))
-
-    setAllShops(shops)
-
-    if (shops.length > 0) {
-      const lastId =
-        typeof window !== 'undefined'
-          ? localStorage.getItem('activeShopId')
-          : null
-
-      const active =
-        shops.find((s) => s.id === lastId) || shops[0]
-
-      setShop(active)
-
-      // Make sure a valid shop is persisted
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('activeShopId', active.id)
-      }
-    } else {
-      setShop(null)
-
-      if (typeof window !== 'undefined') {
-        localStorage.removeItem('activeShopId')
-      }
-    }
-
-    setLoading(false)
   }
 
   // Call after onboarding creates a new shop
