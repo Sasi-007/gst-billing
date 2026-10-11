@@ -8,12 +8,14 @@ import CommandPalette from './CommandPalette'
 import { usePathname } from 'next/navigation'
 
 const PUBLIC_PATHS = ['/login', '/onboarding', '/store']
+const SLASH_OWNED_PATHS = ['/billing', '/purchases/new']
 const DEFAULT_SIDEBAR_MODE = 'expanded'
 
 export default function AppShell({ children }) {
   const { loading } = useShop()
   const pathname    = usePathname()
   const isPublic    = PUBLIC_PATHS.some(p => pathname.startsWith(p))
+  const ownsSlashKey = SLASH_OWNED_PATHS.includes(pathname)
   const [sidebarMode, setSidebarMode] = useState(DEFAULT_SIDEBAR_MODE)
   const [paletteOpen, setPaletteOpen] = useState(false)
 
@@ -26,14 +28,14 @@ export default function AppShell({ children }) {
         setPaletteOpen(true)
         return
       }
-      if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingTarget) {
+      if (e.key === '/' && !ownsSlashKey && !e.ctrlKey && !e.metaKey && !e.altKey && !isTypingTarget) {
         e.preventDefault()
         setPaletteOpen(true)
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [isPublic, loading])
+  }, [isPublic, loading, ownsSlashKey])
 
   useEffect(() => {
     if (typeof window === 'undefined') return

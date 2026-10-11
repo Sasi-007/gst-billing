@@ -195,6 +195,7 @@ function StandardInvoiceTemplate({ data }) {
 function ThermalReceiptTemplate({ data }) {
   const { bill, items, totals } = data
   const s = data.shop || data.settings || {}
+  const showSavings = data.showSavings === true
   const billItems = items.filter(i => i.product_name)
   const locationParts = [s?.address, s?.city, s?.state, s?.pincode]
     .filter(Boolean)
@@ -281,9 +282,9 @@ function ThermalReceiptTemplate({ data }) {
           BILL AMOUNT: {Number(totals.total || 0).toFixed(2)}
         </section>
 
-        {savedAmount > 0 && (
+        {showSavings && savedAmount > 0 && (
           <section className="tr-savings">
-            YOU SAVED ON MRP: {Number(savedAmount).toFixed(2)}
+            YOUR SAVINGS: {Number(savedAmount).toFixed(2)}
           </section>
         )}
 

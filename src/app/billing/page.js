@@ -536,6 +536,7 @@ export default function BillingPage() {
   // `null` = follow the shop's default print template from Settings.
   // Selecting a value here only affects this bill's print, it never updates Settings.
   const [printTemplateChoice, setPrintTemplateChoice] = useState(null)
+  const [showSavings, setShowSavings] = useState(false)
   const [saving,      setSaving]      = useState(false)
   const [toast,       setToast]       = useState(null)
   const [mounted,     setMounted]     = useState(false)
@@ -1651,6 +1652,7 @@ export default function BillingPage() {
         unit:         'pcs',
         quantity:     1,
         purchase_price: '',
+        mrp: '',
         rate:         '',
         gst_rate:     0,
         base_amount:  0,
@@ -1693,6 +1695,7 @@ export default function BillingPage() {
     setActiveRow(0)
     setPrintData(null)
     setPrintTemplateChoice(null)
+    setShowSavings(false)
     setSearchOpen(false)
     setConversionSource(null)
   }
@@ -1811,7 +1814,7 @@ export default function BillingPage() {
         hsn_code:        item.hsn_code || null,
         unit:            item.unit,
         quantity:        parseFloat(item.quantity)     || 1,
-        mrp:             item.mrp,
+        mrp:             parseFloat(item.mrp) || 0,
         cost_price:      parseFloat(item.purchase_price) || 0,
         rate:            parseFloat(item.rate)         || 0,
         base_rate:       (parseFloat(item.rate) || 0) / (1 + (item.gst_rate || 0) / 100),
@@ -1852,6 +1855,7 @@ export default function BillingPage() {
             shop: printShop,
             totals,
             printTemplate: printTemplateChoice || printShop?.print_template || 'standard',
+            showSavings,
           }))
         } else {
           resetBillForm()
@@ -1930,6 +1934,7 @@ export default function BillingPage() {
           shop: printShop,
           totals,
           printTemplate: printTemplateChoice || printShop?.print_template || 'standard',
+          showSavings,
         }))
       } else {
         resetBillForm()
@@ -2349,7 +2354,7 @@ export default function BillingPage() {
         {/* ── Bill items table ─────────────────────────────────────────── */}
         <div className="flex-1 md:overflow-y-auto px-4 pt-3 min-h-[45vh] md:min-h-0">
           <div className="table-scroll">
-          <table className="w-full min-w-[560px] md:min-w-[640px] bg-white border rounded-lg text-sm border-collapse billing-table">
+          <table className="w-full min-w-[640px] md:min-w-[720px] bg-white border rounded-lg text-sm border-collapse billing-table">
             <thead>
               <tr className="bg-gray-100 text-gray-600 text-xs">
                 <th className="px-2 py-2 text-left w-8">#</th>
@@ -2357,6 +2362,7 @@ export default function BillingPage() {
                 <th className="px-2 py-2 text-center w-16">HSN</th>
                 <th className="px-2 py-2 text-center w-20">Qty</th>
                 <th className="px-2 py-2 text-center w-14">Unit</th>
+                <th className="px-2 py-2 text-right w-24">MRP (₹)</th>
                 <th className="px-2 py-2 text-right w-24">Rate (₹)</th>
                 <th className="px-2 py-2 text-center w-16">GST%</th>
                 <th className="px-2 py-2 text-center w-16">Disc%</th>
@@ -2445,6 +2451,25 @@ export default function BillingPage() {
 
                   {/* Unit */}
                   <td className="px-1 py-1 text-center text-xs text-gray-500">{item.unit}</td>
+
+                  <td className="px-1 py-1">
+                    <input
+                      id={`mrp-${i}`}
+                      type="number"
+                      value={item.mrp}
+                      onChange={e => updateItem(i, 'mrp', e.target.value)}
+                      onFocus={e => { setActiveRow(i); e.target.select() }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
+                          e.preventDefault()
+                          focusId(`rate-${i}`)
+                        }
+                      }}
+                      className="w-full border rounded px-1 py-0.5 text-right"
+                      min="0" step="0.01"
+                      title="Printed MRP. If Rate is lower, the difference shows as customer savings."
+                    />
+                  </td>
 
                   {/* Rate */}
                   <td className="px-1 py-1">
@@ -2589,6 +2614,29 @@ export default function BillingPage() {
                   placeholder={String(totals.total)}
                   className="border rounded px-2 py-1 text-sm w-28"
                 />
+              </div>
+              <div>
+                <div className="text-xs text-gray-500 mb-0.5">Print Template</div>
+                <select
+                  value={printTemplateChoice || shop?.print_template || 'standard'}
+                  onChange={e => setPrintTemplateChoice(e.target.value)}
+                  className="border rounded px-2 py-1 text-sm"
+                  title="Only applies to this bill's print - Settings default is unchanged"
+                >
+                  <option value="standard">Standard GST Invoice</option>
+                  <option value="thermal_80mm">Thermal grocery receipt - 80mm</option>
+                </select>
+              </div>
+              <div className="flex items-center gap-1.5 pb-1.5">
+                <input
+                  id="showSavings"
+                  type="checkbox"
+                  checked={showSavings}
+                  onChange={e => setShowSavings(e.target.checked)}
+                />
+                <label htmlFor="showSavings" className="text-xs text-gray-600" title="Prints 'YOU SAVED ON MRP' on the 80mm thermal receipt">
+                  Show savings
+                </label>
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-0.5">Print Template</div>

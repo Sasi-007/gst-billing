@@ -44,8 +44,8 @@ kbd {
   }
 
   /* Hide Discount % column */
-  .billing-table th:nth-child(8),
-  .billing-table td:nth-child(8) {
+  .billing-table th:nth-child(9),
+  .billing-table td:nth-child(9) {
     display: none;
   }
 }

@@ -251,12 +251,32 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
   const b2cBillIdSet = new Set(b2cSalesBills.map((bill) => bill.id))
   const b2cSummaryMap = {}
 
+  function buildGstRateMap (itemList, billIdKey) {
+    const map={}
+    itemList.forEach((item) => {
+      const billId = item[billIdKey]
+      if (!billId) return
+      if (!map[billId]) map[billId] = new Set()
+      map[billId].add(num(item.gst_rate))
+    })
+    return map
+  }
+
+  function formatGstRates(rateSet) {
+    if (!rateSet || rateSet.size === 0) return ''
+    return [...rateSet].sort((a,b) => a-b).map((rate) => `${rate}%`).join(', ')
+  }
+
+  const salesGstRatesByBill = buildGstRateMap(salesItems, 'bill_id')
+  const purchaseGstRatesByBill = buildGstRateMap(purchaseItems, 'purchase_bill_id')
+
   const salesRegisterRows = salesBills.map((bill) => ({
     Date: formatReportDate(bill.date),
     'Invoice No': bill.bill_no,
     Customer: bill.customer_name || 'B2C Customer',
     GSTIN: bill.customer_gstin || '',
     Type: bill.customer_gstin ? 'B2B' : 'B2C',
+    'GST Rate': formatGstRates(salesGstRatesByBill[bill.id]),
     'Taxable Value': round2(num(bill.subtotal)),
     CGST: round2(num(bill.cgst_amount) || num(bill.gst_amount) / 2),
     SGST: round2(num(bill.sgst_amount) || num(bill.gst_amount) / 2),
@@ -275,6 +295,7 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
     Supplier: bill.suppliers?.name || '',
     'Supplier GSTIN': bill.suppliers?.gstin || '',
     Interstate: bill.is_interstate ? 'Yes' : 'No',
+    'GST Rate': formatGstRates(purchaseGstRatesByBill[bill.id]),
     'Taxable Value': round2(num(bill.subtotal)),
     CGST: bill.is_interstate ? 0 : round2(num(bill.gst_amount) / 2),
     SGST: bill.is_interstate ? 0 : round2(num(bill.gst_amount) / 2),
@@ -418,7 +439,7 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
           </div>
           <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => downloadCsv(`${prefix}-sales-register.csv`, Object.keys(salesRegisterRows[0] || {
-              Date: '', 'Invoice No': '', Customer: '', GSTIN: '', Type: '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Total GST': '', 'Invoice Total': '', 'Payment Status': '',
+              Date: '', 'Invoice No': '', Customer: '', GSTIN: '', Type: '', 'GST Rate': '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Total GST': '', 'Invoice Total': '', 'Payment Status': '',
             }), salesRegisterRows)} className="px-3 py-2 bg-blue-600 text-white rounded-lg text-xs font-medium hover:bg-blue-700">Sales CSV</button>
             {b2cRegisterRows.length > 0 && (
               <button type="button" onClick={() => downloadCsv(`${prefix}-b2c-sales-register.csv`, Object.keys(b2cRegisterRows[0]), b2cRegisterRows)} className="px-3 py-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700">B2C Sales CSV</button>
@@ -435,7 +456,7 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
               </Link>
             )}
             <button type="button" onClick={() => downloadCsv(`${prefix}-purchase-register.csv`, Object.keys(purchaseRegisterRows[0] || {
-              Date: '', 'Purchase No': '', 'Supplier Invoice No': '', Supplier: '', 'Supplier GSTIN': '', Interstate: '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Input GST': '', 'Invoice Total': '', 'Payment Status': '',
+              Date: '', 'Purchase No': '', 'Supplier Invoice No': '', Supplier: '', 'Supplier GSTIN': '', Interstate: '', 'GST Rate' : '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Input GST': '', 'Invoice Total': '', 'Payment Status': '',
             }), purchaseRegisterRows)} className="px-3 py-2 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700">Purchases CSV</button>
             <button type="button" onClick={() => downloadCsv(`${prefix}-sales-items.csv`, Object.keys(salesItemRows[0] || {
               Date: '', 'Invoice No': '', Customer: '', GSTIN: '', Product: '', HSN: '', Quantity: '', 'GST Rate': '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Total GST': '', 'Line Total': '',
