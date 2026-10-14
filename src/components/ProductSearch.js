@@ -176,10 +176,12 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     return [...map.values()].slice(-1000)
   }
 
+  // Per-unit landing cost actually paid = net amount (post-discount, GST-inclusive) ÷ qty.
+  // Falls back to the GST-exclusive base rate only when the net total is unavailable.
   function getLandingRate(row) {
     const qty = Number(row?.quantity || 0)
     const netTotal = Number(row?.total || 0)
-    if (qty > 0 && netTotal > 0) return Math.round((netTotal / qty) * 100)/100
+    if (qty > 0 && netTotal > 0) return Math.round((netTotal / qty) * 100) / 100
     return Number(row?.rate || 0)
   }
 

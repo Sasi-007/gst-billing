@@ -6,7 +6,7 @@ import { supabase } from '@/lib/supabase'
 import { fmt, GST_RATES } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
 import { findProductNameSuggestions, saveProductNameSuggestion } from '@/lib/productNameSuggestions'
-import {suggestGstRateForHsn} from '@/lib/hsnGstReference'
+import { suggestGstRateForHsn } from '@/lib/hsnGstReference'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'dozen', 'box', 'pack', 'bottle', 'roll', 'strip', 'pair']
@@ -527,7 +527,7 @@ export default function ProductFormPage() {
                   autoFocus
                   value={newCatName}
                   onChange={e => setNewCatName(e.target.value.toUpperCase())}
-                  onKeyDown={e => { if (e.key === 'Enter' ) { e.preventDefault(); addCategoryInline() } }}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCategoryInline() } }}
                   placeholder="New category name"
                   className="flex-1 border rounded-lg px-3 py-2 text-sm"
                 />
@@ -573,15 +573,15 @@ export default function ProductFormPage() {
               <div className="mt-1 text-xs bg-amber-50 border border-amber-200 text-amber-800 rounded px-2 py-1 flex items-center justify-between gap-2">
                 <span>
                   Suggested: <strong>{hsnGstSuggestion.gst_rate}%</strong> for HSN {hsnGstSuggestion.hsn_code}
-                  {hsnGstSuggestion.description ? ` ${hsnGstSuggestion.description}` : ''}
-                  {` `}- please verify, not a certified rate.
+                  {hsnGstSuggestion.description ? ` (${hsnGstSuggestion.description})` : ''}
+                  {' '}— please verify, not a certified rate.
                 </span>
                 <button
                   type="button"
                   onClick={() => set('gst_rate', hsnGstSuggestion.gst_rate)}
                   className="shrink-0 text-amber-900 font-medium underline"
                 >
-                  Use Suggested
+                  Use
                 </button>
               </div>
             )}
@@ -655,14 +655,13 @@ export default function ProductFormPage() {
             <input
               value={form.stock_qty ?? ''}
               onChange={e => set('stock_qty', e.target.value)}
-              type="number"
-              min="0" step="0.001"
+              type="number" min="0" step="0.001"
               className="w-full border rounded-lg px-3 py-2 text-sm"
             />
             {isNew && (
               <div className="mt-1 text-xs text-amber-600">
-                ⚠️If you're about to record a Purchase Bill for this product, leave this as <strong>0</strong>.
-                Purchase quantities get <strong>added</strong> to this number, not overwritten - entering stock here
+                ⚠️ If you're about to record a Purchase Bill for this product, leave this as <strong>0</strong>.
+                Purchase quantities get <strong>added</strong> to this number, not overwritten — entering stock here
                 and then adding the same quantity again in Purchase will double-count it.
               </div>
             )}

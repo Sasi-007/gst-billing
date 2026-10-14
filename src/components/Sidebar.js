@@ -27,6 +27,7 @@ const NAV = [
   { href: '/banking',   icon: '🏛️', label: 'Banking',    key: 'l' },
   { href: '/summary',   icon: '🧮', label: 'Summary',    key: 'm' },
   { href: '/reports',   icon: '📈', label: 'Reports',    key: 't' },
+  { href: '/files',     icon: '📁', label: 'Files',      key: null },
   { href: '/settings',  icon: '⚙️', label: 'Settings',   key: null },
   { href: '/superadmin',icon: '🛡️', label: 'Admin',       key: null },
 ]

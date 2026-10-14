@@ -28,36 +28,44 @@ export function calcItem(rate, qty, gstRate, discPct = 0) {
   }
 }
 
+// Calculate a purchase line item as printed on a supplier's GST invoice:
+// Rate (GST-exclusive base rate) → Gross → Scheme Disc (₹) → Cash Disc (₹) → Taxable Amt → GST added on top → CGST/SGST or IGST → Net Amt.
+// Discounts are entered as rupee amounts (as printed on the invoice), matching the exact figure on paper.
+// `isInterstate` controls whether GST is split as CGST+SGST (intra-state) or IGST (inter-state),
+// matching what the supplier would have actually charged.
+// `taxableOverride`: if the supplier's printed Taxable Amount doesn't exactly match
+// Rate×Qty−Discounts (due to their rate being pre-rounded on paper), pass the exact
+// printed Taxable Amount here to use it as-is instead of the computed value.
 export function calcPurchaseItem(rate, qty, gstRate, schDiscAmt = 0, cashDiscAmt = 0, isInterstate = false, taxableOverride = null) {
-  const gross         = round2((rate || 0) * (qty || 0))
-  const schDiscAmount = round2(schDiscAmt || 0)
+  const gross          = round2((rate || 0) * (qty || 0))
+  const schDiscAmount  = round2(schDiscAmt || 0)
   const afterSchDisc   = round2(gross - schDiscAmount)
   const cashDiscAmount = round2(cashDiscAmt || 0)
   const computedTaxable = round2(afterSchDisc - cashDiscAmount)
-  const taxableAmount = (taxableOverride !== null && taxableOverride !== undefined && taxableOverride !== '')
+  const taxableAmount  = (taxableOverride !== null && taxableOverride !== undefined && taxableOverride !== '')
     ? round2(parseFloat(taxableOverride) || 0)
     : computedTaxable
-  const gstAmount = round2(taxableAmount * (gstRate || 0) / 100)
-  const netAmount = round2(taxableAmount + gstAmount)
-  const cgstAmount = isInterstate ? 0 : round2(gstAmount / 2)
-  const sgstAmount = isInterstate ? 0 : round2(gstAmount / 2)
-  const igstAmount = isInterstate ? gstAmount : 0
-  const schDiscPct = gross > 0 ? round2((schDiscAmount / gross) * 100) : 0
-  const cashDiscPct = afterSchDisc > 0 ? round2((cashDiscAmount / afterSchDisc) * 100) : 0
+  const gstAmount      = round2(taxableAmount * (gstRate || 0) / 100)
+  const netAmount      = round2(taxableAmount + gstAmount)
+  const cgstAmount     = isInterstate ? 0 : round2(gstAmount / 2)
+  const sgstAmount     = isInterstate ? 0 : round2(gstAmount / 2)
+  const igstAmount     = isInterstate ? gstAmount : 0
+  const schDiscPct     = gross > 0 ? round2((schDiscAmount / gross) * 100) : 0
+  const cashDiscPct    = afterSchDisc > 0 ? round2((cashDiscAmount / afterSchDisc) * 100) : 0
 
   return {
-    gross_amount:    gross,
-    sch_disc_pct:    schDiscPct,
-    sch_disc_amount: schDiscAmount,
-    cash_disc_pct:   cashDiscPct,
+    gross_amount:     gross,
+    sch_disc_pct:     schDiscPct,
+    sch_disc_amount:  schDiscAmount,
+    cash_disc_pct:    cashDiscPct,
     cash_disc_amount: cashDiscAmount,
-    base_amount:     taxableAmount,
-    taxable_amount:  taxableAmount,
-    gst_amount:      gstAmount,
-    cgst_amount:     cgstAmount,
-    sgst_amount:     sgstAmount,
-    igst_amount:     igstAmount,
-    total:           netAmount,
+    base_amount:      taxableAmount,
+    taxable_amount:   taxableAmount,
+    gst_amount:       gstAmount,
+    cgst_amount:      cgstAmount,
+    sgst_amount:      sgstAmount,
+    igst_amount:      igstAmount,
+    total:            netAmount,
   }
 }
 

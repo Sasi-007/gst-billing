@@ -74,56 +74,6 @@ export default function PurchasesPage() {
   const initialCache = readPageCache(cacheKey)
   const [bills,    setBills]    = useState(() => initialCache?.bills || [])
   const [loading,  setLoading]  = useState(() => !initialCache)
-  const [sortConfig, setSortConfig] = useState({
-    key: '',
-    direction: 'asc',
-  })
-
-  function handleSort(column) {
-    setSortConfig((prev) => ({
-      key: column,
-      direction:
-        prev.key === column && prev.direction === 'asc'
-          ? 'desc'
-          : 'asc',
-    }))
-  }
-
-  const sortableColumns = {
-    'Bill No': (b) => b.bill_no,
-    'Date': (b) => b.date,
-    'Supplier': (b) => b.suppliers?.name || '',
-    'Sup. Invoice': (b) => b.supplier_invoice_no || '',
-    'Subtotal': (b) => Number(b.subtotal || 0),
-    'GST': (b) => Number(b.gst_amount || 0),
-    'Total': (b) => Number(b.total || 0),
-    'Paid': (b) => Number(b.paid_amount || 0),
-    'Due': (b) => getDueAmount(b),
-    'Mode': (b) => b.payment_mode || '',
-    'Status': (b) => b.payment_status || '',
-  }
-
-  const sortedBills = [...bills].sort((a, b) => {
-    if (!sortConfig.key) return 0
-
-    const getValue = sortableColumns[sortConfig.key]
-    if (!getValue) return 0
-
-    const aValue = getValue(a)
-    const bValue = getValue(b)
-
-    const comparison =
-      typeof aValue === 'number' && typeof bValue === 'number'
-        ? aValue - bValue
-        : String(aValue).localeCompare(String(bValue), undefined, {
-            numeric: true,
-            sensitivity: 'base',
-          })
-
-    return sortConfig.direction === 'asc'
-      ? comparison
-      : -comparison
-  })
   usePageLoadingState('purchases-page', loading)
 
   const load = useCallback(async () => {
@@ -356,57 +306,15 @@ export default function PurchasesPage() {
       ) : (
         <div className="bg-white rounded-xl border overflow-x-auto">
           <table className="w-full min-w-[700px] text-sm">
-          <thead>
-            <tr className="bg-gray-50 text-gray-600 text-xs border-b">
-              {[
-                'Bill No',
-                'Date',
-                'Supplier',
-                'Sup. Invoice',
-                'Subtotal',
-                'GST',
-                'Total',
-                'Paid',
-                'Due',
-                'Mode',
-                'Status',
-                'Action',
-              ].map((column) => (
-                <th
-                  key={column}
-                  className="px-3 py-2 text-left whitespace-nowrap"
-                >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (column === 'Action') return
-                      handleSort(column)
-                    }}
-                    disabled={column === 'Action'}
-                    className="inline-flex items-center gap-1 hover:text-blue-600"
-                  >
-                    {column}
-
-                    {column !== 'Action' && (
-                      <span className="inline-flex flex-col items-center justify-center leading-none text-gray-500">
-                        {sortConfig.key === column ? (
-                          sortConfig.direction === 'asc' ? (
-                            <span>↑</span>
-                          ) : (
-                            <span>↓</span>
-                          )
-                        ) : (
-                          <span>↕</span>
-                        )}
-                      </span>
-                    )}
-                  </button>
-                </th>
-              ))}
-            </tr>
-          </thead>
+            <thead>
+              <tr className="bg-gray-50 text-gray-600 text-xs border-b">
+                {['Bill No','Date','Supplier','Sup. Invoice','Subtotal','GST','Total','Paid','Due','Mode','Status','Action'].map(h => (
+                  <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
             <tbody>
-              {sortedBills.map(b => (
+              {bills.map(b => (
                 <tr key={b.id} className="border-b hover:bg-gray-50">
                   <td className="px-3 py-2 font-mono font-medium">
                     <Link href={`/purchases/${b.id}`} className="text-blue-700 hover:underline">

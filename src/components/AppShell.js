@@ -8,6 +8,7 @@ import CommandPalette from './CommandPalette'
 import { usePathname } from 'next/navigation'
 
 const PUBLIC_PATHS = ['/login', '/onboarding', '/store']
+// Pages that bind "/" to their own product search — the command palette must not steal it there.
 const SLASH_OWNED_PATHS = ['/billing', '/purchases/new']
 const DEFAULT_SIDEBAR_MODE = 'expanded'
 

@@ -251,8 +251,10 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
   const b2cBillIdSet = new Set(b2cSalesBills.map((bill) => bill.id))
   const b2cSummaryMap = {}
 
-  function buildGstRateMap (itemList, billIdKey) {
-    const map={}
+  // Bill-level registers only store GST amounts, so collect the distinct GST
+  // rates charged on each bill's line items (e.g. "5%, 12%" for a mixed bill).
+  function buildGstRateMap(itemList, billIdKey) {
+    const map = {}
     itemList.forEach((item) => {
       const billId = item[billIdKey]
       if (!billId) return
@@ -264,7 +266,7 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
 
   function formatGstRates(rateSet) {
     if (!rateSet || rateSet.size === 0) return ''
-    return [...rateSet].sort((a,b) => a-b).map((rate) => `${rate}%`).join(', ')
+    return [...rateSet].sort((a, b) => a - b).map((rate) => `${rate}%`).join(', ')
   }
 
   const salesGstRatesByBill = buildGstRateMap(salesItems, 'bill_id')
@@ -456,7 +458,7 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
               </Link>
             )}
             <button type="button" onClick={() => downloadCsv(`${prefix}-purchase-register.csv`, Object.keys(purchaseRegisterRows[0] || {
-              Date: '', 'Purchase No': '', 'Supplier Invoice No': '', Supplier: '', 'Supplier GSTIN': '', Interstate: '', 'GST Rate' : '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Input GST': '', 'Invoice Total': '', 'Payment Status': '',
+              Date: '', 'Purchase No': '', 'Supplier Invoice No': '', Supplier: '', 'Supplier GSTIN': '', Interstate: '', 'GST Rate': '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Input GST': '', 'Invoice Total': '', 'Payment Status': '',
             }), purchaseRegisterRows)} className="px-3 py-2 bg-purple-600 text-white rounded-lg text-xs font-medium hover:bg-purple-700">Purchases CSV</button>
             <button type="button" onClick={() => downloadCsv(`${prefix}-sales-items.csv`, Object.keys(salesItemRows[0] || {
               Date: '', 'Invoice No': '', Customer: '', GSTIN: '', Product: '', HSN: '', Quantity: '', 'GST Rate': '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', 'Total GST': '', 'Line Total': '',

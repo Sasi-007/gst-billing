@@ -13,6 +13,7 @@ import {
   invalidatePurchaseImpactCache,
   syncProductPricingFromLatestPurchases,
 } from '@/lib/productStock'
+import { removePurchaseCreditEntry } from '@/lib/purchaseCredit'
 
 export default function PurchaseDetailsPage() {
   const { id } = useParams()
@@ -38,7 +39,7 @@ export default function PurchaseDetailsPage() {
       try {
         const { data: billRow, error: billErr } = await supabase
           .from('purchase_bills')
-          .select('*, suppliers(name)')
+          .select('*, suppliers(name,phone)')
           .eq('id', id)
           .eq('shop_id', shop.id)
           .single()
@@ -79,6 +80,7 @@ export default function PurchaseDetailsPage() {
         .eq('id', bill.id)
         .eq('shop_id', shop.id)
       if (delErr) throw delErr
+      await removePurchaseCreditEntry(shop.id, bill.id)
       await syncProductPricingFromLatestPurchases(shop.id, Object.keys(purchaseQtyMap))
       await syncProductPricingFromLatestPurchases(shop.id, Object.keys(purchaseQtyMap))
       invalidatePurchaseImpactCache(shop.id)
@@ -91,7 +93,7 @@ export default function PurchaseDetailsPage() {
   }
 
   function handlePrint() {
-    window.addEventListener('afterprint', () => setPrintOpen(false), {once: true })
+    window.addEventListener('afterprint', () => setPrintOpen(false), { once: true })
     printWithContent(() => setPrintOpen(true))
   }
 
@@ -143,7 +145,8 @@ export default function PurchaseDetailsPage() {
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-gray-50 border-b text-xs text-gray-500">
-                {['#', 'Product', 'HSN', 'Qty', 'Unit', 'Base Rate', 'MRP', 'Sch Disc%', 'Cash Disc%', 'Taxable Amount', 'GST%',...(bill.is_interstate ? ['IGST'] : ['CGST', 'SGST']), 'Net Amt'].map(h => (
+                {['#', 'Product', 'HSN', 'Qty', 'Unit', 'Base Rate', 'MRP', 'Sch Disc%', 'Cash Disc%', 'Taxable Amt', 'GST%',
+                  ...(bill.is_interstate ? ['IGST'] : ['CGST', 'SGST']), 'Net Amt'].map(h => (
                   <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -239,9 +242,9 @@ function PurchasePrintTemplate({ shop, bill, items }) {
                 <td className="tc">{it.unit || 'pcs'}</td>
                 <td className="tr">{Number(it.rate || 0).toFixed(2)}</td>
                 <td className="tr">{Number(it.mrp || 0).toFixed(2)}</td>
-                <td className="tc">{it.sch_pct || 0}</td>
+                <td className="tc">{it.sch_disc_pct || 0}</td>
                 <td className="tc">{it.cash_disc_pct || 0}</td>
-                <td className="tc">{Number(it.taxable_amount || 0).toFixed(2)}</td>
+                <td className="tr">{Number(it.taxable_amount || 0).toFixed(2)}</td>
                 <td className="tc">{it.gst_rate}%</td>
                 {bill.is_interstate ? (
                   <td className="tr">{Number(it.igst_amount || 0).toFixed(2)}</td>
@@ -267,8 +270,8 @@ function PurchasePrintTemplate({ shop, bill, items }) {
               <div className="row"><span>SGST</span><span>{sgst.toFixed(2)}</span></div>
             </>
           )}
-          {Number(bill.round_off || 0) !== 0 && (
-            <div className="row"><span>Round Off</span><span>{Number(bill.round_off).toFixed(2)}</span></div>
+          {Number(bill.round_off_amount || 0) !== 0 && (
+            <div className="row"><span>Round Off</span><span>{Number(bill.round_off_amount).toFixed(2)}</span></div>
           )}
           <div className="row grand"><span>TOTAL</span><span>{total.toFixed(2)}</span></div>
         </div>

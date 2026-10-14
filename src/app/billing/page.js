@@ -536,6 +536,7 @@ export default function BillingPage() {
   // `null` = follow the shop's default print template from Settings.
   // Selecting a value here only affects this bill's print, it never updates Settings.
   const [printTemplateChoice, setPrintTemplateChoice] = useState(null)
+  // Opt-in per bill: prints the "YOU SAVED ON MRP" line on the thermal receipt.
   const [showSavings, setShowSavings] = useState(false)
   const [saving,      setSaving]      = useState(false)
   const [toast,       setToast]       = useState(null)
@@ -1652,7 +1653,7 @@ export default function BillingPage() {
         unit:         'pcs',
         quantity:     1,
         purchase_price: '',
-        mrp: '',
+        mrp:          '',
         rate:         '',
         gst_rate:     0,
         base_amount:  0,
@@ -2452,6 +2453,7 @@ export default function BillingPage() {
                   {/* Unit */}
                   <td className="px-1 py-1 text-center text-xs text-gray-500">{item.unit}</td>
 
+                  {/* MRP — printed price; difference vs Rate becomes customer savings */}
                   <td className="px-1 py-1">
                     <input
                       id={`mrp-${i}`}
@@ -2621,9 +2623,9 @@ export default function BillingPage() {
                   value={printTemplateChoice || shop?.print_template || 'standard'}
                   onChange={e => setPrintTemplateChoice(e.target.value)}
                   className="border rounded px-2 py-1 text-sm"
-                  title="Only applies to this bill's print - Settings default is unchanged"
+                  title="Only applies to this bill's print — Settings default is unchanged"
                 >
-                  <option value="standard">Standard GST Invoice</option>
+                  <option value="standard">Standard GST invoice</option>
                   <option value="thermal_80mm">Thermal grocery receipt - 80mm</option>
                 </select>
               </div>
@@ -2637,18 +2639,6 @@ export default function BillingPage() {
                 <label htmlFor="showSavings" className="text-xs text-gray-600" title="Prints 'YOU SAVED ON MRP' on the 80mm thermal receipt">
                   Show savings
                 </label>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500 mb-0.5">Print Template</div>
-                <select
-                  value={printTemplateChoice || shop?.print_template || 'standard'}
-                  onChange={e => setPrintTemplateChoice(e.target.value)}
-                  className="border rounded px-2 py-1 text-sm"
-                  title="Only applies to this bill's print — Settings default is unchanged"
-                >
-                  <option value="standard">Standard GST invoice</option>
-                  <option value="thermal_80mm">Thermal grocery receipt - 80mm</option>
-                </select>
               </div>
             </div>
             <div className="flex flex-wrap gap-2 pt-1">

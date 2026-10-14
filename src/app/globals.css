@@ -119,6 +119,9 @@ body {
 /* ── Print layout ───────────────────────────────── */
 
 @media print {
+  /* Zero page margins suppress the browser-generated header/footer
+     (document title, date, URL, page numbers). Spacing is applied as
+     padding on the print containers instead. */
   @page {
     margin: 0;
   }

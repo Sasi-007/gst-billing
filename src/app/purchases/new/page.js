@@ -1009,7 +1009,7 @@ export default function NewPurchasePage() {
               ))}
             </tbody>
           </table>
-          </div>
+          </div>{/* end table-scroll */}
           <button onClick={addRow} className="mt-2 text-sm text-blue-600 hover:underline">
             + Add Row <kbd className="hidden md:inline text-xs">F4</kbd>
           </button>

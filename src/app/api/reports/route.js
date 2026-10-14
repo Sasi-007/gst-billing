@@ -118,21 +118,28 @@ async function loadGst(admin, shopId, dateFrom, dateTo) {
 async function loadAuditor(admin, shopId, dateFrom, dateTo) {
   const [
     { data: salesBills, error: salesBillsErr },
-    { data: purchase_bills, error: purchaseBillsErr },
+    { data: purchaseBills, error: purchaseBillsErr },
     { data: expenses, error: expensesErr },
-  ]  = await Promise.all([
+  ] = await Promise.all([
     admin
       .from('bills')
       .select('id,bill_no,date,customer_name,customer_gstin,subtotal,cgst_amount,sgst_amount,igst_amount,gst_amount,total,payment_status')
       .eq('shop_id', shopId)
       .eq('bill_type', 'invoice')
       .gte('date', dateFrom)
-      .lte('date',dateTo)
+      .lte('date', dateTo)
+      .order('date'),
+    admin
+      .from('purchase_bills')
+      .select('id,bill_no,supplier_invoice_no,date,subtotal,gst_amount,total,payment_status,is_interstate,suppliers(name,gstin)')
+      .eq('shop_id', shopId)
+      .gte('date', dateFrom)
+      .lte('date', dateTo)
       .order('date'),
     admin
       .from('expenses')
       .select('expense_date,title,category,amount,payment_mode,notes')
-      .eq('shop_id',shopId)
+      .eq('shop_id', shopId)
       .gte('expense_date', dateFrom)
       .lte('expense_date', dateTo)
       .order('expense_date'),
@@ -145,17 +152,17 @@ async function loadAuditor(admin, shopId, dateFrom, dateTo) {
   const salesBillIds = (salesBills || []).map((bill) => bill.id)
   const purchaseBillIds = (purchaseBills || []).map((bill) => bill.id)
 
-  const [{ data: salesItems, error: salesItemsErr}, { data: purchaseItems, error: purchaseItemsErr}] = await Promise.all([
-    salesBillIds.length 
-      ? admin.from('bill_items').select('bill_id, product_name, hsn_code,quantity,base_rate,gst_rate,gst_amount,total').in('bill_id', salesBillIds)
-      : Promise.resolve({ data: [], error: null}),
+  const [{ data: salesItems, error: salesItemsErr }, { data: purchaseItems, error: purchaseItemsErr }] = await Promise.all([
+    salesBillIds.length
+      ? admin.from('bill_items').select('bill_id,product_name,hsn_code,quantity,base_rate,gst_rate,gst_amount,total').in('bill_id', salesBillIds)
+      : Promise.resolve({ data: [], error: null }),
     purchaseBillIds.length
       ? admin.from('purchase_bill_items').select('purchase_bill_id,product_name,hsn_code,quantity,base_rate,taxable_amount,gst_rate,gst_amount,cgst_amount,sgst_amount,igst_amount,total').in('purchase_bill_id', purchaseBillIds)
-    : Promise.resolve({ data:[], error: null}),
+      : Promise.resolve({ data: [], error: null }),
   ])
 
-  if(salesItemsErr) throw salesItemsErr
-  if(purchaseItemsErr) throw purchaseItemsErr
+  if (salesItemsErr) throw salesItemsErr
+  if (purchaseItemsErr) throw purchaseItemsErr
 
   return {
     salesBills: salesBills || [],

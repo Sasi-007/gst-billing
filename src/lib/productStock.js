@@ -83,6 +83,8 @@ export async function syncProductPricingFromLatestPurchases(shopId, productIds) 
     const latestRow = latestByProduct.get(productId)
     if (!latestRow) continue
 
+    // True per-unit purchase price = net amount (post-discount, GST-inclusive) ÷ quantity,
+    // i.e. what was actually paid per piece on the supplier's invoice — not just the base rate.
     const qty = Number(latestRow.quantity || 0)
     const netTotal = Number(latestRow.total || 0)
     const netPerUnit = qty > 0 ? netTotal / qty : Number(latestRow.rate || 0)

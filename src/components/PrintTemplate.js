@@ -41,7 +41,8 @@ function StandardInvoiceTemplate({ data }) {
         <div className="inv-header">
           <div className="inv-shop">
             {s?.logo_url && (
-              <img className="inv-logo" src={s.logo_url} alt={`${s?.name || s?.shop_name || 'Shop' } logo`} />
+              /* eslint-disable-next-line @next/next/no-img-element */
+              <img className="inv-logo" src={s.logo_url} alt={`${s?.name || s?.shop_name || 'Shop'} logo`} />
             )}
             <h1>{s?.name || s?.shop_name || 'My Shop'}</h1>
             {s?.address && <p>{s.address}</p>}
@@ -85,12 +86,14 @@ function StandardInvoiceTemplate({ data }) {
           </div>
         )}
 
+        {/* ── Place of supply / reverse charge ──────────── */}
         {(bill.place_of_supply || bill.reverse_charge) && (
           <div className="inv-customer" style={{ display: 'flex', justifyContent: 'space-between' }}>
             {bill.place_of_supply && <span>Place of Supply: <strong>{bill.place_of_supply}</strong></span>}
             {bill.reverse_charge && <span>GST Payable on Reverse Charge: <strong>Yes</strong></span>}
           </div>
         )}
+
 
         {/* ── Items ───────────────────────────────────── */}
         <table className="inv-table">
@@ -161,6 +164,8 @@ function StandardInvoiceTemplate({ data }) {
                 )}
               </tbody>
             </table>
+
+            {/* Amount in words */}
             <div className="inv-words">
               Amount in words: <em>{numToWords(totals.total)}</em>
             </div>

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
+import { ensureCustomerRecord, isMissingCustomerSchemaError, isUuidLike, normalizeCustomerPhone } from '@/lib/customers'
 import { fmt } from '@/lib/gst'
 import { calculateCreditBalance, formatSettlementLabel, groupCreditEntriesByAccount, normalizeSettlementDay, WEEKDAY_OPTIONS } from '@/lib/credits'
 import { todayStr } from '@/lib/finance'
@@ -10,6 +11,8 @@ import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
 import { enqueuePendingAction, listPendingActions, removePendingAction, updatePendingAction } from '@/lib/offlineBilling'
+import { useDebouncedValue } from '@/lib/useDebouncedValue'
+import { applyLenderRepaymentToPurchases, repairAutoPurchaseCreditLinks, repairUnsyncedLenderRepayments } from '@/lib/purchaseCredit'
 
 function isOnline() {
   return typeof navigator !== 'undefined' ? navigator.onLine : true
@@ -36,11 +39,23 @@ function isValidPhoneNumber(value) {
   return /^[6-9]\d{9}$/.test(value)
 }
 
+function normalizePhone(value) {
+  return normalizeCustomerPhone(value)
+}
+
 function getCreditErrorMessage(message) {
   if (message && message.includes('credit_accounts_settlement_cycle_check')) {
     return 'Weekly settlement needs the latest credit SQL update. Run supabase/updates_2026_08_20_credit_weekly_cycle.sql once and try again.'
   }
   return message
+}
+
+function normalizeLedgerBalance(balance) {
+  return Math.max(0, Number(balance || 0))
+}
+
+function getPreferredAccountName(account) {
+  return String(account?.account_label || account?.party_name || '').trim()
 }
 
 function emptyAccount() {
@@ -79,6 +94,12 @@ function extractAutoInvoiceId(referenceNote) {
   const end = note.indexOf(']', start)
   if (end < 0) return ''
   return note.slice(start + AUTO_INVOICE_CREDIT_TAG_PREFIX.length, end).trim()
+}
+
+function extractInvoiceReference(referenceNote) {
+  const note = String(referenceNote || '').trim()
+  const match = note.match(/^Invoice\s+(.+?)\s+due\b/i)
+  return match?.[1]?.trim() || ''
 }
 
 async function applyBorrowerCollectionToInvoices(shopId, accountId, amount) {
@@ -162,6 +183,242 @@ async function getLiveBorrowerDue(shopId, accountId) {
   return Math.max(0, calculateCreditBalance(accountRow, accountEntries || []))
 }
 
+async function findLinkedBorrowerAccountForBill(shopId, billId) {
+  if (!shopId || !billId) return ''
+  const tag = `${AUTO_INVOICE_CREDIT_TAG_PREFIX}${billId}]`
+  const { data, error } = await supabase
+    .from('credit_entries')
+    .select('account_id')
+    .eq('shop_id', shopId)
+    .eq('direction', 'increase')
+    .ilike('reference_note', `%${tag}%`)
+    .limit(1)
+  if (error) throw error
+  return data?.[0]?.account_id || ''
+}
+
+async function isSharedAutoInvoiceAccount(shopId, accountId, billId) {
+  if (!shopId || !accountId) return false
+  const { data, error } = await supabase
+    .from('credit_entries')
+    .select('reference_note')
+    .eq('shop_id', shopId)
+    .eq('account_id', accountId)
+    .eq('direction', 'increase')
+    .ilike('reference_note', `%${AUTO_INVOICE_CREDIT_TAG_PREFIX}%`)
+  if (error) throw error
+
+  const taggedBillIds = [...new Set((data || [])
+    .map((entry) => extractAutoInvoiceId(entry.reference_note))
+    .filter(Boolean))]
+  if (!billId) return taggedBillIds.length > 1
+  return taggedBillIds.some((taggedBillId) => taggedBillId !== billId)
+}
+
+async function updateCreditAccountWithCustomerCompatibility(shopId, accountId, payload) {
+  const { error } = await supabase
+    .from('credit_accounts')
+    .update(payload)
+    .eq('id', accountId)
+    .eq('shop_id', shopId)
+  if (!error) return
+  if (!isMissingCustomerSchemaError(error)) throw error
+
+  const { customer_id, ...legacyPayload } = payload
+  const { error: retryError } = await supabase
+    .from('credit_accounts')
+    .update(legacyPayload)
+    .eq('id', accountId)
+    .eq('shop_id', shopId)
+  if (retryError) throw retryError
+}
+
+async function saveCreditAccountWithCustomerCompatibility(payload, accountId = '') {
+  if (accountId) {
+    await updateCreditAccountWithCustomerCompatibility(payload.shop_id, accountId, payload)
+    return
+  }
+
+  const { error } = await supabase.from('credit_accounts').insert(payload)
+  if (!error) return
+  if (!isMissingCustomerSchemaError(error)) throw error
+
+  const { customer_id, ...legacyPayload } = payload
+  const { error: retryError } = await supabase.from('credit_accounts').insert(legacyPayload)
+  if (retryError) throw retryError
+}
+
+async function createBorrowerCreditAccountWithCompatibility(payload) {
+  const { data, error } = await supabase
+    .from('credit_accounts')
+    .insert(payload)
+    .select('id')
+    .single()
+  if (!error) return data
+  if (!isMissingCustomerSchemaError(error)) throw error
+
+  const { customer_id, ...legacyPayload } = payload
+  const { data: legacyData, error: retryError } = await supabase
+    .from('credit_accounts')
+    .insert(legacyPayload)
+    .select('id')
+    .single()
+  if (retryError) throw retryError
+  return legacyData
+}
+
+async function reactivateBorrowerCreditAccount(shopId, accountId, options = {}) {
+  if (!shopId || !accountId) return accountId
+  const { customerId, customerName, customerPhone } = options
+  const payload = { is_active: true }
+  const normalizedName = String(customerName || '').trim()
+  const normalizedPhone = normalizePhone(customerPhone)
+
+  if (normalizedName) payload.party_name = normalizedName
+  if (normalizedPhone) payload.phone = normalizedPhone
+  if (isUuidLike(customerId)) payload.customer_id = customerId
+
+  await updateCreditAccountWithCustomerCompatibility(shopId, accountId, payload)
+  return accountId
+}
+
+async function ensureBorrowerCreditAccount(shopId, customerName, customerPhone, billNo, options = {}) {
+  const { billId, customerId } = options
+  const normalizedName = String(customerName || '').trim()
+  const normalizedPhone = normalizePhone(customerPhone)
+  if (billId) {
+    const linkedAccountId = await findLinkedBorrowerAccountForBill(shopId, billId)
+    if (linkedAccountId) {
+      const shouldAvoidSharedAccount = !normalizedPhone && await isSharedAutoInvoiceAccount(shopId, linkedAccountId, billId)
+      if (!shouldAvoidSharedAccount) {
+        return reactivateBorrowerCreditAccount(shopId, linkedAccountId, {
+          customerId,
+          customerName: normalizedName,
+          customerPhone: normalizedPhone,
+        })
+      }
+    }
+  }
+
+  if (isUuidLike(customerId)) {
+    const { data: byCustomerId, error: byCustomerErr } = await supabase
+      .from('credit_accounts')
+      .select('id')
+      .eq('shop_id', shopId)
+      .eq('relation_type', 'borrower')
+      .eq('customer_id', customerId)
+      .limit(1)
+    if (!String(byCustomerErr?.message || '').toLowerCase().includes('customer_id')) {
+      if (byCustomerErr) throw byCustomerErr
+      if (byCustomerId?.length) {
+        return reactivateBorrowerCreditAccount(shopId, byCustomerId[0].id, {
+          customerId,
+          customerName: normalizedName,
+          customerPhone: normalizedPhone,
+        })
+      }
+    }
+  }
+
+  if (normalizedPhone) {
+    const { data: byPhone, error: byPhoneErr } = await supabase
+      .from('credit_accounts')
+      .select('*')
+      .eq('shop_id', shopId)
+      .eq('relation_type', 'borrower')
+      .eq('phone', normalizedPhone)
+      .limit(1)
+    if (byPhoneErr) throw byPhoneErr
+    if (byPhone?.length) {
+      return reactivateBorrowerCreditAccount(shopId, byPhone[0].id, {
+        customerId,
+        customerName: normalizedName,
+        customerPhone: normalizedPhone,
+      })
+    }
+  }
+
+  const autoPartyName = normalizedName || (normalizedPhone ? `Customer ${normalizedPhone}` : `Walk-in (${billNo || 'Invoice'})`)
+  const createdAccount = await createBorrowerCreditAccountWithCompatibility({
+    shop_id: shopId,
+    party_name: autoPartyName,
+    phone: normalizedPhone || null,
+    ...(isUuidLike(customerId) ? { customer_id: customerId } : {}),
+    relation_type: 'borrower',
+    settlement_cycle: 'daily',
+    settlement_day: null,
+    opening_balance: 0,
+    notes: AUTO_INVOICE_CREDIT_NOTE,
+    is_active: true,
+  })
+  return createdAccount.id
+}
+
+async function repairAutoInvoiceCreditLinks(shopId) {
+  if (!shopId) return
+
+  const { data: openBills, error: billsErr } = await supabase
+    .from('bills')
+    .select('*')
+    .eq('shop_id', shopId)
+    .eq('bill_type', 'invoice')
+    .in('payment_status', ['unpaid', 'partial'])
+  if (billsErr) throw billsErr
+
+  const dueBills = (openBills || []).filter((bill) => Math.max(0, Number(bill.total || 0) - Number(bill.paid_amount || 0)) > 0)
+  if (!dueBills.length) return
+
+  const { data: creditRows, error: creditErr } = await supabase
+    .from('credit_entries')
+    .select('id,account_id,amount,reference_note')
+    .eq('shop_id', shopId)
+    .eq('direction', 'increase')
+    .ilike('reference_note', `%${AUTO_INVOICE_CREDIT_TAG_PREFIX}%`)
+  if (creditErr) throw creditErr
+
+  const creditRowsByBillId = (creditRows || []).reduce((map, row) => {
+    const billId = extractAutoInvoiceId(row.reference_note)
+    if (!billId) return map
+    if (!map[billId]) map[billId] = []
+    map[billId].push(row)
+    return map
+  }, {})
+
+  for (const bill of dueBills) {
+    const dueAmount = Math.max(0, Number(bill.total || 0) - Number(bill.paid_amount || 0))
+    const linkedRows = creditRowsByBillId[bill.id] || []
+    const hasMatchingEntry = linkedRows.some((row) => Number(row.amount || 0) === dueAmount)
+    if (hasMatchingEntry) continue
+
+    const removableIds = linkedRows.map((row) => row.id).filter(Boolean)
+    if (removableIds.length) {
+      const { error: deleteErr } = await supabase
+        .from('credit_entries')
+        .delete()
+        .eq('shop_id', shopId)
+        .in('id', removableIds)
+      if (deleteErr) throw deleteErr
+    }
+
+    const accountId = await ensureBorrowerCreditAccount(shopId, bill.customer_name, bill.customer_phone, bill.bill_no, {
+      billId: bill.id,
+      customerId: bill.customer_id,
+    })
+    const referenceNote = `Invoice ${bill.bill_no || ''} due ${fmt(dueAmount)} ${AUTO_INVOICE_CREDIT_TAG_PREFIX}${bill.id}]`.trim()
+    const { error: insertErr } = await supabase
+      .from('credit_entries')
+      .insert({
+        shop_id: shopId,
+        account_id: accountId,
+        direction: 'increase',
+        amount: dueAmount,
+        entry_date: bill.date,
+        reference_note: referenceNote,
+      })
+    if (insertErr) throw insertErr
+  }
+}
+
 export default function CreditsPage() {
   const { shop } = useShop()
   const accountsCacheKey = shop?.id ? `credits:accounts:${shop.id}` : ''
@@ -182,6 +439,7 @@ export default function CreditsPage() {
   const [savingAccount, setSavingAccount] = useState(false)
   const [savingEntry, setSavingEntry] = useState(false)
   const syncInProgressRef = useRef(false)
+  const debouncedSearch = useDebouncedValue(search, 200)
   usePageLoadingState('credits-page', loading || entriesLoading)
 
   const selectedAccount = useMemo(
@@ -190,18 +448,19 @@ export default function CreditsPage() {
   )
 
   const filteredAccounts = useMemo(() => {
-    const term = search.trim().toLowerCase()
+    const term = debouncedSearch.trim().toLowerCase()
     return accounts.filter((acc) => {
       const currentBalance = Number(acc.current_balance || 0)
       if (!showClosed && currentBalance === 0) return false
       if (cycleFilter !== 'all' && acc.settlement_cycle !== cycleFilter) return false
       if (!term) return true
       return (
-        String(acc.party_name || '').toLowerCase().includes(term) ||
+        String(acc.account_label || acc.party_name || '').toLowerCase().includes(term) ||
+        String(acc.account_meta || '').toLowerCase().includes(term) ||
         String(acc.phone || '').toLowerCase().includes(term)
       )
     })
-  }, [accounts, cycleFilter, search, showClosed])
+  }, [accounts, cycleFilter, debouncedSearch, showClosed])
 
   const customerAccounts = useMemo(
     () => filteredAccounts.filter((acc) => acc.relation_type === 'borrower'),
@@ -214,13 +473,13 @@ export default function CreditsPage() {
   const receivableTotal = useMemo(
     () => accounts
       .filter((acc) => acc.relation_type === 'borrower')
-      .reduce((sum, acc) => sum + Number(acc.current_balance || 0), 0),
+      .reduce((sum, acc) => sum + normalizeLedgerBalance(acc.current_balance), 0),
     [accounts]
   )
   const payableTotal = useMemo(
     () => accounts
       .filter((acc) => acc.relation_type === 'lender')
-      .reduce((sum, acc) => sum + Number(acc.current_balance || 0), 0),
+      .reduce((sum, acc) => sum + normalizeLedgerBalance(acc.current_balance), 0),
     [accounts]
   )
 
@@ -232,18 +491,19 @@ export default function CreditsPage() {
   const loadAccounts = useCallback(async () => {
     if (!shop?.id) return
     const cached = readPageCache(accountsCacheKey)
+    const cachedActiveAccounts = (cached?.accounts || []).filter((account) => account.is_active !== false)
     setError('')
     setOfflineNotice('')
-    if (cached?.accounts) {
-      setAccounts(cached.accounts)
+    if (cachedActiveAccounts.length) {
+      setAccounts(cachedActiveAccounts)
       setLoading(false)
     } else {
       setLoading(true)
     }
 
     if (!isOnline()) {
-      if (cached?.accounts) {
-        setAccounts(cached.accounts)
+      if (cachedActiveAccounts.length) {
+        setAccounts(cachedActiveAccounts)
         setOfflineNotice('Offline mode: showing cached credit accounts')
         setLoading(false)
         return
@@ -255,10 +515,15 @@ export default function CreditsPage() {
     }
 
     try {
+      await repairAutoInvoiceCreditLinks(shop.id)
+      await repairAutoPurchaseCreditLinks(shop.id)
+      await repairUnsyncedLenderRepayments(shop.id)
+
       const { data, error: loadErr } = await supabase
         .from('credit_accounts')
         .select('*')
         .eq('shop_id', shop.id)
+        .eq('is_active', true)
         .order('party_name')
 
       if (loadErr) {
@@ -269,17 +534,63 @@ export default function CreditsPage() {
 
       const { data: txnRows, error: txnErr } = await supabase
         .from('credit_entries')
-        .select('id,account_id,amount,direction')
+        .select('id,account_id,amount,direction,reference_note')
         .eq('shop_id', shop.id)
 
       if (txnErr) throw new Error(txnErr.message)
 
+      const customerIds = [...new Set((data || []).map((account) => account.customer_id).filter(isUuidLike))]
+      let customerById = new Map()
+      if (customerIds.length) {
+        const { data: customerRows, error: customerErr } = await supabase
+          .from('customers')
+          .select('id,name,phone')
+          .eq('shop_id', shop.id)
+          .in('id', customerIds)
+        if (customerErr && !isMissingCustomerSchemaError(customerErr)) throw new Error(customerErr.message)
+        customerById = new Map((customerRows || []).map((customer) => [customer.id, customer]))
+      }
+
       const grouped = groupCreditEntriesByAccount(txnRows || [])
 
-      const nextAccounts = (data || []).map((acc) => ({
-        ...acc,
-        current_balance: calculateCreditBalance(acc, grouped[acc.id] || []),
-      })).filter((acc) => {
+      const duplicateNameCounts = (data || []).reduce((counts, account) => {
+        const linkedCustomer = isUuidLike(account.customer_id) ? customerById.get(account.customer_id) : null
+        const preferredName = String(linkedCustomer?.name || account.party_name || '').trim()
+        const key = preferredName.toLowerCase()
+        if (!key) return counts
+        counts[key] = (counts[key] || 0) + 1
+        return counts
+      }, {})
+
+      const nextAccounts = (data || []).map((acc) => {
+        const accountEntries = grouped[acc.id] || []
+        const linkedCustomer = isUuidLike(acc.customer_id) ? customerById.get(acc.customer_id) : null
+        const preferredName = String(linkedCustomer?.name || acc.party_name || '').trim()
+        const preferredPhone = normalizePhone(linkedCustomer?.phone || acc.phone)
+        const invoiceRefs = [...new Set(accountEntries
+          .map((entry) => extractInvoiceReference(entry.reference_note))
+          .filter(Boolean))]
+        const duplicateKey = preferredName.toLowerCase()
+        const hasDuplicateName = duplicateKey && duplicateNameCounts[duplicateKey] > 1
+        const isAutoInvoiceAccount = String(acc.notes || '') === AUTO_INVOICE_CREDIT_NOTE
+        const accountLabel = hasDuplicateName && isAutoInvoiceAccount && invoiceRefs.length
+          ? `${preferredName} · ${invoiceRefs[0]}`
+          : preferredName
+        const accountMeta = preferredPhone
+          ? preferredPhone
+          : isAutoInvoiceAccount && invoiceRefs.length
+            ? invoiceRefs.join(', ')
+            : ''
+
+        return {
+          ...acc,
+          party_name: preferredName || acc.party_name,
+          phone: preferredPhone || acc.phone,
+          current_balance: normalizeLedgerBalance(calculateCreditBalance(acc, accountEntries)),
+          account_label: accountLabel,
+          account_meta: accountMeta,
+        }
+      }).filter((acc) => {
         const isAutoInvoiceAccount = String(acc.notes || '') === AUTO_INVOICE_CREDIT_NOTE
         const hasOpeningBalance = Number(acc.opening_balance || 0) !== 0
         const hasBalance = Number(acc.current_balance || 0) !== 0
@@ -295,8 +606,8 @@ export default function CreditsPage() {
       }
       setLoading(false)
     } catch (loadErr) {
-      if (cached?.accounts) {
-        setAccounts(cached.accounts)
+      if (cachedActiveAccounts.length) {
+        setAccounts(cachedActiveAccounts)
         setOfflineNotice('Offline mode: showing cached credit accounts')
         setLoading(false)
         return
@@ -362,6 +673,21 @@ export default function CreditsPage() {
 
   useEffect(() => {
     if (!shop?.id || !isOnline()) return
+    const channel = supabase.channel(`credits-live:${shop.id}`)
+    ;['customers', 'bills', 'purchase_bills', 'credit_accounts', 'credit_entries'].forEach((table) => {
+      channel.on('postgres_changes', { event: '*', schema: 'public', table, filter: `shop_id=eq.${shop.id}` }, () => {
+        loadAccounts()
+        if (table === 'credit_entries' || table === 'credit_accounts' || table === 'purchase_bills') {
+          loadEntries()
+        }
+      })
+    })
+    channel.subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [loadAccounts, loadEntries, shop?.id])
+
+  useEffect(() => {
+    if (!shop?.id || !isOnline()) return
 
     let cancelled = false
     async function syncQueue() {
@@ -373,14 +699,14 @@ export default function CreditsPage() {
           if (cancelled) return
           await updatePendingAction(record.id, { status: 'syncing' })
 
-          const { error: saveErr } = await supabase.from('credit_entries').insert({
+          const { data: savedEntry, error: saveErr } = await supabase.from('credit_entries').insert({
             shop_id: shop.id,
             account_id: record.accountId,
             direction: record.direction,
             amount: Number(record.amount || 0),
             entry_date: record.entry_date,
             reference_note: record.reference_note || null,
-          })
+          }).select('id,reference_note').single()
           if (saveErr) throw saveErr
 
           if (record.direction === 'decrease') {
@@ -397,6 +723,11 @@ export default function CreditsPage() {
             }
             if (relationType === 'borrower') {
               await applyBorrowerCollectionToInvoices(shop.id, record.accountId, Number(record.amount || 0))
+            } else if (relationType === 'lender') {
+              await applyLenderRepaymentToPurchases(shop.id, record.accountId, Number(record.amount || 0), {
+                entryId: savedEntry?.id,
+                referenceNote: savedEntry?.reference_note,
+              })
             }
           }
 
@@ -469,10 +800,22 @@ export default function CreditsPage() {
 
     setSavingAccount(true)
     setError('')
+    const ensuredCustomer = accountForm.relation_type === 'borrower'
+      ? await ensureCustomerRecord(shop.id, {
+          id: selectedAccount?.customer_id || '',
+          name: accountForm.party_name.trim(),
+          phone: cleanedPhone,
+          gstin: '',
+          address: '',
+        })
+      : null
     const payload = {
       shop_id: shop.id,
       party_name: accountForm.party_name.trim(),
       phone: cleanedPhone || null,
+      customer_id: accountForm.relation_type === 'borrower'
+        ? (ensuredCustomer?.id || (isUuidLike(selectedAccount?.customer_id) ? selectedAccount.customer_id : null))
+        : null,
       relation_type: accountForm.relation_type,
       settlement_cycle: accountForm.settlement_cycle,
       settlement_day: normalizeSettlementDay(accountForm.settlement_cycle, accountForm.settlement_day),
@@ -483,16 +826,10 @@ export default function CreditsPage() {
     }
 
     let saveErr = null
-    if (selectedAccount) {
-      const { error: err } = await supabase
-        .from('credit_accounts')
-        .update(payload)
-        .eq('id', selectedAccount.id)
-        .eq('shop_id', shop.id)
-      saveErr = err
-    } else {
-      const { error: err } = await supabase.from('credit_accounts').insert(payload)
-      saveErr = err
+    try {
+      await saveCreditAccountWithCustomerCompatibility(payload, selectedAccount?.id || '')
+    } catch (error) {
+      saveErr = error
     }
 
     setSavingAccount(false)
@@ -518,8 +855,8 @@ export default function CreditsPage() {
     }
     const currentBalance = calculateCreditBalance(selectedAccount, entries)
     const isBorrowerCollection = selectedAccount.relation_type === 'borrower' && entryForm.direction === 'decrease'
-    if (isBorrowerCollection && amount > Math.max(0, currentBalance)) {
-      setError(`Collected amount exceeds pending due (${fmt(Math.max(0, currentBalance))})`)
+    if (isBorrowerCollection && amount > normalizeLedgerBalance(currentBalance)) {
+      setError(`Collected amount exceeds pending due (${fmt(normalizeLedgerBalance(currentBalance))})`)
       return
     }
     if (!isOnline()) {
@@ -547,7 +884,7 @@ export default function CreditsPage() {
       setEntries((prev) => [offlineEntry, ...prev])
       setAccounts((prev) => prev.map((acc) => (
         acc.id === selectedAccount.id
-          ? { ...acc, current_balance: calculateCreditBalance(acc, [offlineEntry, ...entries]) }
+          ? { ...acc, current_balance: normalizeLedgerBalance(calculateCreditBalance(acc, [offlineEntry, ...entries])) }
           : acc
       )))
       setEntryForm(emptyEntry())
@@ -572,14 +909,14 @@ export default function CreditsPage() {
         return
       }
     }
-    const { error: saveErr } = await supabase.from('credit_entries').insert({
+    const { data: savedEntry, error: saveErr } = await supabase.from('credit_entries').insert({
       shop_id: shop.id,
       account_id: selectedAccount.id,
       direction: entryForm.direction,
       amount,
       entry_date: entryForm.entry_date,
       reference_note: entryForm.reference_note.trim() || null,
-    })
+    }).select('id,reference_note').single()
 
     setSavingEntry(false)
     if (saveErr) {
@@ -592,6 +929,15 @@ export default function CreditsPage() {
         await applyBorrowerCollectionToInvoices(shop.id, selectedAccount.id, amount)
       } catch (syncErr) {
         setError(syncErr.message || 'Saved credit entry, but invoice sync failed')
+      }
+    } else if (entryForm.direction === 'decrease' && selectedAccount.relation_type === 'lender') {
+      try {
+        await applyLenderRepaymentToPurchases(shop.id, selectedAccount.id, amount, {
+          entryId: savedEntry?.id,
+          referenceNote: savedEntry?.reference_note,
+        })
+      } catch (syncErr) {
+        setError(syncErr.message || 'Saved credit entry, but purchase sync failed')
       }
     }
 
@@ -785,7 +1131,7 @@ export default function CreditsPage() {
               <div className="bg-white border rounded-xl p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h2 className="text-lg font-semibold text-gray-900">{selectedAccount.party_name}</h2>
+                    <h2 className="text-lg font-semibold text-gray-900">{getPreferredAccountName(selectedAccount)}</h2>
                     <div className="text-sm text-gray-500">
                       {selectedAccount.relation_type === 'borrower' ? 'Customer credit · they owe us' : 'Supplier / agency credit · we owe them'} · {formatSettlementLabel(selectedAccount.settlement_cycle, selectedAccount.settlement_day)}
                     </div>
@@ -799,7 +1145,7 @@ export default function CreditsPage() {
                 </div>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4">
                   <StatCard label="Opening" value={fmt(selectedAccount.opening_balance || 0)} compact />
-                  <StatCard label="Current Balance" value={fmt(calculateCreditBalance(selectedAccount, entries))} compact />
+                  <StatCard label="Current Balance" value={fmt(normalizeLedgerBalance(calculateCreditBalance(selectedAccount, entries)))} compact />
                   <StatCard label="Entries" value={entries.length} compact />
                 </div>
               </div>
@@ -904,9 +1250,9 @@ function AccountGroup({ title, subtitle, emptyText, accounts, selectedId, onSele
             >
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <div className="font-medium text-gray-900">{acc.party_name}</div>
+                  <div className="font-medium text-gray-900">{getPreferredAccountName(acc)}</div>
                   <div className="text-xs text-gray-500 mt-0.5">{formatSettlementLabel(acc.settlement_cycle, acc.settlement_day)}</div>
-                  {acc.phone && <div className="text-xs text-gray-400 mt-0.5">{acc.phone}</div>}
+                  {acc.account_meta && <div className="text-xs text-gray-400 mt-0.5">{acc.account_meta}</div>}
                 </div>
                 <div className="text-right">
                   <div className={`font-semibold ${acc.relation_type === 'borrower' ? 'text-cyan-700' : 'text-purple-700'}`}>{fmt(acc.current_balance)}</div>

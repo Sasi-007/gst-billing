@@ -11,6 +11,21 @@ import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
 
+const PAYMENT_MODE_ORDER = ['cash', 'upi', 'card', 'credit', 'cheque', 'bank']
+
+function normalizePaymentMode(value) {
+  const mode = String(value || '').trim().toLowerCase()
+  if (!mode) return 'unknown'
+  if (mode === 'gpay') return 'upi'
+  return mode
+}
+
+function paymentModeLabel(mode) {
+  if (mode === 'upi') return 'UPI'
+  if (mode === 'unknown') return 'Unknown'
+  return mode.charAt(0).toUpperCase() + mode.slice(1)
+}
+
 function SummaryCard({ label, value, hint, className = '' }) {
   return (
     <div className="bg-white border rounded-lg p-3">
@@ -26,8 +41,8 @@ async function fetchSummaryDirect(shopId, dateFrom, dateTo) {
     billsRes, purchasesRes, expensesRes, investmentsRes, drawingsRes,
     productsRes, bankAccountsRes, bankTransactionsRes, creditAccountsRes, creditEntriesRes,
   ] = await Promise.all([
-    supabase.from('bills').select('id,date,total,subtotal,discount_amount,gst_amount,paid_amount,payment_status').eq('shop_id', shopId).eq('bill_type', 'invoice').gte('date', dateFrom).lte('date', dateTo).order('date', { ascending: false }),
-    supabase.from('purchase_bills').select('id,date,total,gst_amount,paid_amount,payment_status').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo).order('date', { ascending: false }),
+    supabase.from('bills').select('id,date,total,subtotal,discount_amount,gst_amount,paid_amount,payment_mode,payment_status').eq('shop_id', shopId).eq('bill_type', 'invoice').gte('date', dateFrom).lte('date', dateTo).order('date', { ascending: false }),
+    supabase.from('purchase_bills').select('id,date,total,gst_amount,paid_amount,payment_mode,payment_status').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo).order('date', { ascending: false }),
     supabase.from('expenses').select('id,expense_date,title,category,amount,payment_mode').eq('shop_id', shopId).eq('is_active', true).gte('expense_date', dateFrom).lte('expense_date', dateTo).order('expense_date', { ascending: false }),
     supabase.from('investments').select('id,investment_date,source_name,amount,payment_mode').eq('shop_id', shopId).eq('is_active', true).gte('investment_date', dateFrom).lte('investment_date', dateTo).order('investment_date', { ascending: false }),
     supabase.from('owner_drawings').select('id,drawing_date,title,amount,payment_mode,bank_account_id').eq('shop_id', shopId).eq('is_active', true).gte('drawing_date', dateFrom).lte('drawing_date', dateTo).order('drawing_date', { ascending: false }),
@@ -92,7 +107,7 @@ export default function SummaryPage() {
         setData(cached.data)
         setLoading(false)
       } else {
-        setLoading(true)
+        if (!cached?.data) setLoading(true)
       }
 
       try {
@@ -194,6 +209,27 @@ export default function SummaryPage() {
     }, 0)
 
     const expenseCategories = calculateExpenseCategoryBreakdown(expenses)
+    const salesPaymentModeMap = bills.reduce((map, bill) => {
+      const mode = normalizePaymentMode(bill.payment_mode)
+      const total = Number(bill.total || 0)
+      const collected = Math.max(0, Number(bill.paid_amount || 0))
+      const outstanding = Math.max(0, total - collected)
+      if (!map[mode]) {
+        map[mode] = { mode, billCount: 0, total: 0, collected: 0, outstanding: 0 }
+      }
+      map[mode].billCount += 1
+      map[mode].total += total
+      map[mode].collected += collected
+      map[mode].outstanding += outstanding
+      return map
+    }, {})
+    const dynamicModes = Object.keys(salesPaymentModeMap).filter((mode) => !PAYMENT_MODE_ORDER.includes(mode))
+    const visiblePaymentModes = [...PAYMENT_MODE_ORDER, ...dynamicModes]
+    const salesPaymentModes = visiblePaymentModes
+      .map((mode) => salesPaymentModeMap[mode] || { mode, billCount: 0, total: 0, collected: 0, outstanding: 0 })
+      .filter((row) => row.billCount > 0 || row.collected > 0 || row.outstanding > 0)
+    const totalCollectedByMode = salesPaymentModes.reduce((sum, row) => sum + row.collected, 0)
+    const totalOutstandingByMode = salesPaymentModes.reduce((sum, row) => sum + row.outstanding, 0)
 
     return {
       salesTotal,
@@ -221,6 +257,9 @@ export default function SummaryPage() {
       payable,
       activityRows,
       expenseCategories,
+      salesPaymentModes,
+      totalCollectedByMode,
+      totalOutstandingByMode,
       billCount: bills.length,
       error: data?.error || '',
     }
@@ -345,6 +384,43 @@ export default function SummaryPage() {
             </div>
 
             <div className="space-y-4">
+              <div className="bg-white rounded-xl border overflow-hidden">
+                <div className="px-4 py-3 border-b">
+                  <div className="text-sm font-medium text-gray-700">Invoice Collection by Payment Mode</div>
+                  <div className="text-xs text-gray-400 mt-0.5">Based on selected date range.</div>
+                </div>
+                {summary.salesPaymentModes.length === 0 ? (
+                  <div className="p-6 text-sm text-gray-400 text-center">No invoice payments in this period</div>
+                ) : (
+                  <>
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="bg-gray-50 text-xs text-gray-500 border-b">
+                          <th className="px-4 py-2 text-left">Mode</th>
+                          <th className="px-4 py-2 text-right">Bills</th>
+                          <th className="px-4 py-2 text-right">Collected</th>
+                          <th className="px-4 py-2 text-right">Outstanding</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {summary.salesPaymentModes.map((row) => (
+                          <tr key={row.mode} className="border-b last:border-b-0">
+                            <td className="px-4 py-2 font-medium">{paymentModeLabel(row.mode)}</td>
+                            <td className="px-4 py-2 text-right">{row.billCount}</td>
+                            <td className="px-4 py-2 text-right text-green-700 font-medium">{fmt(row.collected)}</td>
+                            <td className="px-4 py-2 text-right text-amber-700">{fmt(row.outstanding)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div className="px-4 py-2 text-xs text-gray-500 bg-gray-50 border-t flex items-center justify-between">
+                      <span>Total Collected: <span className="font-medium text-green-700">{fmt(summary.totalCollectedByMode)}</span></span>
+                      <span>Total Outstanding: <span className="font-medium text-amber-700">{fmt(summary.totalOutstandingByMode)}</span></span>
+                    </div>
+                  </>
+                )}
+              </div>
+
               <div className="bg-white rounded-xl border overflow-hidden">
                 <div className="px-4 py-3 border-b">
                   <div className="text-sm font-medium text-gray-700">Expense Split</div>
