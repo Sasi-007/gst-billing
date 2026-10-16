@@ -142,6 +142,7 @@ export default function NewPurchasePage() {
   const [saving,     setSaving]     = useState(false)
   const [toast,      setToast]      = useState(null)
   const [editPurchaseId, setEditPurchaseId] = useState(null)
+  const [billNo, setBillNo] = useState('')
   const [offlineNotice, setOfflineNotice] = useState('')
   const syncInProgressRef = useRef(false)
   const importInputRef = useRef(null)
@@ -188,6 +189,7 @@ export default function NewPurchasePage() {
       if (lErr) { showToast('Load failed: ' + lErr.message, 'error'); return }
 
       setEditPurchaseId(editId)
+      setBillNo(b.bill_no || '')
       setSuppId(b.supplier_id || '')
       setSuppInv(b.supplier_invoice_no || '')
       setDate(b.date || todayStr())
@@ -647,6 +649,7 @@ export default function NewPurchasePage() {
         setPaidAmt('')
         setPayMode('Credit')
         setEditPurchaseId(null)
+        setBillNo('')
         return
       }
 
@@ -667,6 +670,7 @@ export default function NewPurchasePage() {
         no = current?.bill_no || no
       }
       if (!no) throw new Error('Purchase number could not be generated')
+      setBillNo(no)
       let oldImpactMap = {}
       if (editPurchaseId) {
         const { data: oldItems, error: oldItemsErr } = await supabase
@@ -816,6 +820,9 @@ export default function NewPurchasePage() {
           <div className="flex items-center gap-3">
             <button onClick={() => router.back()} className="text-gray-500 text-sm hover:text-gray-700">← Back</button>
             <h1 className="text-lg font-bold">{editPurchaseId ? 'Edit Purchase Entry' : 'New Purchase Entry'}</h1>
+            <span className="rounded bg-gray-100 px-2 py-0.5 font-mono text-sm font-semibold text-gray-700">
+              {billNo || 'Auto'}
+            </span>
           </div>
           <div className="flex items-center gap-2 text-sm">
             <span className="text-gray-500">Date</span>

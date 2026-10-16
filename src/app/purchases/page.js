@@ -6,6 +6,7 @@ import { fmt } from '@/lib/gst'
 import { monthStartStr, todayStr } from '@/lib/finance'
 import { readPageCache, writePageCache } from '@/lib/pageCache'
 import LoadingPlaceholder from '@/components/LoadingPlaceholder'
+import PurchaseImportPanel from '@/components/PurchaseImportPanel'
 import { useShop } from '@/context/ShopContext'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
@@ -100,6 +101,7 @@ export default function PurchasesPage() {
   const [sortDir, setSortDir] = useState('desc')
   const [selectedBillIds, setSelectedBillIds] = useState([])
   const [exportingSupportData, setExportingSupportData] = useState(false)
+  const [importPanelOpen, setImportPanelOpen] = useState(false)
   const loadedTick = useRef(0)
   const debouncedSearch = useDebouncedValue(search)
   const cacheKey = shop?.id ? `purchases:${shop.id}:${dateFrom}:${dateTo}:${debouncedSearch}` : ''
@@ -450,6 +452,13 @@ export default function PurchasesPage() {
 
   return (
     <div className="p-4">
+      {importPanelOpen && (
+        <PurchaseImportPanel
+          shopId={shop?.id}
+          onClose={() => setImportPanelOpen(false)}
+          onImported={() => setLiveTick((tick) => tick + 1)}
+        />
+      )}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
         <div>
           <h1 className="text-xl font-bold text-gray-900">Purchases</h1>
@@ -472,8 +481,16 @@ export default function PurchasesPage() {
           </button>
           <Link href="/purchases/new?import=1"
             className="px-3 sm:px-4 py-2 bg-white border text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium whitespace-nowrap">
-            ⬆ Import<span className="hidden sm:inline"> CSV</span>
+            ⬆ Items<span className="hidden sm:inline"> CSV</span>
           </Link>
+          <button
+            type="button"
+            onClick={() => setImportPanelOpen(true)}
+            title="Upload any one or all four files from the purchases export"
+            className="px-3 sm:px-4 py-2 bg-white border text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium whitespace-nowrap"
+          >
+            ⬆ Import<span className="hidden sm:inline"> CSV + Data</span>
+          </button>
           <Link href="/purchases/new"
             className="px-3 sm:px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium whitespace-nowrap">
             + New<span className="hidden sm:inline"> Purchase</span>

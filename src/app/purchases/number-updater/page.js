@@ -20,12 +20,27 @@ function parseBillNumber(value) {
   }
 }
 
-function comparePurchasesByNumber(a, b) {
+function comparePurchasesByDate(a, b) {
+  const leftDate = String(a.date || '')
+  const rightDate = String(b.date || '')
+  if (leftDate !== rightDate) return leftDate.localeCompare(rightDate)
+  const leftCreated = String(a.created_at || '')
+  const rightCreated = String(b.created_at || '')
+  if (leftCreated !== rightCreated) return leftCreated.localeCompare(rightCreated)
   const left = parseBillNumber(a.bill_no)
   const right = parseBillNumber(b.bill_no)
   if (left.prefix !== right.prefix) return left.prefix.localeCompare(right.prefix)
-  if (left.number !== right.number) return left.number - right.number
-  return String(a.created_at || a.date || '').localeCompare(String(b.created_at || b.date || ''))
+  return left.number - right.number
+}
+
+function pickSequenceSeed(rows) {
+  let seed = null
+  for (const row of rows) {
+    const parsed = parseBillNumber(row.bill_no)
+    if (!Number.isFinite(parsed.number)) continue
+    if (!seed || parsed.number < seed.number) seed = parsed
+  }
+  return seed
 }
 
 function formatBillNo(prefix, number, digits) {
@@ -95,13 +110,13 @@ export default function PurchaseNumberUpdaterPage() {
         return
       }
 
-      const loadedPurchases = (data || []).sort(comparePurchasesByNumber)
+      const loadedPurchases = (data || []).sort(comparePurchasesByDate)
       setPurchases(loadedPurchases)
 
-      const firstNumber = parseBillNumber(loadedPurchases[0]?.bill_no)
-      setPrefix(firstNumber.prefix || shop.purchase_prefix || 'PUR')
-      setDigits(Number.isFinite(firstNumber.number) ? firstNumber.digits : 4)
-      setStartNumber(Number.isFinite(firstNumber.number) ? firstNumber.number : 1)
+      const seed = pickSequenceSeed(loadedPurchases)
+      setPrefix(seed?.prefix || shop.purchase_prefix || 'PUR')
+      setDigits(seed ? seed.digits : 4)
+      setStartNumber(seed ? seed.number : 1)
       if (!loadedPurchases.length) {
         setMessage({ type: 'error', text: 'Selected purchases could not be found.' })
       }
@@ -202,7 +217,7 @@ export default function PurchaseNumberUpdaterPage() {
       }
 
       await updateCreditReferenceNotes(previewRows)
-      setPurchases(previewRows.map((row) => ({ ...row, bill_no: row.next_bill_no })).sort(comparePurchasesByNumber))
+      setPurchases(previewRows.map((row) => ({ ...row, bill_no: row.next_bill_no })).sort(comparePurchasesByDate))
       setMessage({ type: 'success', text: `Updated ${previewRows.length} purchase number${previewRows.length > 1 ? 's' : ''}.` })
     } catch (error) {
       setMessage({ type: 'error', text: `Purchase number update failed: ${error?.message || 'Unknown error'}` })
@@ -218,7 +233,7 @@ export default function PurchaseNumberUpdaterPage() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Purchase Number Updater</h1>
             <p className="text-sm text-gray-500">
-              Selected purchases can be refreshed into a clean sequence like PUR-0001, PUR-0002, PUR-0003.
+              Selected purchases are ordered by bill date (oldest first) and renumbered into a clean sequence like PUR-0001, PUR-0002, PUR-0003.
             </p>
           </div>
           <Link href="/purchases" className="rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">

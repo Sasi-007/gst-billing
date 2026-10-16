@@ -38,6 +38,21 @@ const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit', 'Cheque']
 const AUTO_INVOICE_CREDIT_TAG_PREFIX = '[AUTO-INVOICE:'
 const AUTO_INVOICE_CREDIT_NOTE = 'Auto-created from invoice credit billing'
 
+function historyDueAmount(bill) {
+  return Math.max(0, Number(bill.total || 0) - Number(bill.paid_amount || 0))
+}
+
+const HISTORY_SORT_COLUMNS = [
+  { key: 'date', label: 'Date', value: (b) => `${String(b.date || '')} ${String(b.created_at || '')}` },
+  { key: 'bill_no', label: 'Bill No', value: (b) => String(b.bill_no || '') },
+  { key: 'customer', label: 'Customer', value: (b) => String(b.customer_name || '') },
+  { key: 'total', label: 'Total', value: (b) => Number(b.total || 0) },
+  { key: 'paid_amount', label: 'Paid', value: (b) => Number(b.paid_amount || 0) },
+  { key: 'due', label: 'Due', value: (b) => historyDueAmount(b) },
+  { key: 'payment_mode', label: 'Mode', value: (b) => String(b.payment_mode || '') },
+  { key: 'payment_status', label: 'Status', value: (b) => String(b.payment_status || '') },
+]
+
 let _uid = 0
 function uid() { return ++_uid }
 
@@ -558,6 +573,8 @@ export default function BillingPage() {
   const [historyDeleting, setHistoryDeleting] = useState(false)
   const [historyUpdatingBillId, setHistoryUpdatingBillId] = useState(null)
   const [historyPrintingBillId, setHistoryPrintingBillId] = useState(null)
+  const [historySortKey, setHistorySortKey] = useState('date')
+  const [historySortDir, setHistorySortDir] = useState('asc')
   const [conversionSource, setConversionSource] = useState(null)
   const [isOffline, setIsOffline] = useState(false)
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0)
@@ -566,6 +583,27 @@ export default function BillingPage() {
   const customerParamAppliedRef = useRef('')
   const debouncedCustomerPickerSearch = useDebouncedValue(customerPickerSearch, 200)
   const debouncedHistorySearch = useDebouncedValue(historySearch, 250)
+
+  const sortedHistoryBills = useMemo(() => {
+    const column = HISTORY_SORT_COLUMNS.find((col) => col.key === historySortKey)
+    if (!column) return historyBills
+    const direction = historySortDir === 'asc' ? 1 : -1
+    return [...historyBills].sort((a, b) => {
+      const left = column.value(a)
+      const right = column.value(b)
+      if (typeof left === 'number' && typeof right === 'number') return (left - right) * direction
+      return String(left).localeCompare(String(right), 'en', { numeric: true, sensitivity: 'base' }) * direction
+    })
+  }, [historyBills, historySortDir, historySortKey])
+
+  function handleHistorySort(key) {
+    if (key === historySortKey) {
+      setHistorySortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'))
+      return
+    }
+    setHistorySortKey(key)
+    setHistorySortDir('asc')
+  }
 
   useEffect(() => setMounted(true), [])
 
@@ -857,6 +895,7 @@ export default function BillingPage() {
         .select('*')
         .eq('shop_id', shop.id)
         .eq('bill_type', billType)
+        .order('date', { ascending: false })
         .order('created_at', { ascending: false })
         .limit(debouncedHistorySearch.trim() ? 200 : 50)
 
@@ -1388,7 +1427,7 @@ export default function BillingPage() {
   }
 
   function getHistoryDueAmount(bill) {
-    return Math.max(0, Number(bill.total || 0) - Number(bill.paid_amount || 0))
+    return historyDueAmount(bill)
   }
 
   async function handleHistoryRecordPayment(bill) {
@@ -1464,7 +1503,7 @@ export default function BillingPage() {
       setHistorySelectedBillIds([])
       return
     }
-    setHistorySelectedBillIds(historyBills.map((bill) => bill.id))
+    setHistorySelectedBillIds(sortedHistoryBills.map((bill) => bill.id))
   }
 
   function handleMoveSelectedHistoryBillsToNumberUpdater() {
@@ -1489,9 +1528,9 @@ export default function BillingPage() {
   }
 
   function getHistoryExportBills() {
-    if (historySelectedBillIds.length === 0) return historyBills
+    if (historySelectedBillIds.length === 0) return sortedHistoryBills
     const selectedIds = new Set(historySelectedBillIds)
-    return historyBills.filter((bill) => selectedIds.has(bill.id))
+    return sortedHistoryBills.filter((bill) => selectedIds.has(bill.id))
   }
 
   function handleExportHistoryCsv() {
@@ -2200,22 +2239,34 @@ export default function BillingPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-gray-50 text-xs text-gray-500 border-b">
-                          {['Select','Date','Bill No','Customer','Total','Paid','Due','Mode','Status','Action'].map(h => (
-                        <th key={h} className="px-3 py-2 text-left">
-                          {h === 'Select' ? (
-                            <input
-                              type="checkbox"
-                              checked={historyBills.length > 0 && historySelectedBillIds.length === historyBills.length}
-                              onChange={(e) => handleToggleSelectAllHistoryBills(e.target.checked)}
-                              aria-label="Select all invoices in history list"
-                            />
-                          ) : h}
+                      <th className="px-3 py-2 text-left">
+                        <input
+                          type="checkbox"
+                          checked={historyBills.length > 0 && historySelectedBillIds.length === historyBills.length}
+                          onChange={(e) => handleToggleSelectAllHistoryBills(e.target.checked)}
+                          aria-label="Select all invoices in history list"
+                        />
+                      </th>
+                      {HISTORY_SORT_COLUMNS.map(col => (
+                        <th key={col.key} className="px-3 py-2 text-left whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={() => handleHistorySort(col.key)}
+                            className="flex items-center gap-1 font-medium text-gray-500 hover:text-blue-700"
+                            title={`Sort by ${col.label}`}
+                          >
+                            {col.label}
+                            <span className={historySortKey === col.key ? 'text-blue-600' : 'text-gray-300'}>
+                              {historySortKey === col.key ? (historySortDir === 'asc' ? '▲' : '▼') : '↕'}
+                            </span>
+                          </button>
                         </th>
                       ))}
+                      <th className="px-3 py-2 text-left">Action</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {historyBills.map(b => (
+                    {sortedHistoryBills.map(b => (
                       <tr key={b.id} className="border-b hover:bg-gray-50">
                         <td className="px-3 py-2">
                           <input

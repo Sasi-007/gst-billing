@@ -19,12 +19,27 @@ function parseBillNumber(value) {
   }
 }
 
-function compareBillsByNumber(a, b) {
+function compareBillsByDate(a, b) {
+  const leftDate = String(a.date || '')
+  const rightDate = String(b.date || '')
+  if (leftDate !== rightDate) return leftDate.localeCompare(rightDate)
+  const leftCreated = String(a.created_at || '')
+  const rightCreated = String(b.created_at || '')
+  if (leftCreated !== rightCreated) return leftCreated.localeCompare(rightCreated)
   const left = parseBillNumber(a.bill_no)
   const right = parseBillNumber(b.bill_no)
   if (left.prefix !== right.prefix) return left.prefix.localeCompare(right.prefix)
-  if (left.number !== right.number) return left.number - right.number
-  return String(a.created_at || a.date || '').localeCompare(String(b.created_at || b.date || ''))
+  return left.number - right.number
+}
+
+function pickSequenceSeed(rows) {
+  let seed = null
+  for (const row of rows) {
+    const parsed = parseBillNumber(row.bill_no)
+    if (!Number.isFinite(parsed.number)) continue
+    if (!seed || parsed.number < seed.number) seed = parsed
+  }
+  return seed
 }
 
 function formatBillNo(prefix, number, digits) {
@@ -96,13 +111,13 @@ export default function InvoiceNumberUpdaterPage() {
 
       const loadedBills = (data || [])
         .filter((bill) => bill.bill_type === 'invoice')
-        .sort(compareBillsByNumber)
+        .sort(compareBillsByDate)
       setBills(loadedBills)
 
-      const firstNumber = parseBillNumber(loadedBills[0]?.bill_no)
-      setPrefix(firstNumber.prefix || shop.bill_prefix || 'INV')
-      setDigits(Number.isFinite(firstNumber.number) ? firstNumber.digits : 4)
-      setStartNumber(Number.isFinite(firstNumber.number) ? firstNumber.number : 1)
+      const seed = pickSequenceSeed(loadedBills)
+      setPrefix(seed?.prefix || shop.bill_prefix || 'INV')
+      setDigits(seed ? seed.digits : 4)
+      setStartNumber(seed ? seed.number : 1)
       if (!loadedBills.length) {
         setMessage({ type: 'error', text: 'Selected records are not tax invoices.' })
       }
@@ -203,7 +218,7 @@ export default function InvoiceNumberUpdaterPage() {
       }
 
       await updateCreditReferenceNotes(previewRows)
-      setBills(previewRows.map((row) => ({ ...row, bill_no: row.next_bill_no })).sort(compareBillsByNumber))
+      setBills(previewRows.map((row) => ({ ...row, bill_no: row.next_bill_no })).sort(compareBillsByDate))
       setMessage({ type: 'success', text: `Updated ${previewRows.length} invoice number${previewRows.length > 1 ? 's' : ''}.` })
     } catch (error) {
       setMessage({ type: 'error', text: `Invoice number update failed: ${error?.message || 'Unknown error'}` })
@@ -219,7 +234,7 @@ export default function InvoiceNumberUpdaterPage() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">Invoice Number Updater</h1>
             <p className="text-sm text-gray-500">
-              Selected invoices can be refreshed into a clean sequence like INV-0001, INV-0002, INV-0003.
+              Selected invoices are ordered by invoice date (oldest first) and renumbered into a clean sequence like INV-0001, INV-0002, INV-0003.
             </p>
           </div>
           <Link href="/billing?view=history" className="rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
