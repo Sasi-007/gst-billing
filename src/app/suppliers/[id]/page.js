@@ -286,7 +286,38 @@ export default function SupplierSummaryPage() {
         productSummary.length === 0 ? (
           <div className="text-center text-gray-400 py-10">No purchases from this supplier in the selected range</div>
         ) : (
-          <div className="rounded-lg border bg-white overflow-x-auto">
+          <div className="rounded-lg border bg-white">
+            {/* Mobile: card per product */}
+            <div className="md:hidden divide-y">
+              {productSummary.map((row) => (
+                <div key={row.key} className="p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-medium break-words">
+                        {row.product_id
+                          ? <Link href={`/inventory/${row.product_id}`} className="text-blue-600">{row.product_name}</Link>
+                          : row.product_name}
+                      </div>
+                      {row.hsn_code && <div className="text-xs text-gray-500 font-mono">HSN {row.hsn_code}</div>}
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="font-semibold text-blue-700">{fmt(row.amount)}</div>
+                      <div className="text-[11px] text-gray-400">{row.quantity} {row.unit}</div>
+                    </div>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-600">
+                    <span>Avg rate <b className="font-medium">{fmt(row.avgRate)}</b></span>
+                    <span>Last rate <b className="font-medium">{fmt(row.lastRate)}</b></span>
+                    <span>Last MRP <b className="font-medium">{fmt(row.lastMrp)}</b></span>
+                    <span>GST <b className="font-medium">{fmt(row.gst_amount)}</b></span>
+                    <span>{row.billCount} bill{row.billCount === 1 ? '' : 's'}</span>
+                    <span>Last {formatDate(row.lastDate)}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="hidden md:block overflow-x-auto">
             <table className="w-full min-w-[820px] text-sm">
               <thead>
                 <tr className="bg-gray-50 text-gray-600 text-xs border-b">
@@ -316,12 +347,46 @@ export default function SupplierSummaryPage() {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         )
       ) : bills.length === 0 ? (
         <div className="text-center text-gray-400 py-10">No bills from this supplier in the selected range</div>
       ) : (
-        <div className="rounded-lg border bg-white overflow-x-auto">
+        <div className="rounded-lg border bg-white">
+          {/* Mobile: card per bill */}
+          <div className="md:hidden divide-y">
+            {bills.map((bill) => {
+              const balance = Number(bill.total || 0) - Number(bill.paid_amount || 0)
+              return (
+                <div key={bill.id} className="p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <Link href={`/purchases/${bill.id}`} className="font-medium text-blue-600 break-all">{bill.bill_no}</Link>
+                      <div className="text-xs text-gray-500">{formatDate(bill.date)}</div>
+                      {bill.supplier_invoice_no && (
+                        <div className="text-xs text-gray-500 break-all">Inv {bill.supplier_invoice_no}</div>
+                      )}
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="font-semibold">{fmt(bill.total)}</div>
+                      <div className="text-[11px] capitalize text-gray-500">{bill.payment_status || '—'}</div>
+                    </div>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-600">
+                    <span>Subtotal <b className="font-medium">{fmt(bill.subtotal)}</b></span>
+                    <span>GST <b className="font-medium">{fmt(bill.gst_amount)}</b></span>
+                    <span className="text-green-700">Paid <b className="font-medium">{fmt(bill.paid_amount)}</b></span>
+                    <span className={balance > 0 ? 'text-red-600' : 'text-gray-400'}>
+                      Balance <b className="font-medium">{fmt(balance)}</b>
+                    </span>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
           <table className="w-full min-w-[720px] text-sm">
             <thead>
               <tr className="bg-gray-50 text-gray-600 text-xs border-b">
@@ -351,6 +416,7 @@ export default function SupplierSummaryPage() {
               })}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>

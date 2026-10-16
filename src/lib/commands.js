@@ -40,7 +40,7 @@ export const COMMANDS = [
     href: '/inventory/quick-add',
     icon: '⚡',
     group: 'Create',
-    keywords: ['quick add', 'bulk add', 'add many products', 'multiple products', 'batch product entry', 'supplier products'],
+    keywords: ['quick add', 'bulk add', 'add many products', 'multiple products', 'batch product entry', 'supplier products', 'quick entry', 'fast add', 'add items', 'add many items', 'bulk entry', 'bulk products', 'add products fast', 'add product list', 'many items'],
   },
   {
     id: 'new-product',
@@ -209,6 +209,15 @@ export const COMMANDS = [
     keywords: ['credit report', 'outstanding report', 'receivables', 'due report'],
   },
   {
+    id: 'reports',
+    label: 'Reports',
+    hint: 'All reports in one place',
+    href: '/reports',
+    icon: '📈',
+    group: 'Reports',
+    keywords: ['reports', 'report', 'all reports', 'analytics', 'statements'],
+  },
+  {
     id: 'invoice-pack',
     label: 'Invoice Pack (bulk print)',
     hint: 'Print many invoices at once',
@@ -303,6 +312,33 @@ export const COMMANDS = [
     keywords: ['invoice number', 'bill number', 'numbering', 'series', 'prefix', 'renumber'],
   },
   {
+    id: 'purchase-numbers',
+    label: 'Purchase Numbering',
+    hint: 'Fix or change purchase bill number series',
+    href: '/purchases/number-updater',
+    icon: '🔢',
+    group: 'Manage',
+    keywords: ['purchase number', 'purchase numbering', 'purchase series', 'purchase prefix', 'renumber purchase', 'purchase bill number'],
+  },
+  {
+    id: 'files',
+    label: 'Files',
+    hint: 'Upload and manage shop files',
+    href: '/files',
+    icon: '📁',
+    group: 'Manage',
+    keywords: ['files', 'file', 'documents', 'upload', 'attachments', 'storage', 'download', 'zip'],
+  },
+  {
+    id: 'superadmin',
+    label: 'Superadmin Panel',
+    hint: 'Platform administration',
+    href: '/superadmin',
+    icon: '🛡️',
+    group: 'Manage',
+    keywords: ['superadmin', 'super admin', 'admin', 'admin panel', 'platform admin', 'shops'],
+  },
+  {
     id: 'settings',
     label: 'Settings',
     hint: 'Shop details, GSTIN, printing',
@@ -317,9 +353,71 @@ function normalize(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
 }
 
+/** Typos tolerated for a word of the given length. Short words get no slack. */
+function allowedTypos(length) {
+  if (length <= 3) return 0
+  if (length <= 5) return 1
+  return 2
+}
+
+/**
+ * Levenshtein distance, abandoned early once it is certain to exceed `max`.
+ * Returns `max + 1` when the words are further apart than that.
+ */
+function boundedEditDistance(a, b, max) {
+  if (a === b) return 0
+  if (Math.abs(a.length - b.length) > max) return max + 1
+
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i)
+  for (let i = 1; i <= a.length; i += 1) {
+    const row = [i]
+    let rowBest = i
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      row[j] = Math.min(row[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost)
+      if (row[j] < rowBest) rowBest = row[j]
+    }
+    if (rowBest > max) return max + 1
+    prev = row
+  }
+  return prev[b.length]
+}
+
+/**
+ * True when `token` is a near miss for any word in `haystack` — either a close
+ * whole word ("supplir" / "supplier") or a close prefix ("purchse" / "purchases").
+ */
+function fuzzyTokenMatch(token, haystack) {
+  if (token.length < 3) return false
+  const budget = allowedTypos(token.length)
+  if (!budget) return false
+
+  return haystack.split(' ').some((word) => {
+    if (word.includes(token)) return true
+    if (boundedEditDistance(token, word, budget) <= budget) return true
+    // Compare against a same-length prefix so a typo in a long word still lands.
+    if (word.length > token.length) {
+      const prefix = word.slice(0, token.length)
+      return boundedEditDistance(token, prefix, budget) <= budget
+    }
+    return false
+  })
+}
+
+/** True when every character of `query` appears in `text` in order. */
+function isSubsequence(query, text) {
+  let cursor = 0
+  for (const char of text) {
+    if (char === query[cursor]) cursor += 1
+    if (cursor === query.length) return true
+  }
+  return cursor === query.length
+}
+
 /**
  * Scores a command against the query. Higher is better, 0 means no match.
  * Matching is token based so "purchase add" finds "Add Purchase Bill" too.
+ * Exact matches always outrank the fuzzy fallbacks below them.
  */
 function scoreCommand(command, query) {
   const haystacks = [normalize(command.label), ...command.keywords.map(normalize)]
@@ -346,13 +444,34 @@ function scoreCommand(command, query) {
   // "purchase report" still resolves when the words live in different entries.
   const combined = haystacks.join(' ')
   if (tokens.every((token) => combined.includes(token))) return 150
+
+  // Typo tolerance. Scored below every exact tier so correct spellings keep
+  // their ranking and nothing that already matched is displaced. A fuzzy hit on
+  // the label outranks one that only landed on a keyword.
+  haystacks.forEach((haystack, index) => {
+    if (tokens.every((token) => fuzzyTokenMatch(token, haystack))) {
+      best = Math.max(best, index === 0 ? 130 : 120)
+    }
+  })
+  if (best) return best
+
+  if (tokens.every((token) => fuzzyTokenMatch(token, combined))) return 90
+
+  // Initials and dropped letters: "qkadd" or "prchs" still reach their command.
+  if (query.replace(/ /g, '').length >= 3) {
+    const squashedQuery = query.replace(/ /g, '')
+    for (const haystack of haystacks) {
+      if (isSubsequence(squashedQuery, haystack.replace(/ /g, ''))) return 60
+    }
+  }
+
   return 0
 }
 
 export function searchCommands(rawQuery, limit = 12) {
   const query = normalize(rawQuery)
   if (!query) {
-    return COMMANDS.filter((command) => ['new-invoice', 'new-purchase', 'new-product', 'search-invoice', 'gst-summary', 'price-check', 'credit-book', 'search-supplier'].includes(command.id))
+    return COMMANDS.filter((command) => ['new-invoice', 'new-purchase', 'quick-add-products', 'new-product', 'search-invoice', 'gst-summary', 'price-check', 'credit-book', 'search-supplier'].includes(command.id))
   }
 
   return COMMANDS

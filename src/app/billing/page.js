@@ -111,7 +111,12 @@ function getProfitPreview(item) {
   const effectiveSellingPrice = total / quantity
   const profitPerUnit = effectiveSellingPrice - purchasePrice
   const totalProfit = profitPerUnit * quantity
-  const marginPct = (profitPerUnit / effectiveSellingPrice) * 100
+
+  // Margin is measured against the printed MRP (the shop's reference price),
+  // falling back to the actual selling price when no MRP is recorded.
+  const mrpPerUnit = parseFloat(item.mrp)
+  const marginBase = Number.isFinite(mrpPerUnit) && mrpPerUnit > 0 ? mrpPerUnit : effectiveSellingPrice
+  const marginPct = (profitPerUnit / marginBase) * 100
 
   return {
     totalProfit,
@@ -2447,7 +2452,7 @@ export default function BillingPage() {
                         }
                       }}
                       className="w-full border rounded px-1 py-0.5 text-center"
-                      min="0" step="0.001"
+                      min="0" step="1" inputMode="decimal"
                     />
                   </td>
 
@@ -2535,7 +2540,7 @@ export default function BillingPage() {
                         <span>Cost {fmt(profitPreview.totalCost)}</span>
                         <span>·</span>
                         <span>{profitPreview.isLoss ? 'Loss' : 'Profit'} {fmt(Math.abs(profitPreview.totalProfit))}</span>
-                        <span>({profitPreview.marginPct.toFixed(1)}%)</span>
+                        <span title="Margin on MRP">({profitPreview.marginPct.toFixed(1)}%)</span>
                       </div>
                     )}
                   </td>

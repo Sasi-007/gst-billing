@@ -977,7 +977,7 @@ export default function NewPurchasePage() {
                       onChange={e => updateItem(i, 'quantity', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`rate-${i}`) } }}
-                      className="w-full border rounded px-1 py-0.5 text-center" min="0" step="0.001" />
+                      className="w-full border rounded px-1 py-0.5 text-center" min="0" step="1" inputMode="decimal" />
                   </td>
                   <td className="px-1 py-1 text-center text-xs text-gray-500">{item.unit}</td>
                   <td className="px-1 py-1">

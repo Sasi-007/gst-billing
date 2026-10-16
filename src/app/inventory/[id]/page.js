@@ -775,7 +775,7 @@ export default function ProductFormPage() {
             <input
               value={form.stock_qty ?? ''}
               onChange={e => set('stock_qty', e.target.value)}
-              type="number" min="0" step="0.001"
+              type="number" min="0" step="1" inputMode="decimal"
               className="w-full border rounded-lg px-3 py-2 text-sm"
             />
             {isNew && (

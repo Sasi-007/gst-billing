@@ -443,6 +443,7 @@ body {
   .invoice .inv-table .tr {
     text-align: right;
   }
+}
 
   /* ── Totals section ── */
 
@@ -535,4 +536,15 @@ body {
     font-size: 10px;
   }
 
+/* Numeric entry cells in dense tables: the native spinner steals ~17px of an
+   already narrow column and overlaps right-aligned values. */
+.no-spinner::-webkit-outer-spin-button,
+.no-spinner::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.no-spinner {
+  -moz-appearance: textfield;
+  appearance: textfield;
 }

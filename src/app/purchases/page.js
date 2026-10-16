@@ -530,7 +530,92 @@ export default function PurchasesPage() {
       ) : bills.length === 0 ? (
         <div className="text-center text-gray-400 py-10">No purchases in this period</div>
       ) : (
-        <div className="bg-white rounded-xl border overflow-x-auto">
+        <div className="bg-white rounded-xl border">
+          {/* Mobile: card per bill, keeping select + inline payment */}
+          <div className="md:hidden divide-y">
+            {sortedBills.map(b => (
+              <div key={b.id} className="p-3">
+                <div className="flex items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={selectedBillIds.includes(b.id)}
+                    onChange={(e) => handleToggleBillSelection(b.id, e.target.checked)}
+                    className="mt-1 h-4 w-4 shrink-0"
+                    aria-label={`Select purchase ${b.bill_no}`}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <Link href={`/purchases/${b.id}`} className="font-mono font-medium text-blue-700 break-all">
+                          {b.bill_no}
+                        </Link>
+                        <div className="text-xs text-gray-600 truncate">{b.suppliers?.name || '—'}</div>
+                        <div className="text-xs text-gray-400">
+                          {new Date(b.date+'T00:00:00').toLocaleDateString('en-IN')}
+                          {b.supplier_invoice_no ? ` · Inv ${b.supplier_invoice_no}` : ''}
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="font-semibold">{fmt(b.total)}</div>
+                        <span className={`inline-block mt-0.5 px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                          b.payment_status === 'paid'    ? 'bg-green-100 text-green-700'
+                          : b.payment_status === 'partial' ? 'bg-yellow-100 text-yellow-700'
+                          : 'bg-red-100 text-red-700'
+                        }`}>{b.payment_status}</span>
+                      </div>
+                    </div>
+
+                    <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-xs text-gray-600">
+                      <span>Subtotal <b className="font-medium">{fmt(b.subtotal)}</b></span>
+                      <span>GST <b className="font-medium">{fmt(b.gst_amount)}</b></span>
+                      <span className="text-green-700">Paid <b className="font-medium">{fmt(b.paid_amount)}</b></span>
+                      <span className={getDueAmount(b) > 0 ? 'text-red-600' : 'text-gray-400'}>
+                        Due <b className="font-medium">{fmt(getDueAmount(b))}</b>
+                      </span>
+                    </div>
+
+                    <div className="mt-2 flex flex-wrap items-center gap-2 border-t pt-2">
+                      <select
+                        value={String(paymentModes[b.id] || b.payment_mode || 'credit').toLowerCase()}
+                        onChange={(e) => setPaymentModes((prev) => ({ ...prev, [b.id]: e.target.value }))}
+                        className="border rounded px-2 py-1 text-xs bg-white"
+                      >
+                        {PAYMENT_MODES.map((mode) => (
+                          <option key={mode} value={mode.toLowerCase()}>{mode}</option>
+                        ))}
+                      </select>
+                      {getDueAmount(b) > 0 ? (
+                        <>
+                          <input
+                            type="number"
+                            value={paymentDrafts[b.id] ?? ''}
+                            onChange={(e) => setPaymentDrafts((prev) => ({ ...prev, [b.id]: e.target.value }))}
+                            placeholder="Paid now"
+                            className="w-24 border rounded px-2 py-1 text-xs"
+                            min="0"
+                            step="0.01"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleRecordPayment(b)}
+                            disabled={updatingBillId === b.id}
+                            className="px-2 py-1 rounded bg-green-600 text-white text-xs hover:bg-green-700 disabled:opacity-60"
+                          >
+                            {updatingBillId === b.id ? 'Saving…' : 'Record'}
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-xs text-gray-400">Settled</span>
+                      )}
+                      <Link href={`/purchases/${b.id}`} className="ml-auto text-blue-600 text-xs">View</Link>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="hidden md:block overflow-x-auto">
           <table className="w-full min-w-[700px] text-sm">
             <thead>
               <tr className="bg-gray-50 text-gray-600 text-xs border-b">
@@ -639,6 +724,7 @@ export default function PurchasesPage() {
               ))}
             </tbody>
           </table>
+          </div>
           <div className="px-3 py-2 text-xs text-gray-400">{bills.length} purchases</div>
         </div>
       )}

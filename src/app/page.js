@@ -259,7 +259,36 @@ export default function DashboardPage() {
           <h2 className="font-semibold text-sm text-gray-700">Recent Bills</h2>
           <Link href="/reports" className="text-xs text-blue-600 hover:underline">All reports</Link>
         </div>
-        <div className="overflow-x-auto">
+        {/* Mobile: card per bill */}
+        <div className="md:hidden divide-y">
+          {recentBills.length === 0 ? (
+            <div className="px-4 py-4 text-center text-gray-400 text-sm">No bills yet</div>
+          ) : recentBills.map(b => (
+            <div key={b.id} className="px-4 py-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <Link href={`/billing/${b.id}`} className="font-mono font-medium text-blue-700 break-all">
+                    {b.bill_no}
+                  </Link>
+                  <div className="text-xs text-gray-600 truncate">{b.customer_name || 'Walk-in'}</div>
+                  <div className="text-xs text-gray-400">
+                    {new Date(b.date+'T00:00:00').toLocaleDateString('en-IN')} · <span className="capitalize">{b.payment_mode}</span>
+                  </div>
+                </div>
+                <div className="text-right shrink-0">
+                  <div className="font-medium">{fmt(b.total)}</div>
+                  <span className={`inline-block mt-0.5 px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                    b.payment_status === 'paid'    ? 'bg-green-100 text-green-700'
+                    : b.payment_status === 'partial' ? 'bg-yellow-100 text-yellow-700'
+                    : 'bg-red-100 text-red-700'
+                  }`}>{b.payment_status}</span>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="hidden md:block overflow-x-auto">
         <table className="w-full min-w-[560px] text-sm">
           <thead>
             <tr className="text-xs text-gray-500 border-b bg-gray-50">

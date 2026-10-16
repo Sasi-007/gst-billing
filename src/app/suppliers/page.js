@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import Link from 'next/link'
 import { supabase } from '../../lib/supabase'
 import { fmt } from '../../lib/gst'
@@ -27,6 +27,7 @@ export default function SuppliersPage() {
   const [form,      setForm]      = useState(blank)
   const [editId,    setEditId]    = useState(null)
   const [saving,    setSaving]    = useState(false)
+  const formRef = useRef(null)
   usePageLoadingState('suppliers-page', loading)
 
   const load = useCallback(async () => {
@@ -83,6 +84,12 @@ export default function SuppliersPage() {
   function startEdit(s) { setEditId(s.id); setForm({ ...s }) }
   function cancelEdit() { setEditId(null); setForm(blank) }
 
+  // On phones the form sits below the list, so bring it into view when opened.
+  function scrollToForm() {
+    if (window.matchMedia('(min-width: 1024px)').matches) return
+    setTimeout(() => formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 50)
+  }
+
   async function save() {
     if (!form.name.trim()) return
     setSaving(true)
@@ -114,26 +121,26 @@ export default function SuppliersPage() {
   )
 
   return (
-    <div className="p-4 flex gap-4">
+    <div className="p-3 sm:p-4 flex flex-col lg:flex-row gap-4">
       {/* Left: list */}
-      <div className="flex-1">
-        <div className="flex items-center justify-between mb-3">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center justify-between gap-2 mb-3">
           <h1 className="text-xl font-bold">Suppliers</h1>
-          <button onClick={() => { cancelEdit(); setForm(blank) }}
-            className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700">
-            + Add Supplier
+          <button onClick={() => { cancelEdit(); setForm(blank); scrollToForm() }}
+            className="px-3 sm:px-4 py-2 bg-blue-600 text-white rounded-lg text-sm whitespace-nowrap hover:bg-blue-700">
+            + Add <span className="hidden sm:inline">Supplier</span>
           </button>
         </div>
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <input value={search} onChange={e => setSearch(e.target.value)}
             placeholder="🔍 Search suppliers…"
-            className="border rounded-lg px-3 py-2 text-sm flex-1 min-w-48" />
+            className="border rounded-lg px-3 py-2 text-sm w-full sm:flex-1 sm:w-auto sm:min-w-48" />
           <span className="text-xs text-gray-500">Purchases from</span>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
-            className="border rounded-lg px-2 py-2 text-sm" />
+            className="border rounded-lg px-2 py-2 text-sm min-w-0 flex-1 sm:flex-none" />
           <span className="text-xs text-gray-500">to</span>
           <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
-            className="border rounded-lg px-2 py-2 text-sm" />
+            className="border rounded-lg px-2 py-2 text-sm min-w-0 flex-1 sm:flex-none" />
         </div>
         {search !== debouncedSearch && (
           <div className="mb-3 text-xs text-blue-600">Searching…</div>
@@ -144,8 +151,49 @@ export default function SuppliersPage() {
         ) : suppliers.length === 0 ? (
           <div className="text-center text-gray-400 py-8">No suppliers yet</div>
         ) : (
-          <div className="bg-white rounded-xl border overflow-x-auto">
-            <table className="w-full min-w-[820px] text-sm">
+          <>
+            {/* Mobile: card per supplier — a 8-column table cannot fit a phone */}
+            <div className="md:hidden space-y-2">
+              {suppliers.map(s => {
+                const stats = statsBySupplier.get(s.id) || { bills: 0, purchased: 0, paid: 0, lastDate: '' }
+                const outstanding = stats.purchased - stats.paid
+                return (
+                  <div key={s.id} className="bg-white rounded-xl border p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <Link href={`/suppliers/${s.id}`} className="font-medium text-blue-600 break-words">{s.name}</Link>
+                        {s.contact_person && <div className="text-xs text-gray-400">{s.contact_person}</div>}
+                        {s.phone && <div className="text-xs text-gray-500">📞 {s.phone}</div>}
+                        {s.gstin && <div className="text-xs text-gray-500 font-mono break-all">{s.gstin}</div>}
+                      </div>
+                      <div className="text-right shrink-0">
+                        <div className="text-sm font-semibold text-blue-700">{fmt(stats.purchased)}</div>
+                        <div className="text-[11px] text-gray-400">{stats.bills} bill{stats.bills === 1 ? '' : 's'}</div>
+                      </div>
+                    </div>
+
+                    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                      <span className={outstanding > 0 ? 'text-red-600 font-medium' : 'text-gray-400'}>
+                        Outstanding {fmt(outstanding)}
+                      </span>
+                      <span className="text-gray-500">
+                        Last {stats.lastDate ? new Date(`${stats.lastDate}T00:00:00`).toLocaleDateString('en-IN') : '—'}
+                      </span>
+                    </div>
+
+                    <div className="mt-2 flex gap-4 border-t pt-2 text-xs">
+                      <Link href={`/suppliers/${s.id}`} className="text-indigo-600">Summary</Link>
+                      <button onClick={() => { startEdit(s); scrollToForm() }} className="text-blue-600">Edit</button>
+                      <button onClick={() => deactivate(s.id)} className="text-red-500 ml-auto">Remove</button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            {/* Desktop: full table */}
+            <div className="hidden md:block bg-white rounded-xl border overflow-x-auto">
+              <table className="w-full min-w-[820px] text-sm">
               <thead>
                 <tr className="bg-gray-50 text-gray-600 text-xs border-b">
                   {['Name','Phone','GSTIN','Bills','Purchased','Outstanding','Last Purchase',''].map(h => (
@@ -186,30 +234,31 @@ export default function SuppliersPage() {
                 })}
               </tbody>
             </table>
-          </div>
+            </div>
+          </>
         )}
       </div>
 
-      {/* Right: form */}
-      <div className="w-72 flex-shrink-0">
+      {/* Right on desktop, below the list on mobile */}
+      <div ref={formRef} className="w-full lg:w-72 lg:flex-shrink-0">
         <div className="bg-white rounded-xl border p-4">
           <h2 className="font-semibold text-sm mb-3">{editId ? 'Edit Supplier' : 'New Supplier'}</h2>
-          <div className="space-y-2">
-            <div>
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-1">
+            <div className="col-span-2 lg:col-span-1">
               <label className="block text-xs text-gray-500 mb-0.5">Name *</label>
-              <input autoFocus value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
+              <input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
                 className="w-full border rounded px-2 py-1.5 text-sm" placeholder="Supplier name" />
             </div>
             {f('Contact Person', 'contact_person')}
             {f('Phone', 'phone', { type: 'tel' })}
             {f('Email', 'email', { type: 'email' })}
-            <div>
+            <div className="col-span-2 lg:col-span-1">
               <label className="block text-xs text-gray-500 mb-0.5">GSTIN</label>
               <input value={form.gstin ?? ''} maxLength={15}
                 onChange={e => setForm(p => ({ ...p, gstin: e.target.value.toUpperCase().slice(0, 15) }))}
                 className="w-full border rounded px-2 py-1.5 text-sm font-mono uppercase" />
             </div>
-            {f('Address', 'address')}
+            <div className="col-span-2 lg:col-span-1">{f('Address', 'address')}</div>
             {f('City', 'city')}
             {f('State', 'state')}
             {f('Pincode', 'pincode')}
