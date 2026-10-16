@@ -123,10 +123,12 @@ export default function NewPurchasePage() {
 
   const [items,      setItems]     = useState([emptyItem()])
   const [suppId,     setSuppId]    = useState('')
+  const [supplierAutoFilled, setSupplierAutoFilled] = useState(false)
   const [suppInv,    setSuppInv]   = useState('')
   const [date,       setDate]      = useState(todayStr())
-  const [payMode,    setPayMode]   = useState('Credit')
+  const [payMode,    setPayMode]   = useState('Cash')
   const [paidAmt,    setPaidAmt]   = useState('')
+  const [paidAmtTouched, setPaidAmtTouched] = useState(false)
   const [notes,      setNotes]     = useState('')
   const [isInterstate, setIsInterstate] = useState(false)
   const [roundOff,   setRoundOff]  = useState('')
@@ -191,6 +193,7 @@ export default function NewPurchasePage() {
       setDate(b.date || todayStr())
       setPayMode(b.payment_mode ? b.payment_mode.charAt(0).toUpperCase() + b.payment_mode.slice(1) : 'Credit')
       setPaidAmt(String(b.paid_amount ?? ''))
+      setPaidAmtTouched(true)
       setNotes(b.notes || '')
       setIsInterstate(!!b.is_interstate)
       setRoundOff(b.round_off_amount ? String(b.round_off_amount) : '')
@@ -371,6 +374,10 @@ export default function NewPurchasePage() {
       })
       return n
     })
+    if (product.supplier_id && !suppId) {
+      setSuppId(product.supplier_id)
+      setSupplierAutoFilled(true)
+    }
     setSearchOpen(false)
     focusId(`qty-${activeRow}`)
   }
@@ -465,11 +472,11 @@ export default function NewPurchasePage() {
       if (shop?.id && (names.length > 0 || hsnCodes.length > 0) && isOnline()) {
         const [{ data: nameRows, error: nameErr }, { data: hsnRows, error: hsnErr }] = await Promise.all([
           names.length > 0
-            ? supabase.from('products').select('id,name,hsn_code,unit,purchase_price,mrp,gst_rate')
+            ? supabase.from('products').select('id,name,hsn_code,unit,purchase_price,mrp,gst_rate,supplier_id')
               .eq('shop_id', shop.id).in('name', names)
             : Promise.resolve({ data: [] }),
           hsnCodes.length > 0
-            ? supabase.from('products').select('id,name,hsn_code,unit,purchase_price,mrp,gst_rate')
+            ? supabase.from('products').select('id,name,hsn_code,unit,purchase_price,mrp,gst_rate,supplier_id')
               .eq('shop_id', shop.id).in('hsn_code', hsnCodes)
             : Promise.resolve({ data: [] }),
         ])
@@ -507,6 +514,7 @@ export default function NewPurchasePage() {
         return recalc({
           ...emptyItem(),
           product_id: product?.id || null,
+          supplier_id: product?.supplier_id || null,
           product_name: productName || product?.name || '',
           hsn_code: row.hsn_code || row.hsn || product?.hsn_code || '',
           unit: row.unit || product?.unit || 'pcs',
@@ -527,6 +535,13 @@ export default function NewPurchasePage() {
 
       setItems(imported)
       setActiveRow(0)
+      if (!suppId) {
+        const matchedSupplierId = imported.map((item) => item.supplier_id).find(Boolean)
+        if (matchedSupplierId) {
+          setSuppId(matchedSupplierId)
+          setSupplierAutoFilled(true)
+        }
+      }
       const unmatchedCount = imported.filter((item) => !item.product_id).length
       const hsnNote = hsnFallbackCount ? ` (${hsnFallbackCount} matched by HSN code)` : ''
       showToast(`Imported ${imported.length} item${imported.length === 1 ? '' : 's'}${unmatchedCount ? ` (${unmatchedCount} not matched to inventory)` : ''}${hsnNote}`)
@@ -539,6 +554,16 @@ export default function NewPurchasePage() {
   const totals = calcBillTotals(filledItems)
   const roundOffAmount = parseFloat(roundOff) || 0
   const grandTotal = Math.round((totals.total + roundOffAmount) * 100) / 100
+
+  // Default new purchases to fully paid in cash; stops auto-filling once edited manually
+  useEffect(() => {
+    if (paidAmtTouched) return
+    if (payMode === 'Credit') {
+      setPaidAmt('')
+      return
+    }
+    setPaidAmt(grandTotal > 0 ? String(grandTotal) : '')
+  }, [grandTotal, payMode, paidAmtTouched])
 
   // ── AI scan apply ─────────────────────────────────────────────────────────
   function handleScanApply(scanResult) {
@@ -816,11 +841,17 @@ export default function NewPurchasePage() {
         <div className="bg-white border-b px-4 py-2 flex flex-wrap gap-3 flex-shrink-0">
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-400">Supplier:</span>
-            <select value={suppId} onChange={e => setSuppId(e.target.value)}
+            <select value={suppId}
+              onChange={e => { setSuppId(e.target.value); setSupplierAutoFilled(false) }}
               className="border rounded px-2 py-1 text-sm w-48">
               <option value="">— Walk-in / Unknown —</option>
               {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
+            {supplierAutoFilled && (
+              <span className="text-[11px] text-green-700 bg-green-50 border border-green-200 rounded px-1.5 py-0.5">
+                Auto-filled from product
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-gray-400">Supplier Invoice No:</span>
@@ -1031,7 +1062,8 @@ export default function NewPurchasePage() {
               </div>
               <div>
                 <div className="text-xs text-gray-500 mb-0.5">Paid Now ₹</div>
-                <input type="number" value={paidAmt} onChange={e => setPaidAmt(e.target.value)}
+                <input type="number" value={paidAmt}
+                  onChange={e => { setPaidAmtTouched(true); setPaidAmt(e.target.value) }}
                   placeholder="0" className="border rounded px-2 py-1 text-sm w-28" />
               </div>
               <button onClick={handleSave} disabled={saving}

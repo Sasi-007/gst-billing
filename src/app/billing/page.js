@@ -1999,6 +1999,7 @@ export default function BillingPage() {
           onSelect={handleProductSelect}
           onAddFreeText={handleFreeTextItem}
           onClose={() => setSearchOpen(false)}
+          showSuggestions
         />
       )}
 

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useRouter, useParams, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt, GST_RATES } from '@/lib/gst'
@@ -70,6 +70,7 @@ export default function ProductFormPage() {
   const [newCatName, setNewCatName] = useState('')
   const [addingCat,  setAddingCat]  = useState(false)
   const [suppliers, setSuppliers] = useState([])
+  const [brands, setBrands] = useState([])
   const [saving,    setSaving]    = useState(false)
   const [error,     setError]     = useState('')
   const [recentPurchases, setRecentPurchases] = useState([])
@@ -80,8 +81,50 @@ export default function ProductFormPage() {
   const [localNameSuggestions, setLocalNameSuggestions] = useState([])
   const [suggestionLoading, setSuggestionLoading] = useState(false)
   const [hsnGstSuggestion, setHsnGstSuggestion] = useState(null)
+  const [similarProducts, setSimilarProducts] = useState([])
+  const [similarLoading, setSimilarLoading] = useState(false)
+  const [dismissedSimilar, setDismissedSimilar] = useState(false)
   const debouncedHsnCode = useDebouncedValue(form.hsn_code, 400)
+  const debouncedProductName = useDebouncedValue(form.name, 350)
   const { shop } = useShop()
+
+  const exactDuplicate = useMemo(() => {
+    const term = String(form.name || '').trim().toLowerCase()
+    if (!term) return null
+    return similarProducts.find((product) => String(product.name || '').trim().toLowerCase() === term) || null
+  }, [form.name, similarProducts])
+
+  useEffect(() => {
+    const term = String(debouncedProductName || '').trim()
+    if (!shop?.id || term.length < 3) {
+      setSimilarProducts([])
+      return
+    }
+
+    let cancelled = false
+    async function loadSimilarProducts() {
+      const tokens = [...new Set(term.split(/[^\p{L}\p{N}]+/u).filter((token) => token.length >= 3))].slice(0, 3)
+      const filters = [...new Set([term, ...tokens])].map((value) => `name.ilike.%${value}%`)
+      setSimilarLoading(true)
+      try {
+        const { data } = await supabase
+          .from('products')
+          .select('id,name,unit,mrp,selling_price,stock_qty,is_active')
+          .eq('shop_id', shop.id)
+          .or(filters.join(','))
+          .order('name')
+          .limit(8)
+        if (!cancelled) setSimilarProducts((data || []).filter((product) => product.id !== id))
+      } catch {
+        if (!cancelled) setSimilarProducts([])
+      } finally {
+        if (!cancelled) setSimilarLoading(false)
+      }
+    }
+
+    loadSimilarProducts()
+    return () => { cancelled = true }
+  }, [debouncedProductName, id, shop?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -99,6 +142,21 @@ export default function ProductFormPage() {
       .eq('shop_id', shop.id)
       .order('name')
       .then(({ data }) => setCats(data || []))
+  }
+
+  function loadBrands() {
+    if (!shop?.id) return
+    supabase
+      .from('products')
+      .select('brand')
+      .eq('shop_id', shop.id)
+      .not('brand', 'is', null)
+      .then(({ data }) => {
+        const unique = [...new Set((data || [])
+          .map((row) => String(row.brand || '').trim())
+          .filter(Boolean))]
+        setBrands(unique.sort((a, b) => a.localeCompare(b)))
+      })
   }
 
   async function addCategoryInline() {
@@ -127,6 +185,7 @@ export default function ProductFormPage() {
     let cancelled = false
 
     loadCats()
+    loadBrands()
     supabase.from('suppliers').select('id,name').eq('is_active',true).order('name').then(({ data }) => setSuppliers(data || []))
 
     async function loadRecentPurchases(productId) {
@@ -362,6 +421,14 @@ export default function ProductFormPage() {
   async function submit(e) {
     e.preventDefault()
     setError('')
+
+    if (isNew && exactDuplicate) {
+      const proceed = window.confirm(
+        `“${exactDuplicate.name}” already exists in inventory. Adding it again creates a duplicate product. Add anyway?`
+      )
+      if (!proceed) return
+    }
+
     setSaving(true)
 
     const purchasePrice = parseFloat(form.purchase_price) || 0
@@ -435,9 +502,46 @@ export default function ProductFormPage() {
           {/* Name (full width) */}
           <div className="col-span-2">
             <label className="block text-xs font-medium text-gray-600 mb-1">Product Name *</label>
-            <input autoFocus required value={form.name} onChange={e => set('name', e.target.value)}
+            <input autoFocus required value={form.name}
+              onChange={e => { setDismissedSimilar(false); set('name', e.target.value) }}
               placeholder="e.g. Tata Salt 1kg"
               className="w-full border rounded-lg px-3 py-2 text-sm" />
+            {similarLoading && (
+              <div className="mt-1 text-xs text-gray-400">Checking existing products…</div>
+            )}
+            {!dismissedSimilar && !similarLoading && similarProducts.length > 0 && (
+              <div className={`mt-2 rounded-lg border p-2 ${
+                exactDuplicate ? 'border-red-200 bg-red-50' : 'border-amber-200 bg-amber-50'
+              }`}>
+                <div className="flex items-start justify-between gap-2">
+                  <div className={`text-xs font-medium ${exactDuplicate ? 'text-red-700' : 'text-amber-800'}`}>
+                    {exactDuplicate
+                      ? `“${exactDuplicate.name}” is already available in inventory`
+                      : 'Similar products already in inventory — check before adding a duplicate'}
+                  </div>
+                  <button type="button" onClick={() => setDismissedSimilar(true)}
+                    className="text-xs text-gray-400 hover:text-gray-600">Dismiss</button>
+                </div>
+                <ul className="mt-1 divide-y divide-white/70">
+                  {similarProducts.map((product) => (
+                    <li key={product.id} className="flex items-center justify-between gap-2 py-1 text-sm">
+                      <span className="truncate text-gray-800">
+                        {product.name}
+                        {product.is_active === false && <span className="ml-1 text-xs text-gray-400">(inactive)</span>}
+                      </span>
+                      <span className="flex items-center gap-2 whitespace-nowrap text-xs text-gray-500">
+                        <span>Stock {Number(product.stock_qty || 0)} {product.unit || ''}</span>
+                        <span>MRP {fmt(product.mrp)}</span>
+                        <button type="button" onClick={() => router.push(`/inventory/${product.id}`)}
+                          className="rounded border bg-white px-2 py-0.5 font-medium text-blue-700 hover:bg-blue-50">
+                          Open
+                        </button>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
           <div className="col-span-2">
@@ -501,7 +605,23 @@ export default function ProductFormPage() {
           </div>
 
           {field('Barcode', 'barcode', { placeholder:'Scan or type', className:'w-full border rounded-lg px-3 py-2 text-sm font-mono' })}
-          {field('Brand', 'brand', { placeholder:'e.g. Tata, Amul' })}
+          {/* Brand — pick an existing brand or type a new one */}
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">Brand</label>
+            <input
+              list="product-brand-options"
+              value={form.brand ?? ''}
+              onChange={e => set('brand', e.target.value)}
+              placeholder="Pick existing or type new"
+              className="w-full border rounded-lg px-3 py-2 text-sm"
+            />
+            <datalist id="product-brand-options">
+              {brands.map((brand) => <option key={brand} value={brand} />)}
+            </datalist>
+            {form.brand && !brands.some((brand) => brand.toLowerCase() === String(form.brand).toLowerCase()) && (
+              <p className="mt-1 text-xs text-blue-600">New brand — will be created when saved.</p>
+            )}
+          </div>
 
           {/* Category */}
           <div>

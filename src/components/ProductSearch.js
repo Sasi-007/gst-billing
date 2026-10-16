@@ -8,7 +8,7 @@ import { loadProductSnapshot, saveProductSnapshot } from '@/lib/offlineBilling'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { getProductSubtitle } from '@/lib/productNames'
 
-const PRODUCT_SEARCH_COLUMNS = 'id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,is_active,search_text'
+const PRODUCT_SEARCH_COLUMNS = 'id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,supplier_id,is_active,search_text'
 const PRODUCT_SEARCH_LIMIT = 50
 
 function tokenizeProductSearch(product) {
@@ -36,10 +36,13 @@ function matchesProductSearch(product, query, terms) {
  *   onSelect(product)    — inventory product picked
  *   onAddFreeText(name)  — item not in inventory; add as free-text line
  *   onClose()
+ *   showSuggestions      — when true, show 3 random in-stock products before typing
  */
-export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
+export default function ProductSearch({ onSelect, onAddFreeText, onClose, showSuggestions = false }) {
   const [query,   setQuery]   = useState('')
   const [results, setResults] = useState([])
+  const [suggestions, setSuggestions] = useState([])
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false)
   const [cursor,  setCursor]  = useState(0)
   const [loading, setLoading] = useState(false)
   const [purchaseHints, setPurchaseHints] = useState({})
@@ -76,10 +79,89 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
   }, [shop?.id])
 
   useEffect(() => {
+    if (!showSuggestions || !shop?.id) return
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return
+
+    let cancelled = false
+
+    async function loadRandomSuggestions() {
+      setSuggestionsLoading(true)
+      try {
+        // Items billed on the last 2 invoices are skipped so the shortcut keeps
+        // surfacing products the counter has not just sold.
+        const { data: recentBills } = await supabase
+          .from('bills')
+          .select('id')
+          .eq('shop_id', shop.id)
+          .eq('bill_type', 'invoice')
+          .order('created_at', { ascending: false })
+          .limit(2)
+
+        const recentBillIds = (recentBills || []).map((bill) => bill.id).filter(Boolean)
+        let excludedIds = []
+        if (recentBillIds.length) {
+          const { data: recentItems } = await supabase
+            .from('bill_items')
+            .select('product_id')
+            .eq('shop_id', shop.id)
+            .in('bill_id', recentBillIds)
+          excludedIds = [...new Set((recentItems || []).map((item) => item.product_id).filter(Boolean))]
+        }
+
+        const buildQuery = (selectArgs) => {
+          let q = supabase
+            .from('products')
+            .select(...selectArgs)
+            .eq('shop_id', shop.id)
+            .eq('is_active', true)
+            .gt('stock_qty', 0)
+          if (excludedIds.length) q = q.not('id', 'in', `(${excludedIds.join(',')})`)
+          return q
+        }
+
+        const { count, error: countErr } = await buildQuery([ 'id', { count: 'exact', head: true } ])
+        if (countErr) throw countErr
+        if (cancelled) return
+
+        const total = Number(count || 0)
+        if (total <= 0) {
+          setSuggestions([])
+          return
+        }
+
+        const wanted = Math.min(3, total)
+        const offsets = new Set()
+        while (offsets.size < wanted) offsets.add(Math.floor(Math.random() * total))
+
+        const picked = await Promise.all([...offsets].map(async (offset) => {
+          const { data } = await buildQuery([PRODUCT_SEARCH_COLUMNS])
+            .order('id')
+            .range(offset, offset)
+          return data?.[0] || null
+        }))
+
+        if (cancelled) return
+        const rows = picked.filter(Boolean)
+        setSuggestions(rows)
+        loadPurchaseHints(rows)
+      } catch {
+        if (!cancelled) setSuggestions([])
+      } finally {
+        if (!cancelled) setSuggestionsLoading(false)
+      }
+    }
+
+    loadRandomSuggestions()
+    return () => { cancelled = true }
+  }, [shop?.id, showSuggestions]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
     const q = query.trim().toLowerCase()
     if (!q) {
       setResults([])
-      setPurchaseHints({})
+      setCursor(0)
+      if (suggestions.length) loadPurchaseHints(suggestions)
+      else setPurchaseHints({})
       return
     }
 
@@ -100,7 +182,6 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     const q = debouncedQuery.trim().toLowerCase()
     if (!q) {
       setResults([])
-      setPurchaseHints({})
       setLoading(false)
       return
     }
@@ -260,13 +341,16 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     itemRefs.current[cursor]?.scrollIntoView({ block: 'nearest' })
   }, [cursor])
 
+  const trimmed = query.trim()
+  const visibleRows = trimmed ? results : suggestions
+
   function handleKey(e) {
-    if (e.key === 'ArrowDown') { e.preventDefault(); setCursor(c => Math.min(c + 1, results.length - 1)) }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setCursor(c => Math.min(c + 1, visibleRows.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setCursor(c => Math.max(c - 1, 0)) }
     else if (e.key === 'Enter') {
       e.preventDefault()
-      if (results.length > 0) {
-        onSelect(resolveSelectedProduct(results[cursor]))
+      if (visibleRows.length > 0) {
+        onSelect(resolveSelectedProduct(visibleRows[cursor]))
       } else if (query.trim() && onAddFreeText) {
         // Enter with no results → add as free-text
         onAddFreeText(query.trim())
@@ -296,8 +380,6 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
     if (Number.isInteger(value)) return String(value)
     return value.toFixed(3).replace(/\.?0+$/, '')
   }
-
-  const trimmed = query.trim()
 
   return (
     <div
@@ -331,7 +413,17 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
         {/* Results list — capped to the visible area so the on-screen
             keyboard never hides the whole list on phones */}
         <div className="max-h-[45vh] sm:max-h-72 overflow-y-auto overscroll-contain">
-          {!trimmed && (
+          {!trimmed && showSuggestions && suggestionsLoading && (
+            <div className="px-4 py-5 text-center text-gray-400 text-sm">Picking suggestions…</div>
+          )}
+
+          {!trimmed && suggestions.length > 0 && (
+            <div className="px-4 pt-3 pb-1 text-xs font-medium text-gray-500">
+              Suggestions · in stock, not on your last 2 invoices
+            </div>
+          )}
+
+          {!trimmed && !(showSuggestions && (suggestionsLoading || suggestions.length > 0)) && (
             <div className="px-4 py-5 text-center text-gray-400 text-sm">
               Start typing to search products
             </div>
@@ -372,7 +464,7 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose }) {
             </div>
           )}
 
-          {results.map((p, i) => {
+          {visibleRows.map((p, i) => {
           const hint = purchaseHints[p.id]
           const hasHistoryHint = Boolean(hint?.rate || hint?.mrp || hint?.supplierName || hint?.billDate)
           const stockQty = parseStockQty(p.stock_qty)

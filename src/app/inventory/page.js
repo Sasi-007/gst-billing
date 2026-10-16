@@ -568,6 +568,12 @@ export default function InventoryPage() {
             Categories
           </Link>
           <Link
+            href="/inventory/quick-add"
+            className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium"
+          >
+            ⚡ Quick Add
+          </Link>
+          <Link
             href="/inventory/new"
             className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
           >

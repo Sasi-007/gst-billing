@@ -34,6 +34,15 @@ export const COMMANDS = [
     keywords: ['add purchase', 'new purchase', 'create purchase', 'purchase entry', 'purchase bill', 'buy', 'inward', 'grn', 'stock in', 'supplier bill'],
   },
   {
+    id: 'quick-add-products',
+    label: 'Quick Add Products (bulk)',
+    hint: 'Add many products of one supplier in a single table',
+    href: '/inventory/quick-add',
+    icon: '⚡',
+    group: 'Create',
+    keywords: ['quick add', 'bulk add', 'add many products', 'multiple products', 'batch product entry', 'supplier products'],
+  },
+  {
     id: 'new-product',
     label: 'Add Product to Inventory',
     hint: 'Create a new inventory item',
