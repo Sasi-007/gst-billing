@@ -13,7 +13,7 @@ const STATES = [
 ]
 
 export default function SettingsPage() {
-  const { shop, setShop } = useShop()
+  const { shop, setShop, allShops } = useShop()
   const [form,   setForm]   = useState({
     name:'', address:'', city:'', state:'Tamil Nadu', state_code:'33',
     pincode:'', phone:'', email:'', gstin:'', footer_text:'Thank you for your business!',
@@ -29,6 +29,9 @@ export default function SettingsPage() {
   const [invoiceCounterNotice, setInvoiceCounterNotice] = useState('')
   const [resettingPurchaseCounter, setResettingPurchaseCounter] = useState(false)
   const [purchaseCounterNotice, setPurchaseCounterNotice] = useState('')
+  const [wiping, setWiping] = useState(false)
+  const [wipeProgress, setWipeProgress] = useState('')
+  const [wipeNotice, setWipeNotice] = useState('')
 
   // Load current shop data into form
   useEffect(() => {
@@ -234,6 +237,136 @@ export default function SettingsPage() {
     }
   }
 
+  async function syncPurchaseCounter() {
+    if (!shop?.id) return
+
+    setResettingPurchaseCounter(true)
+    setError('')
+    setWarning('')
+    setInvoiceCounterNotice('')
+    setPurchaseCounterNotice('')
+
+    try {
+      const prefix = form.purchase_prefix || shop.purchase_prefix || 'PUR'
+      const { data, error: lookupErr } = await supabase
+        .from('purchase_bills')
+        .select('bill_no')
+        .eq('shop_id', shop.id)
+      if (lookupErr) throw lookupErr
+
+      // Only numbers using the current prefix drive the counter; anything else
+      // (old prefixes, offline temp numbers) would push it to a wrong value.
+      const pattern = new RegExp(`^${prefix}-(\\d+)$`, 'i')
+      const highest = (data || []).reduce((max, row) => {
+        const match = pattern.exec(String(row.bill_no || '').trim())
+        return match ? Math.max(max, Number(match[1])) : max
+      }, 0)
+
+      await updateShopCounter({ purchase_counter: highest })
+      setSaved(true)
+      setPurchaseCounterNotice(
+        highest > 0
+          ? `Counter synced to ${highest}. Next purchase will be ${prefix}-${String(highest + 1).padStart(4, '0')}.`
+          : `No purchases found using the prefix "${prefix}". Counter set to 0, so the next purchase will be ${prefix}-0001.`,
+      )
+      setTimeout(() => setSaved(false), 3000)
+    } catch (syncErr) {
+      setError(syncErr.message)
+    } finally {
+      setResettingPurchaseCounter(false)
+    }
+  }
+
+  // Child rows are removed before their parents so foreign keys never block the
+  // delete. Mirrors the superadmin reset_shop_data order.
+  const WIPE_TABLES = [
+    ['bank_transactions', 'Bank transactions'],
+    ['owner_drawings', 'Drawings'],
+    ['investments', 'Investments'],
+    ['expenses', 'Expenses'],
+    ['credit_entries', 'Credit entries'],
+    ['credit_accounts', 'Credit accounts'],
+    ['bill_items', 'Invoice items'],
+    ['bills', 'Invoices'],
+    ['purchase_bill_items', 'Purchase items'],
+    ['purchase_bills', 'Purchases'],
+    ['products', 'Products'],
+    ['categories', 'Categories'],
+    ['suppliers', 'Suppliers'],
+    ['customers', 'Customers'],
+    ['bank_accounts', 'Bank accounts'],
+  ]
+
+  async function deleteAllShopData() {
+    if (!shop?.id) return
+
+    // Pinned up front: if the active shop changes mid-run (shop switcher, a
+    // context refresh) every delete must still target the shop that was confirmed.
+    const targetShopId = shop.id
+    const targetShopName = String(shop.name || '').trim()
+
+    const otherShopCount = Math.max(0, (allShops?.length || 1) - 1)
+    const first = window.confirm(
+      `Delete ALL business data for "${targetShopName}"?\n\n`
+      + 'This permanently removes invoices, purchases, products, categories, suppliers, customers, '
+      + 'expenses, investments, drawings, credit book entries and bank records for this shop only.\n\n'
+      + (otherShopCount > 0
+        ? `Your other ${otherShopCount} shop${otherShopCount > 1 ? 's are' : ' is'} NOT affected.\n\n`
+        : '')
+      + 'Your shop profile, settings and login are kept. This CANNOT be undone.',
+    )
+    if (!first) return
+
+    // Typing the shop name (not a generic phrase) makes it impossible to wipe the
+    // wrong shop by muscle memory when several shops share one login.
+    const typed = window.prompt(
+      `There is no undo. To confirm, type this shop's name exactly:\n\n${targetShopName}`,
+    )
+    if (typed === null) return
+    if (typed.trim() !== targetShopName) {
+      setWipeNotice(`Cancelled — you typed "${typed.trim()}", which does not match "${targetShopName}". Nothing was deleted.`)
+      return
+    }
+
+    setWiping(true)
+    setError('')
+    setWarning('')
+    setWipeNotice('')
+    setInvoiceCounterNotice('')
+    setPurchaseCounterNotice('')
+
+    try {
+      for (const [table, label] of WIPE_TABLES) {
+        if (!targetShopId) throw new Error('Aborted: no shop selected.')
+        setWipeProgress(`Deleting ${label}…`)
+        const { error: deleteErr } = await supabase.from(table).delete().eq('shop_id', targetShopId)
+        // A table missing from this deployment should not abort the whole wipe.
+        if (deleteErr && !/does not exist|schema cache/i.test(deleteErr.message)) {
+          throw new Error(`Failed clearing ${label}: ${deleteErr.message}`)
+        }
+      }
+
+      setWipeProgress('Resetting counters…')
+      const { data: updated, error: counterErr } = await supabase
+        .from('shops')
+        .update({ bill_counter: 0, purchase_counter: 0, updated_at: new Date().toISOString() })
+        .eq('id', targetShopId)
+        .select()
+        .single()
+      if (counterErr) throw counterErr
+      if (updated && updated.id === shop?.id) setShop({ ...shop, ...updated })
+
+      try { window.sessionStorage.clear() } catch { /* storage unavailable */ }
+
+      setWipeNotice(`All business data deleted for "${targetShopName}". Counters reset — the next invoice and purchase will start from 0001.`)
+    } catch (wipeErr) {
+      setError(wipeErr.message)
+    } finally {
+      setWipeProgress('')
+      setWiping(false)
+    }
+  }
+
   const f = (label, key, props = {}) => (
     <div>
       <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
@@ -332,16 +465,27 @@ export default function SettingsPage() {
             <div>
               {f('Purchase Prefix', 'purchase_prefix', { placeholder:'PUR' })}
               <p className="text-xs text-gray-400 mt-0.5">Purchases: PUR-0001…</p>
-              <button
-                type="button"
-                onClick={resetPurchaseCounter}
-                disabled={resettingPurchaseCounter}
-                className="mt-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
-              >
-                {resettingPurchaseCounter ? 'Resetting…' : 'Reset Purchase Number'}
-              </button>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={syncPurchaseCounter}
+                  disabled={resettingPurchaseCounter}
+                  className="rounded-lg border border-blue-300 bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                >
+                  {resettingPurchaseCounter ? 'Working…' : 'Sync to highest existing number'}
+                </button>
+                <button
+                  type="button"
+                  onClick={resetPurchaseCounter}
+                  disabled={resettingPurchaseCounter}
+                  className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 disabled:opacity-50"
+                >
+                  {resettingPurchaseCounter ? 'Resetting…' : 'Reset Purchase Number'}
+                </button>
+              </div>
               <p className="text-xs text-gray-400 mt-1">
-                Current counter: {Number(shop?.purchase_counter || 0)}. Reset is blocked if any purchase bill exists.
+                Current counter: {Number(shop?.purchase_counter || 0)}. Sync reads your existing purchase numbers and
+                continues from the highest one — use it after renumbering. Reset is blocked if any purchase bill exists.
               </p>
               {purchaseCounterNotice && (
                 <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
@@ -401,6 +545,51 @@ export default function SettingsPage() {
           {saving ? 'Saving…' : 'Save Settings'}
         </button>
       </form>
+
+      {/* Danger Zone — outside the form so it can never be triggered by Enter */}
+      <div className="mt-6 rounded-xl border-2 border-red-200 bg-red-50 p-5">
+        <h2 className="font-semibold text-red-800">⚠ Danger Zone</h2>
+        <div className="mt-2 rounded-lg border border-red-200 bg-white px-3 py-2 text-sm">
+          <span className="text-gray-500">This will delete data for:</span>{' '}
+          <span className="font-bold text-red-700">{shop?.name || '—'}</span>
+          {shop?.city && <span className="text-gray-500"> · {shop.city}</span>}
+          {(allShops?.length || 0) > 1 && (
+            <span className="mt-1 block text-xs text-gray-500">
+              Your other {allShops.length - 1} shop{allShops.length - 1 > 1 ? 's are' : ' is'} not affected.
+            </span>
+          )}
+        </div>
+        <p className="mt-2 text-sm text-red-700">
+          Deletes every invoice, purchase, product, category, supplier, customer, expense, investment,
+          drawing, credit entry and bank record for this shop. The shop profile, settings and login are
+          kept, and both numbering counters restart from 0001.
+        </p>
+        <p className="mt-1 text-xs font-medium text-red-700">
+          Intended for test accounts. This cannot be undone — export anything you need first.
+        </p>
+
+        {wipeProgress && (
+          <div className="mt-3 flex items-center gap-2 rounded-lg bg-white px-3 py-2 text-sm text-red-700">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-red-200 border-t-red-600" />
+            {wipeProgress}
+          </div>
+        )}
+
+        {wipeNotice && (
+          <div className="mt-3 rounded-lg border border-red-200 bg-white px-3 py-2 text-sm text-red-800">
+            {wipeNotice}
+          </div>
+        )}
+
+        <button
+          type="button"
+          onClick={deleteAllShopData}
+          disabled={wiping}
+          className="mt-3 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50"
+        >
+          {wiping ? 'Deleting…' : 'Delete All Data'}
+        </button>
+      </div>
     </div>
   )
 }

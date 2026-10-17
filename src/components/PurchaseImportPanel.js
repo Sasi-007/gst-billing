@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import { calcPurchaseItem, calcBillTotals } from '@/lib/gst'
 import { csvHeaders, csvRowsToObjects, parseCsvDate } from '@/lib/csv'
@@ -50,13 +50,24 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
   const [filesByKind, setFilesByKind] = useState({})
   const [unknownFiles, setUnknownFiles] = useState([])
   const [replaceStock, setReplaceStock] = useState(false)
+  const [existingMode, setExistingMode] = useState('update')
   const [running, setRunning] = useState(false)
   const [progress, setProgress] = useState('')
   const [report, setReport] = useState(null)
   const [error, setError] = useState('')
+  const [completed, setCompleted] = useState(false)
+  const resultRef = useRef(null)
+
+  // The report renders near the bottom of a scrollable body, so bring it into
+  // view instead of leaving the user staring at the file list.
+  useEffect(() => {
+    if (report || error) resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [report, error])
 
   const detectedKinds = useMemo(() => Object.keys(filesByKind), [filesByKind])
-  const canImport = detectedKinds.length > 0 && !running
+  // Block a second click on Import once a run finished, otherwise the same files
+  // would be re-imported (products updated again, stock added twice).
+  const canImport = detectedKinds.length > 0 && !running && !completed
 
   async function handleFiles(event) {
     const picked = Array.from(event.target.files || [])
@@ -65,6 +76,7 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
 
     setError('')
     setReport(null)
+    setCompleted(false)
     const nextFiles = { ...filesByKind }
     const nextUnknown = []
 
@@ -94,6 +106,16 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
     })
   }
 
+  function startNewImport() {
+    setFilesByKind({})
+    setUnknownFiles([])
+    setReplaceStock(false)
+    setExistingMode('update')
+    setReport(null)
+    setError('')
+    setCompleted(false)
+  }
+
   async function importSuppliers(rows, summary) {
     const named = rows.filter((row) => String(row.name || '').trim())
     if (!named.length) return
@@ -106,8 +128,17 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
 
     const existingByName = new Map((existing || []).map((row) => [lower(row.name), row]))
     const inserts = []
+    const queuedNames = new Set()
 
     for (const row of named) {
+      const key = lower(row.name)
+      // The same name can appear twice inside one CSV; queuing it twice would
+      // insert a genuine duplicate because the DB row does not exist yet.
+      if (queuedNames.has(key)) {
+        summary.suppliersSkipped += 1
+        continue
+      }
+
       const payload = {
         name: String(row.name).trim(),
         contact_person: row.contact_person || null,
@@ -120,8 +151,12 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
         pincode: row.pincode || null,
         is_active: lower(row.is_active) !== 'false',
       }
-      const match = existingByName.get(lower(row.name))
+      const match = existingByName.get(key)
       if (match) {
+        if (existingMode === 'skip') {
+          summary.suppliersSkipped += 1
+          continue
+        }
         const { error: updErr } = await supabase
           .from('suppliers')
           .update(payload)
@@ -130,6 +165,7 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
         if (updErr) throw updErr
         summary.suppliersUpdated += 1
       } else {
+        queuedNames.add(key)
         inserts.push({ ...payload, shop_id: shopId })
       }
     }
@@ -179,8 +215,15 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
     const existingByName = new Map((existing || []).map((row) => [lower(row.name), row]))
     const supplierByName = new Map((supplierRows || []).map((row) => [lower(row.name), row.id]))
     const inserts = []
+    const queuedNames = new Set()
 
     for (const row of named) {
+      const key = lower(row.name)
+      if (queuedNames.has(key)) {
+        summary.productsSkipped += 1
+        continue
+      }
+
       const payload = {
         name: String(row.name).trim(),
         local_name: row.local_name || null,
@@ -197,8 +240,12 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
         min_stock: num(row.min_stock),
         is_active: lower(row.is_active) !== 'false',
       }
-      const match = existingByName.get(lower(row.name))
+      const match = existingByName.get(key)
       if (match) {
+        if (existingMode === 'skip') {
+          summary.productsSkipped += 1
+          continue
+        }
         // Stock is normally driven by purchase and sale history, so it is only
         // overwritten when the user explicitly asks for it.
         const updatePayload = replaceStock ? { ...payload, stock_qty: num(row.stock_qty) } : payload
@@ -210,6 +257,7 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
         if (updErr) throw updErr
         summary.productsUpdated += 1
       } else {
+        queuedNames.add(key)
         inserts.push({
           ...payload,
           shop_id: shopId,
@@ -374,7 +422,9 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
           if (item.product_id) touchedProductIds.add(item.product_id)
         }
         summary.itemsImported += calculated.length
-        summary.unlinkedItems += calculated.filter((item) => !item.product_id).length
+        const unlinked = calculated.filter((item) => !item.product_id)
+        summary.unlinkedItems += unlinked.length
+        for (const item of unlinked) summary.unlinkedItemNames.add(`${item.product_name} (${billNo})`)
       }
 
       try {
@@ -412,11 +462,14 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
     const summary = {
       suppliersCreated: 0,
       suppliersUpdated: 0,
+      suppliersSkipped: 0,
       productsCreated: 0,
       productsUpdated: 0,
+      productsSkipped: 0,
       billsCreated: 0,
       itemsImported: 0,
       unlinkedItems: 0,
+      unlinkedItemNames: new Set(),
       creditSyncWarnings: 0,
       billsSkipped: [],
       billsFailed: [],
@@ -440,6 +493,7 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
         )
       }
       setReport(summary)
+      setCompleted(true)
       onImported?.()
     } catch (importErr) {
       setError(importErr?.message || 'Import failed')
@@ -450,21 +504,21 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4">
-      <div className="w-full max-w-2xl rounded-xl bg-white shadow-lg">
-        <div className="flex items-center justify-between border-b px-4 py-3">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl bg-white shadow-lg">
+        <div className="flex shrink-0 items-center justify-between border-b px-4 py-3">
           <div>
             <h2 className="text-lg font-bold text-gray-900">Import Purchases Data</h2>
             <p className="text-xs text-gray-500">
               Upload any one file or all four from the purchases export. Each file is detected automatically.
             </p>
           </div>
-          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-700">✕</button>
+          <button type="button" onClick={onClose} disabled={running} className="text-gray-400 hover:text-gray-700 disabled:opacity-40">✕</button>
         </div>
 
-        <div className="space-y-4 px-4 py-4">
-          <label className="block cursor-pointer rounded-lg border-2 border-dashed border-gray-300 px-4 py-6 text-center hover:border-blue-400">
-            <input type="file" accept=".csv,text/csv" multiple onChange={handleFiles} className="hidden" disabled={running} />
+        <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4">
+          <label className={`block rounded-lg border-2 border-dashed px-4 py-6 text-center ${completed ? 'cursor-not-allowed border-gray-200 opacity-60' : 'cursor-pointer border-gray-300 hover:border-blue-400'}`}>
+            <input type="file" accept=".csv,text/csv" multiple onChange={handleFiles} className="hidden" disabled={running || completed} />
             <span className="text-sm font-medium text-blue-700">Choose CSV files</span>
             <span className="mt-1 block text-xs text-gray-500">
               purchases · purchase-items · purchase-suppliers · purchase-inventory
@@ -483,7 +537,7 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
                     </div>
                   </div>
                   {file && (
-                    <button type="button" onClick={() => removeKind(kind)} disabled={running} className="text-xs text-red-600 hover:underline disabled:opacity-50">
+                    <button type="button" onClick={() => removeKind(kind)} disabled={running || completed} className="text-xs text-red-600 hover:underline disabled:opacity-50">
                       Remove
                     </button>
                   )}
@@ -498,12 +552,48 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
             </div>
           )}
 
+          <div className="rounded-lg border border-gray-200 px-3 py-2">
+            <div className="text-sm font-medium text-gray-700">If a supplier or product already exists</div>
+            <div className="mt-2 space-y-2">
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="radio"
+                  name="existing-mode"
+                  value="update"
+                  checked={existingMode === 'update'}
+                  onChange={() => setExistingMode('update')}
+                  disabled={running || completed}
+                  className="mt-1"
+                />
+                <span>
+                  Update it with the values from the file
+                  <span className="block text-xs text-gray-500">Keeps one record per name and refreshes prices, GST, category, etc.</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="radio"
+                  name="existing-mode"
+                  value="skip"
+                  checked={existingMode === 'skip'}
+                  onChange={() => setExistingMode('skip')}
+                  disabled={running || completed}
+                  className="mt-1"
+                />
+                <span>
+                  Skip it and import only new names
+                  <span className="block text-xs text-gray-500">Leaves your current records untouched. Use this when re-importing an export.</span>
+                </span>
+              </label>
+            </div>
+          </div>
+
           <label className="flex items-start gap-2 text-sm text-gray-700">
             <input
               type="checkbox"
               checked={replaceStock}
               onChange={(event) => setReplaceStock(event.target.checked)}
-              disabled={running || !filesByKind.inventory}
+              disabled={running || completed || existingMode === 'skip' || !filesByKind.inventory}
               className="mt-1"
             />
             <span>
@@ -515,18 +605,35 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
           </label>
 
           <div className="rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800">
-            Suppliers and products are matched by name and updated; purchase numbers that already exist are skipped.
+            Suppliers and products are matched by name, so re-importing never creates duplicates. Purchase numbers that already exist are always skipped.
           </div>
+
+          {running && (
+            <div className="flex items-center gap-2 rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-800">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-300 border-t-blue-700" />
+              <span>{progress || 'Importing…'} Please wait, do not close this window.</span>
+            </div>
+          )}
+
+          <div ref={resultRef} />
 
           {error && <div className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
 
           {report && (
             <div className="space-y-1 rounded-lg bg-green-50 px-3 py-2 text-sm text-green-800">
-              <div>Suppliers: {report.suppliersCreated} added, {report.suppliersUpdated} updated</div>
-              <div>Products: {report.productsCreated} added, {report.productsUpdated} updated</div>
+              <div className="font-semibold">✅ Import finished — these files cannot be imported again.</div>
+              <div>Suppliers: {report.suppliersCreated} added, {report.suppliersUpdated} updated{report.suppliersSkipped > 0 ? `, ${report.suppliersSkipped} skipped` : ''}</div>
+              <div>Products: {report.productsCreated} added, {report.productsUpdated} updated{report.productsSkipped > 0 ? `, ${report.productsSkipped} skipped` : ''}</div>
               <div>Purchases: {report.billsCreated} created with {report.itemsImported} item lines</div>
               {report.unlinkedItems > 0 && (
-                <div className="text-yellow-800">{report.unlinkedItems} item line(s) had no matching product and were saved as free text.</div>
+                <div className="text-yellow-800">
+                  <div>{report.unlinkedItems} item line(s) had no matching product and were saved as free text — stock will not update for these.</div>
+                  <ul className="mt-1 list-disc pl-5 text-xs">
+                    {[...report.unlinkedItemNames].map((name) => (
+                      <li key={name}>{name}</li>
+                    ))}
+                  </ul>
+                </div>
               )}
               {report.creditSyncWarnings > 0 && (
                 <div className="text-yellow-800">{report.creditSyncWarnings} bill(s) saved but Credit Book sync failed.</div>
@@ -541,15 +648,30 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
           )}
         </div>
 
-        <div className="flex items-center justify-between gap-2 border-t px-4 py-3">
-          <span className="text-xs text-gray-500">{progress}</span>
-          <div className="flex gap-2">
-            <button type="button" onClick={onClose} disabled={running} className="rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50">
-              Close
-            </button>
-            <button type="button" onClick={handleImport} disabled={!canImport} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">
-              {running ? 'Importing…' : 'Import'}
-            </button>
+        <div className="flex shrink-0 items-center justify-between gap-2 border-t bg-white px-4 py-3 rounded-b-xl">
+          <span className="text-xs font-medium text-blue-700">
+            {running ? (progress || 'Importing…') : progress}
+          </span>
+          <div className="flex flex-wrap justify-end gap-2">
+            {completed ? (
+              <>
+                <button type="button" onClick={startNewImport} className="rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+                  Import another set
+                </button>
+                <button type="button" onClick={onClose} className="rounded-lg bg-green-600 px-4 py-2 text-sm font-semibold text-white hover:bg-green-700">
+                  Done
+                </button>
+              </>
+            ) : (
+              <>
+                <button type="button" onClick={onClose} disabled={running} className="rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+                  Close
+                </button>
+                <button type="button" onClick={handleImport} disabled={!canImport} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-60">
+                  {running ? 'Importing…' : 'Import'}
+                </button>
+              </>
+            )}
           </div>
         </div>
       </div>

@@ -12,7 +12,12 @@ import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { syncPurchaseCreditEntry } from '@/lib/purchaseCredit'
+import { syncPurchaseCreditEntry, removePurchaseCreditEntry } from '@/lib/purchaseCredit'
+import {
+  buildQuantityMap,
+  invalidatePurchaseImpactCache,
+  syncProductPricingFromLatestPurchases,
+} from '@/lib/productStock'
 
 const PAYMENT_MODES = ['Credit', 'Cash', 'UPI', 'Card', 'Cheque']
 
@@ -97,6 +102,8 @@ export default function PurchasesPage() {
   const [paymentDrafts, setPaymentDrafts] = useState({})
   const [paymentModes, setPaymentModes] = useState({})
   const [updatingBillId, setUpdatingBillId] = useState(null)
+  const [deletingBillId, setDeletingBillId] = useState(null)
+  const [bulkDeleting, setBulkDeleting] = useState(false)
   const [sortKey, setSortKey] = useState('date')
   const [sortDir, setSortDir] = useState('desc')
   const [selectedBillIds, setSelectedBillIds] = useState([])
@@ -450,6 +457,143 @@ export default function PurchasesPage() {
     setUpdatingBillId(null)
   }
 
+  async function handleDeleteBill(bill) {
+    if (!shop?.id || !bill?.id) return
+    if (!window.confirm(`Delete purchase ${bill.bill_no}? This cannot be undone.`)) return
+
+    setDeletingBillId(bill.id)
+    try {
+      const { data: lineItems, error: itemsErr } = await supabase
+        .from('purchase_bill_items')
+        .select('product_id,quantity')
+        .eq('purchase_bill_id', bill.id)
+        .eq('shop_id', shop.id)
+      if (itemsErr) throw itemsErr
+
+      const { error: delErr } = await supabase
+        .from('purchase_bills')
+        .delete()
+        .eq('id', bill.id)
+        .eq('shop_id', shop.id)
+      if (delErr) throw delErr
+
+      const purchaseQtyMap = buildQuantityMap(lineItems)
+      await removePurchaseCreditEntry(shop.id, bill.id)
+      await syncProductPricingFromLatestPurchases(shop.id, Object.keys(purchaseQtyMap))
+      invalidatePurchaseImpactCache(shop.id)
+
+      setBills((prevBills) => prevBills.filter((row) => row.id !== bill.id))
+      setSelectedBillIds((prev) => prev.filter((id) => id !== bill.id))
+      setError('')
+    } catch (err) {
+      setError(err.message || 'Failed to delete purchase')
+    } finally {
+      setDeletingBillId(null)
+    }
+  }
+
+  async function handleBulkDeleteSelected() {
+    if (!shop?.id) return
+    if (!selectedBillIds.length) {
+      setError('Select purchases to delete')
+      return
+    }
+
+    const selectedBills = bills.filter((bill) => selectedBillIds.includes(bill.id))
+
+    setBulkDeleting(true)
+    try {
+      // Fetch line items for the selected purchases so we know exactly how much
+      // stock will be reversed (and can warn if a product would go negative,
+      // i.e. some of that purchased stock has already been sold/used elsewhere).
+      const { data: lineItems, error: itemsErr } = await supabase
+        .from('purchase_bill_items')
+        .select('product_id,quantity,product_name')
+        .eq('shop_id', shop.id)
+        .in('purchase_bill_id', selectedBillIds)
+      if (itemsErr) throw itemsErr
+
+      const purchaseQtyMap = buildQuantityMap(lineItems)
+      const productIds = Object.keys(purchaseQtyMap)
+      const nameByProductId = new Map((lineItems || []).map((row) => [row.product_id, row.product_name]))
+
+      let stockRows = []
+      if (productIds.length) {
+        const { data, error: stockErr } = await supabase
+          .from('products')
+          .select('id,name,stock_qty')
+          .eq('shop_id', shop.id)
+          .in('id', productIds)
+        if (stockErr) throw stockErr
+        stockRows = data || []
+      }
+      const stockByProductId = new Map(stockRows.map((row) => [row.id, row]))
+
+      const negativeStockWarnings = productIds
+        .map((productId) => {
+          const removeQty = purchaseQtyMap[productId]
+          const product = stockByProductId.get(productId)
+          const currentStock = Number(product?.stock_qty || 0)
+          const resultingStock = currentStock - removeQty
+          return resultingStock < 0
+            ? {
+                name: product?.name || nameByProductId.get(productId) || 'Unknown product',
+                currentStock,
+                removeQty,
+                resultingStock,
+              }
+            : null
+        })
+        .filter(Boolean)
+
+      const billList = selectedBills.map((bill) => bill.bill_no).join(', ')
+      let message = `Delete ${selectedBillIds.length} purchase${selectedBillIds.length > 1 ? 's' : ''} (${billList})?\n\n`
+      message += 'This will NOT affect any sales bills — sales records stay untouched.\n'
+      message += 'It will reduce stock for the products on these purchases by the quantities purchased.'
+
+      if (negativeStockWarnings.length) {
+        message += '\n\n⚠ Warning: some of this stock appears to have already been sold or used elsewhere. '
+        message += 'Deleting will push these products\' stock below zero:\n'
+        message += negativeStockWarnings
+          .map((w) => `• ${w.name}: current ${w.currentStock} − ${w.removeQty} = ${w.resultingStock}`)
+          .join('\n')
+        message += '\n\nYou may want to adjust stock manually afterwards. Continue anyway?'
+      }
+
+      if (!window.confirm(message)) {
+        setBulkDeleting(false)
+        return
+      }
+
+      const { error: delErr } = await supabase
+        .from('purchase_bills')
+        .delete()
+        .eq('shop_id', shop.id)
+        .in('id', selectedBillIds)
+      if (delErr) throw delErr
+
+      const creditErrors = []
+      for (const billId of selectedBillIds) {
+        try {
+          await removePurchaseCreditEntry(shop.id, billId)
+        } catch (creditErr) {
+          creditErrors.push(creditErr)
+        }
+      }
+
+      await syncProductPricingFromLatestPurchases(shop.id, productIds)
+      invalidatePurchaseImpactCache(shop.id)
+
+      setBills((prevBills) => prevBills.filter((row) => !selectedBillIds.includes(row.id)))
+      setSelectedBillIds([])
+      setError(creditErrors.length ? 'Some purchases deleted, but Credit Book sync will refresh on reopen' : '')
+    } catch (err) {
+      setError(err.message || 'Failed to delete selected purchases')
+    } finally {
+      setBulkDeleting(false)
+    }
+  }
+
   return (
     <div className="p-4">
       {importPanelOpen && (
@@ -540,6 +684,22 @@ export default function PurchasesPage() {
           <span className="hidden sm:inline">Move to Number Updater</span>
           {selectedBillIds.length ? ` (${selectedBillIds.length})` : ''}
         </button>
+        <button
+          type="button"
+          onClick={handleBulkDeleteSelected}
+          disabled={selectedBillIds.length === 0 || bulkDeleting}
+          className="px-3 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 disabled:opacity-60 whitespace-nowrap"
+        >
+          {bulkDeleting ? (
+            'Deleting…'
+          ) : (
+            <>
+              <span className="sm:hidden">🗑️ Delete</span>
+              <span className="hidden sm:inline">Delete Selected</span>
+              {selectedBillIds.length ? ` (${selectedBillIds.length})` : ''}
+            </>
+          )}
+        </button>
       </div>
 
       {loading ? (
@@ -624,7 +784,15 @@ export default function PurchasesPage() {
                       ) : (
                         <span className="text-xs text-gray-400">Settled</span>
                       )}
-                      <Link href={`/purchases/${b.id}`} className="ml-auto text-blue-600 text-xs">View</Link>
+                      <Link href={`/purchases/${b.id}`} className="text-blue-600 text-xs">View</Link>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteBill(b)}
+                        disabled={deletingBillId === b.id}
+                        className="ml-auto text-red-600 text-xs hover:underline disabled:opacity-50"
+                      >
+                        {deletingBillId === b.id ? 'Deleting…' : 'Delete'}
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -735,6 +903,14 @@ export default function PurchasesPage() {
                       )}
                       <Link href={`/purchases/${b.id}`}
                         className="text-blue-600 hover:underline text-xs">View</Link>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteBill(b)}
+                        disabled={deletingBillId === b.id}
+                        className="text-red-600 hover:underline text-xs disabled:opacity-50"
+                      >
+                        {deletingBillId === b.id ? 'Deleting…' : 'Delete'}
+                      </button>
                     </div>
                   </td>
                 </tr>

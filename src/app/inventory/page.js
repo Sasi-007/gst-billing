@@ -268,6 +268,86 @@ export default function InventoryPage() {
     load()
   }
 
+  // Checks whether products have any historical sale/purchase line items, so the
+  // delete confirmation can warn before severing that history (FK is ON DELETE
+  // SET NULL — the bill/purchase itself is never touched, only the product link).
+  async function findProductsWithHistory(productIds) {
+    if (!shop?.id || !productIds.length) return new Set()
+
+    const [saleRes, purchaseRes] = await Promise.all([
+      supabase.from('bill_items').select('product_id').eq('shop_id', shop.id).in('product_id', productIds),
+      supabase.from('purchase_bill_items').select('product_id').eq('shop_id', shop.id).in('product_id', productIds),
+    ])
+    if (saleRes.error) throw saleRes.error
+    if (purchaseRes.error) throw purchaseRes.error
+
+    const used = new Set()
+    ;(saleRes.data || []).forEach((row) => used.add(row.product_id))
+    ;(purchaseRes.data || []).forEach((row) => used.add(row.product_id))
+    return used
+  }
+
+  async function deleteProductsByIds(productIds) {
+    const { error } = await supabase
+      .from('products')
+      .delete()
+      .eq('shop_id', shop.id)
+      .in('id', productIds)
+    if (error) throw error
+
+    clearPageCacheByPrefix([`inventory:${shop.id}:`])
+    setProducts((prev) => prev.filter((p) => !productIds.includes(p.id)))
+    setSelected((prev) => {
+      const next = new Map(prev)
+      productIds.forEach((id) => next.delete(id))
+      return next
+    })
+  }
+
+  async function handleDeleteProduct(product) {
+    if (!shop?.id || !product?.id) return
+
+    try {
+      const used = await findProductsWithHistory([product.id])
+      let message = `Delete "${product.name}"? This cannot be undone.`
+      if (used.has(product.id)) {
+        message += '\n\n⚠ This product has existing sale/purchase bills. Those bills will NOT be deleted or changed in '
+          + 'total, but they will lose their link to this product (reports grouped by product will no longer include '
+          + 'this history). Consider clicking "Disable" instead if you just want to hide it from new bills.'
+      }
+      if (!window.confirm(message)) return
+
+      await deleteProductsByIds([product.id])
+      setCsvMessage('')
+    } catch (error) {
+      setCsvMessage(`Delete failed: ${error.message}`)
+    }
+  }
+
+  async function handleDeleteSelected() {
+    if (!shop?.id || selected.size === 0) return
+    const ids = Array.from(selected.keys())
+    const names = Array.from(selected.values()).map((p) => p.name)
+
+    try {
+      const used = await findProductsWithHistory(ids)
+      let message = `Delete ${ids.length} selected product${ids.length > 1 ? 's' : ''}?\n\n${names.slice(0, 10).join(', ')}`
+        + (names.length > 10 ? `, +${names.length - 10} more` : '')
+        + '\n\nThis cannot be undone.'
+      if (used.size) {
+        message += `\n\n⚠ ${used.size} of these have existing sale/purchase bills. Those bills will NOT be deleted or `
+          + 'changed in total, but they will lose their link to these products (reports grouped by product will no '
+          + 'longer include this history). Consider "Disable" instead if you just want to hide them from new bills.'
+      }
+      if (!window.confirm(message)) return
+
+      await deleteProductsByIds(ids)
+      setCsvMessage('')
+    } catch (error) {
+      setCsvMessage(`Delete failed: ${error.message}`)
+    }
+  }
+
   function toggleSelect(product) {
     setSelected((prev) => {
       const next = new Map(prev)
@@ -583,7 +663,7 @@ export default function InventoryPage() {
       </div>
       {csvMessage && (
         <div className={`mb-3 rounded-lg px-3 py-2 text-sm ${
-          csvMessage.startsWith('CSV upload failed') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'
+          csvMessage.includes('failed') ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'
         }`}>
           {csvMessage}
         </div>
@@ -674,6 +754,13 @@ export default function InventoryPage() {
             <span className="font-medium text-gray-800">{selectedCount} selected</span>
             <button
               type="button"
+              onClick={handleDeleteSelected}
+              className="text-red-600 hover:underline font-medium"
+            >
+              Delete Selected ({selectedCount})
+            </button>
+            <button
+              type="button"
               onClick={() => setSelected(new Map())}
               className="text-gray-500 hover:text-red-600"
             >
@@ -741,6 +828,12 @@ export default function InventoryPage() {
                         className={`text-xs ${p.is_active ? 'text-gray-400 hover:text-red-500' : 'text-green-600 hover:text-green-700'}`}
                       >
                         {p.is_active ? 'Disable' : 'Enable'}
+                      </button>
+                      <button
+                        onClick={() => handleDeleteProduct(p)}
+                        className="text-xs text-red-600 hover:underline"
+                      >
+                        Delete
                       </button>
                     </div>
                   </div>
@@ -813,9 +906,15 @@ export default function InventoryPage() {
                           className="text-blue-600 hover:underline text-xs mr-2">Edit</Link>
                         <button
                           onClick={() => toggleActive(p.id, !p.is_active)}
-                          className={`text-xs ${p.is_active ? 'text-gray-400 hover:text-red-500' : 'text-green-600 hover:text-green-700'}`}
+                          className={`text-xs mr-2 ${p.is_active ? 'text-gray-400 hover:text-red-500' : 'text-green-600 hover:text-green-700'}`}
                         >
                           {p.is_active ? 'Disable' : 'Enable'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteProduct(p)}
+                          className="text-xs text-red-600 hover:underline"
+                        >
+                          Delete
                         </button>
                       </td>
                     </tr>

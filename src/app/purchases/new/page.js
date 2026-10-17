@@ -144,6 +144,7 @@ export default function NewPurchasePage() {
   const [editPurchaseId, setEditPurchaseId] = useState(null)
   const [billNo, setBillNo] = useState('')
   const [offlineNotice, setOfflineNotice] = useState('')
+  const [unmatchedCsvItems, setUnmatchedCsvItems] = useState([])
   const syncInProgressRef = useRef(false)
   const importInputRef = useRef(null)
 
@@ -376,6 +377,7 @@ export default function NewPurchasePage() {
       })
       return n
     })
+    setUnmatchedCsvItems((prev) => prev.filter((name) => name !== items[activeRow]?.product_name))
     if (product.supplier_id && !suppId) {
       setSuppId(product.supplier_id)
       setSupplierAutoFilled(true)
@@ -466,6 +468,7 @@ export default function NewPurchasePage() {
         showToast('CSV has no item rows', 'error')
         return
       }
+      setUnmatchedCsvItems([])
 
       const names = [...new Set(rows.map((row) => row.product_name || row.name).filter(Boolean))]
       const hsnCodes = [...new Set(rows.map((row) => row.hsn_code || row.hsn).filter(Boolean))]
@@ -544,9 +547,11 @@ export default function NewPurchasePage() {
           setSupplierAutoFilled(true)
         }
       }
-      const unmatchedCount = imported.filter((item) => !item.product_id).length
+      const unmatched = imported.filter((item) => !item.product_id)
+      const unmatchedCount = unmatched.length
       const hsnNote = hsnFallbackCount ? ` (${hsnFallbackCount} matched by HSN code)` : ''
       showToast(`Imported ${imported.length} item${imported.length === 1 ? '' : 's'}${unmatchedCount ? ` (${unmatchedCount} not matched to inventory)` : ''}${hsnNote}`)
+      setUnmatchedCsvItems(unmatched.map((item) => item.product_name))
     } catch (error) {
       showToast('Import failed: ' + (error?.message || 'Invalid CSV'), 'error')
     }
@@ -841,6 +846,34 @@ export default function NewPurchasePage() {
         {offlineNotice && (
           <div className="mx-4 mt-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-blue-700">
             {offlineNotice}
+          </div>
+        )}
+
+        {unmatchedCsvItems.length > 0 && (
+          <div className="mx-4 mt-3 rounded-lg border border-yellow-300 bg-yellow-50 px-3 py-2 text-sm text-yellow-800">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <div className="font-medium">
+                  ⚠ {unmatchedCsvItems.length} item{unmatchedCsvItems.length === 1 ? '' : 's'} from the CSV did not match an inventory product.
+                </div>
+                <div className="mt-1 text-xs">
+                  Stock will NOT update for these until you link each row to a product (click the row, press F3 or tap the row, then pick the matching product):
+                </div>
+                <ul className="mt-1 list-disc pl-5 text-xs">
+                  {unmatchedCsvItems.map((name, idx) => (
+                    <li key={`${name}-${idx}`}>{name}</li>
+                  ))}
+                </ul>
+              </div>
+              <button
+                type="button"
+                onClick={() => setUnmatchedCsvItems([])}
+                className="shrink-0 text-yellow-700 hover:text-yellow-900"
+                aria-label="Dismiss unmatched items warning"
+              >
+                ✕
+              </button>
+            </div>
           </div>
         )}
 

@@ -51,7 +51,7 @@ function formatBillNo(prefix, number, digits) {
 
 export default function PurchaseNumberUpdaterPage() {
   const searchParams = useSearchParams()
-  const { shop } = useShop()
+  const { shop, setShop } = useShop()
   const [purchases, setPurchases] = useState([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -59,6 +59,9 @@ export default function PurchaseNumberUpdaterPage() {
   const [prefix, setPrefix] = useState('')
   const [startNumber, setStartNumber] = useState(1)
   const [digits, setDigits] = useState(4)
+  const [otherBillNos, setOtherBillNos] = useState(() => new Set())
+  const [scope, setScope] = useState('selected')
+  const [totalPurchaseCount, setTotalPurchaseCount] = useState(0)
 
   const selectedPurchaseIds = useMemo(() => {
     if (!shop?.id || typeof window === 'undefined') return []
@@ -76,10 +79,16 @@ export default function PurchaseNumberUpdaterPage() {
     }
   }, [searchParams, shop?.id])
 
-  const previewRows = useMemo(() => purchases.map((purchase, index) => ({
-    ...purchase,
-    next_bill_no: formatBillNo(prefix, Number(startNumber) + index, digits),
-  })), [digits, prefix, purchases, startNumber])
+  const previewRows = useMemo(() => purchases.map((purchase, index) => {
+    const nextBillNo = formatBillNo(prefix, Number(startNumber) + index, digits)
+    return {
+      ...purchase,
+      next_bill_no: nextBillNo,
+      conflicts: otherBillNos.has(nextBillNo),
+    }
+  }), [digits, otherBillNos, prefix, purchases, startNumber])
+
+  const conflictCount = useMemo(() => previewRows.filter((row) => row.conflicts).length, [previewRows])
 
   useEffect(() => {
     if (!shop?.id) return
@@ -89,18 +98,21 @@ export default function PurchaseNumberUpdaterPage() {
       setLoading(true)
       setMessage(null)
 
-      if (!selectedPurchaseIds.length) {
+      const renumberAll = scope === 'all'
+      if (!renumberAll && !selectedPurchaseIds.length) {
         setPurchases([])
         setLoading(false)
-        setMessage({ type: 'error', text: 'No purchases moved here. Select purchases from the Purchases page first.' })
+        setMessage({ type: 'error', text: 'No purchases moved here. Select purchases from the Purchases page first, or switch to "All purchases" below.' })
         return
       }
 
-      const { data, error } = await supabase
+      const columns = 'id,bill_no,date,supplier_invoice_no,total,paid_amount,payment_status,created_at,suppliers(name)'
+      let query = supabase
         .from('purchase_bills')
-        .select('id,bill_no,date,supplier_invoice_no,total,paid_amount,payment_status,created_at,suppliers(name)')
+        .select(columns)
         .eq('shop_id', shop.id)
-        .in('id', selectedPurchaseIds)
+      if (!renumberAll) query = query.in('id', selectedPurchaseIds)
+      const { data, error } = await query
 
       if (cancelled) return
       if (error) {
@@ -113,19 +125,37 @@ export default function PurchaseNumberUpdaterPage() {
       const loadedPurchases = (data || []).sort(comparePurchasesByDate)
       setPurchases(loadedPurchases)
 
+      // Numbers held by purchases outside this selection — used to flag clashes in
+      // the preview instead of only failing at save time. Renumbering everything
+      // leaves nothing outside, so no clash is possible.
+      const { data: otherRows } = await supabase
+        .from('purchase_bills')
+        .select('id,bill_no')
+        .eq('shop_id', shop.id)
+      if (!cancelled) {
+        setTotalPurchaseCount((otherRows || []).length)
+        const selectedIds = new Set(loadedPurchases.map((row) => row.id))
+        setOtherBillNos(new Set(
+          (otherRows || [])
+            .filter((row) => !selectedIds.has(row.id))
+            .map((row) => row.bill_no)
+            .filter(Boolean),
+        ))
+      }
+
       const seed = pickSequenceSeed(loadedPurchases)
       setPrefix(seed?.prefix || shop.purchase_prefix || 'PUR')
       setDigits(seed ? seed.digits : 4)
-      setStartNumber(seed ? seed.number : 1)
+      setStartNumber(renumberAll ? 1 : (seed ? seed.number : 1))
       if (!loadedPurchases.length) {
-        setMessage({ type: 'error', text: 'Selected purchases could not be found.' })
+        setMessage({ type: 'error', text: renumberAll ? 'No purchases found for this shop.' : 'Selected purchases could not be found.' })
       }
       setLoading(false)
     }
 
     loadPurchases()
     return () => { cancelled = true }
-  }, [selectedPurchaseIds, shop?.id, shop?.purchase_prefix])
+  }, [scope, selectedPurchaseIds, shop?.id, shop?.purchase_prefix])
 
   async function updateCreditReferenceNotes(plan) {
     for (const row of plan) {
@@ -185,14 +215,20 @@ export default function PurchaseNumberUpdaterPage() {
 
       const conflicts = (existingRows || []).filter((row) => !selectedSet.has(row.id))
       if (conflicts.length) {
+        const conflictNos = conflicts.map((row) => row.bill_no).sort()
         setMessage({
           type: 'error',
-          text: `Cannot update. ${conflicts[0].bill_no} is already used by another purchase outside this selected list.`,
+          text: `Cannot update. ${conflictNos.length} number${conflictNos.length > 1 ? 's are' : ' is'} already used by purchases that are not in this list: ${conflictNos.slice(0, 8).join(', ')}${conflictNos.length > 8 ? `, +${conflictNos.length - 8} more` : ''}. `
+            + 'Choose "All purchases" above to renumber everything together, or raise the start number / change the prefix so the new range is free.',
         })
         return
       }
 
-      if (!window.confirm(`Refresh purchase numbers for ${previewRows.length} selected purchase${previewRows.length > 1 ? 's' : ''}?`)) {
+      if (!window.confirm(
+        `Refresh purchase numbers for ${previewRows.length} purchase${previewRows.length > 1 ? 's' : ''}?`
+        + `\n\nThey will become ${previewRows[0].next_bill_no} … ${previewRows[previewRows.length - 1].next_bill_no} in bill-date order.`
+        + '\n\nOnly the number changes — items, stock, payments and credit entries stay exactly as they are.'
+      )) {
         return
       }
 
@@ -217,8 +253,32 @@ export default function PurchaseNumberUpdaterPage() {
       }
 
       await updateCreditReferenceNotes(previewRows)
+
+      // Keep the auto-numbering counter ahead of what we just assigned, otherwise
+      // the next new purchase could reuse an existing number or leave a big gap.
+      const highestAssigned = Number(startNumber) + previewRows.length - 1
+      const { data: updatedShop, error: counterErr } = await supabase
+        .from('shops')
+        .update({ purchase_counter: highestAssigned, updated_at: new Date().toISOString() })
+        .eq('id', shop.id)
+        .select()
+        .single()
+      if (updatedShop) setShop({ ...shop, ...updatedShop })
+
       setPurchases(previewRows.map((row) => ({ ...row, bill_no: row.next_bill_no })).sort(comparePurchasesByDate))
-      setMessage({ type: 'success', text: `Updated ${previewRows.length} purchase number${previewRows.length > 1 ? 's' : ''}.` })
+      setOtherBillNos((prev) => {
+        const next = new Set(prev)
+        for (const row of previewRows) next.delete(row.next_bill_no)
+        return next
+      })
+      const nextNewNo = formatBillNo(prefix, highestAssigned + 1, digits)
+      setMessage({
+        type: counterErr ? 'error' : 'success',
+        text: `Updated ${previewRows.length} purchase number${previewRows.length > 1 ? 's' : ''}.`
+          + (counterErr
+            ? ` But the numbering counter could not be updated (${counterErr.message}). Set it to ${highestAssigned} in Settings, otherwise the next new purchase may reuse an existing number.`
+            : ` Counter set to ${highestAssigned} — your next new purchase will be ${nextNewNo}.`),
+      })
     } catch (error) {
       setMessage({ type: 'error', text: `Purchase number update failed: ${error?.message || 'Unknown error'}` })
     } finally {
@@ -234,6 +294,7 @@ export default function PurchaseNumberUpdaterPage() {
             <h1 className="text-2xl font-bold text-gray-900">Purchase Number Updater</h1>
             <p className="text-sm text-gray-500">
               Selected purchases are ordered by bill date (oldest first) and renumbered into a clean sequence like PUR-0001, PUR-0002, PUR-0003.
+              Deleting a purchase leaves a gap in the numbering — renumbering all purchases closes those gaps.
             </p>
           </div>
           <Link href="/purchases" className="rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
@@ -242,6 +303,31 @@ export default function PurchaseNumberUpdaterPage() {
         </div>
 
         <div className="rounded-xl border bg-white p-4 shadow-sm">
+          <div className="mb-4 flex flex-wrap items-center gap-4 border-b pb-3">
+            <span className="text-sm font-medium text-gray-700">Renumber:</span>
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="radio"
+                name="renumber-scope"
+                checked={scope === 'selected'}
+                onChange={() => setScope('selected')}
+                disabled={saving}
+              />
+              Only the selected purchases ({selectedPurchaseIds.length})
+            </label>
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <input
+                type="radio"
+                name="renumber-scope"
+                checked={scope === 'all'}
+                onChange={() => setScope('all')}
+                disabled={saving}
+              />
+              All purchases{totalPurchaseCount ? ` (${totalPurchaseCount})` : ''}
+              <span className="text-xs text-gray-500">— closes every gap, never clashes</span>
+            </label>
+          </div>
+
           <div className="grid gap-3 md:grid-cols-4">
             <label className="text-sm font-medium text-gray-700">
               Prefix
@@ -285,6 +371,20 @@ export default function PurchaseNumberUpdaterPage() {
             </div>
           </div>
 
+          {conflictCount > 0 && (
+            <div className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              ⚠ {conflictCount} of these new numbers are already used by purchases outside this list (marked in red below).
+              <button
+                type="button"
+                onClick={() => setScope('all')}
+                className="ml-1 font-semibold underline hover:text-amber-900"
+              >
+                Switch to &quot;All purchases&quot;
+              </button>{' '}
+              to renumber everything together, or raise the start number / change the prefix.
+            </div>
+          )}
+
           {message && (
             <div className={`mt-4 rounded-lg px-3 py-2 text-sm ${
               message.type === 'success' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
@@ -315,11 +415,14 @@ export default function PurchaseNumberUpdaterPage() {
               </thead>
               <tbody>
                 {previewRows.map((purchase, index) => (
-                  <tr key={purchase.id} className="border-b last:border-0">
+                  <tr key={purchase.id} className={`border-b last:border-0 ${purchase.conflicts ? 'bg-red-50' : ''}`}>
                     <td className="px-3 py-2 text-gray-500">{index + 1}</td>
                     <td className="px-3 py-2">{new Date(`${purchase.date}T00:00:00`).toLocaleDateString('en-IN')}</td>
                     <td className="px-3 py-2 font-mono font-medium text-gray-700">{purchase.bill_no}</td>
-                    <td className="px-3 py-2 font-mono font-semibold text-blue-700">{purchase.next_bill_no}</td>
+                    <td className={`px-3 py-2 font-mono font-semibold ${purchase.conflicts ? 'text-red-700' : 'text-blue-700'}`}>
+                      {purchase.next_bill_no}
+                      {purchase.conflicts && <span className="ml-2 text-xs font-normal">already in use</span>}
+                    </td>
                     <td className="px-3 py-2 text-gray-600">{purchase.suppliers?.name || '-'}</td>
                     <td className="px-3 py-2 text-gray-500">{purchase.supplier_invoice_no || '-'}</td>
                     <td className="px-3 py-2 text-right font-medium">{fmt(purchase.total)}</td>

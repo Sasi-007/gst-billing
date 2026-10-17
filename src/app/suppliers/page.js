@@ -6,7 +6,7 @@ import { supabase } from '../../lib/supabase'
 import { fmt } from '../../lib/gst'
 import { monthStartStr, todayStr } from '../../lib/finance'
 import { useShop } from '../../context/ShopContext'
-import { readPageCache, writePageCache } from '../../lib/pageCache'
+import { clearPageCacheByPrefix, readPageCache, writePageCache } from '../../lib/pageCache'
 import LoadingPlaceholder from '../../components/LoadingPlaceholder'
 import { usePageLoadingState } from '../../context/PageLoadingContext'
 import { useDebouncedValue } from '../../lib/useDebouncedValue'
@@ -27,6 +27,9 @@ export default function SuppliersPage() {
   const [form,      setForm]      = useState(blank)
   const [editId,    setEditId]    = useState(null)
   const [saving,    setSaving]    = useState(false)
+  const [selected,  setSelected]  = useState(() => new Map())
+  const [deleting,  setDeleting]  = useState(false)
+  const [notice,    setNotice]    = useState('')
   const formRef = useRef(null)
   usePageLoadingState('suppliers-page', loading)
 
@@ -112,6 +115,120 @@ export default function SuppliersPage() {
     load()
   }
 
+  function toggleSelect(supplier) {
+    setSelected((prev) => {
+      const next = new Map(prev)
+      if (next.has(supplier.id)) next.delete(supplier.id)
+      else next.set(supplier.id, supplier)
+      return next
+    })
+  }
+
+  function toggleSelectAll() {
+    setSelected((prev) => {
+      const next = new Map(prev)
+      const allSelected = suppliers.length > 0 && suppliers.every((s) => next.has(s.id))
+      for (const supplier of suppliers) {
+        if (allSelected) next.delete(supplier.id)
+        else next.set(supplier.id, supplier)
+      }
+      return next
+    })
+  }
+
+  // Counts purchase bills still pointing at these suppliers so the confirmation can
+  // warn before the link is severed (FK is ON DELETE SET NULL — bills themselves stay).
+  async function countLinkedPurchases(supplierIds) {
+    if (!shop?.id || !supplierIds.length) return new Map()
+
+    const { data, error } = await supabase
+      .from('purchase_bills')
+      .select('supplier_id')
+      .eq('shop_id', shop.id)
+      .in('supplier_id', supplierIds)
+    if (error) throw error
+
+    const counts = new Map()
+    for (const row of data || []) {
+      counts.set(row.supplier_id, (counts.get(row.supplier_id) || 0) + 1)
+    }
+    return counts
+  }
+
+  async function deleteSupplierIds(supplierIds) {
+    const { error } = await supabase
+      .from('suppliers')
+      .delete()
+      .eq('shop_id', shop.id)
+      .in('id', supplierIds)
+    if (error) throw error
+
+    clearPageCacheByPrefix([`suppliers:${shop.id}:`, `inventory:${shop.id}:`, `purchases:${shop.id}:`])
+    setSuppliers((prev) => prev.filter((s) => !supplierIds.includes(s.id)))
+    setSelected((prev) => {
+      const next = new Map(prev)
+      supplierIds.forEach((id) => next.delete(id))
+      return next
+    })
+    if (supplierIds.includes(editId)) cancelEdit()
+  }
+
+  function buildDeleteWarning(linkedCounts, isSingle = false) {
+    const totalBills = [...linkedCounts.values()].reduce((sum, count) => sum + count, 0)
+    if (!totalBills) return ''
+    const scope = isSingle
+      ? `${totalBills} purchase bill(s) are linked to this supplier.`
+      : `${totalBills} purchase bill(s) are linked to ${linkedCounts.size} of these suppliers.`
+    return `\n\n⚠ ${scope} `
+      + 'Those bills will NOT be deleted, but they will lose their supplier link (and will show "—" as supplier). '
+      + 'Products pointing at these suppliers also lose that link. '
+      + 'Use "Remove" instead if you only want to hide the supplier from new entries.'
+  }
+
+  async function handleDeleteSupplier(supplier) {
+    if (!shop?.id || !supplier?.id) return
+    setDeleting(true)
+    try {
+      const linkedCounts = await countLinkedPurchases([supplier.id])
+      const message = `Permanently delete supplier "${supplier.name}"? This cannot be undone.`
+        + buildDeleteWarning(linkedCounts, true)
+      if (!window.confirm(message)) return
+
+      await deleteSupplierIds([supplier.id])
+      setNotice('')
+    } catch (error) {
+      setNotice(`Delete failed: ${error.message}`)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  async function handleDeleteSelected() {
+    if (!shop?.id || selected.size === 0) return
+    const ids = Array.from(selected.keys())
+    const names = Array.from(selected.values()).map((s) => s.name)
+
+    setDeleting(true)
+    try {
+      const linkedCounts = await countLinkedPurchases(ids)
+      const message = `Permanently delete ${ids.length} supplier${ids.length > 1 ? 's' : ''}?`
+        + `\n\n${names.slice(0, 10).join(', ')}${names.length > 10 ? `, +${names.length - 10} more` : ''}`
+        + '\n\nThis cannot be undone.'
+        + buildDeleteWarning(linkedCounts)
+      if (!window.confirm(message)) return
+
+      await deleteSupplierIds(ids)
+      setNotice('')
+    } catch (error) {
+      setNotice(`Delete failed: ${error.message}`)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const selectedCount = selected.size
+  const allSelected = suppliers.length > 0 && suppliers.every((s) => selected.has(s.id))
+
   const f = (label, key, props = {}) => (
     <div>
       <label className="block text-xs text-gray-500 mb-0.5">{label}</label>
@@ -146,6 +263,46 @@ export default function SuppliersPage() {
           <div className="mb-3 text-xs text-blue-600">Searching…</div>
         )}
 
+        {notice && (
+          <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {notice}
+          </div>
+        )}
+
+        {!loading && suppliers.length > 0 && (
+          <div className="flex flex-wrap items-center gap-3 mb-3 text-xs text-gray-600">
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={toggleSelectAll}
+                className="h-4 w-4"
+              />
+              Select all ({suppliers.length})
+            </label>
+            {selectedCount > 0 && (
+              <>
+                <span className="font-medium text-gray-800">{selectedCount} selected</span>
+                <button
+                  type="button"
+                  onClick={handleDeleteSelected}
+                  disabled={deleting}
+                  className="text-red-600 hover:underline font-medium disabled:opacity-50"
+                >
+                  {deleting ? 'Deleting…' : `Delete Selected (${selectedCount})`}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelected(new Map())}
+                  className="text-gray-500 hover:text-red-600"
+                >
+                  Clear selection
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
         {loading ? (
           <LoadingPlaceholder label="Loading suppliers" rows={4} fullPage />
         ) : suppliers.length === 0 ? (
@@ -158,9 +315,16 @@ export default function SuppliersPage() {
                 const stats = statsBySupplier.get(s.id) || { bills: 0, purchased: 0, paid: 0, lastDate: '' }
                 const outstanding = stats.purchased - stats.paid
                 return (
-                  <div key={s.id} className="bg-white rounded-xl border p-3">
+                  <div key={s.id} className={`bg-white rounded-xl border p-3 ${selected.has(s.id) ? 'ring-2 ring-blue-300' : ''}`}>
                     <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(s.id)}
+                        onChange={() => toggleSelect(s)}
+                        className="mt-1 h-4 w-4 shrink-0"
+                        aria-label={`Select ${s.name}`}
+                      />
+                      <div className="min-w-0 flex-1">
                         <Link href={`/suppliers/${s.id}`} className="font-medium text-blue-600 break-words">{s.name}</Link>
                         {s.contact_person && <div className="text-xs text-gray-400">{s.contact_person}</div>}
                         {s.phone && <div className="text-xs text-gray-500">📞 {s.phone}</div>}
@@ -181,10 +345,17 @@ export default function SuppliersPage() {
                       </span>
                     </div>
 
-                    <div className="mt-2 flex gap-4 border-t pt-2 text-xs">
+                    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-2 text-xs">
                       <Link href={`/suppliers/${s.id}`} className="text-indigo-600">Summary</Link>
                       <button onClick={() => { startEdit(s); scrollToForm() }} className="text-blue-600">Edit</button>
-                      <button onClick={() => deactivate(s.id)} className="text-red-500 ml-auto">Remove</button>
+                      <button onClick={() => deactivate(s.id)} className="text-gray-500">Remove</button>
+                      <button
+                        onClick={() => handleDeleteSupplier(s)}
+                        disabled={deleting}
+                        className="text-red-600 ml-auto disabled:opacity-50"
+                      >
+                        Delete
+                      </button>
                     </div>
                   </div>
                 )
@@ -193,9 +364,18 @@ export default function SuppliersPage() {
 
             {/* Desktop: full table */}
             <div className="hidden md:block bg-white rounded-xl border overflow-x-auto">
-              <table className="w-full min-w-[820px] text-sm">
+              <table className="w-full min-w-[880px] text-sm">
               <thead>
                 <tr className="bg-gray-50 text-gray-600 text-xs border-b">
+                  <th className="px-3 py-2 w-8">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleSelectAll}
+                      className="h-4 w-4"
+                      aria-label="Select all suppliers"
+                    />
+                  </th>
                   {['Name','Phone','GSTIN','Bills','Purchased','Outstanding','Last Purchase',''].map(h => (
                     <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
                   ))}
@@ -206,7 +386,16 @@ export default function SuppliersPage() {
                   const stats = statsBySupplier.get(s.id) || { bills: 0, purchased: 0, paid: 0, lastDate: '' }
                   const outstanding = stats.purchased - stats.paid
                   return (
-                    <tr key={s.id} className="border-b hover:bg-gray-50">
+                    <tr key={s.id} className={`border-b hover:bg-gray-50 ${selected.has(s.id) ? 'bg-blue-50' : ''}`}>
+                      <td className="px-3 py-2">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(s.id)}
+                          onChange={() => toggleSelect(s)}
+                          className="h-4 w-4"
+                          aria-label={`Select ${s.name}`}
+                        />
+                      </td>
                       <td className="px-3 py-2 font-medium">
                         <Link href={`/suppliers/${s.id}`} className="text-blue-600 hover:underline">{s.name}</Link>
                         {s.contact_person && <div className="text-xs text-gray-400">{s.contact_person}</div>}
@@ -227,7 +416,10 @@ export default function SuppliersPage() {
                         <button onClick={() => startEdit(s)}
                           className="text-blue-600 hover:underline text-xs mr-3">Edit</button>
                         <button onClick={() => deactivate(s.id)}
-                          className="text-red-400 hover:text-red-600 text-xs">Remove</button>
+                          className="text-gray-400 hover:text-gray-600 text-xs mr-3">Remove</button>
+                        <button onClick={() => handleDeleteSupplier(s)}
+                          disabled={deleting}
+                          className="text-red-600 hover:underline text-xs disabled:opacity-50">Delete</button>
                       </td>
                     </tr>
                   )
