@@ -35,6 +35,22 @@ export function monthStartStr() {
   return formatLocalDate(date)
 }
 
+// First day of the previous calendar month, e.g. 2026-09-01 when today is in October.
+export function lastMonthStartStr() {
+  const date = cloneDate()
+  date.setDate(1)
+  date.setMonth(date.getMonth() - 1)
+  return formatLocalDate(date)
+}
+
+// Last day of the previous calendar month — day 0 of this month rolls back one day.
+export function lastMonthEndStr() {
+  const date = cloneDate()
+  date.setDate(1)
+  date.setDate(0)
+  return formatLocalDate(date)
+}
+
 export function weekStartStr() {
   const date = cloneDate()
   date.setDate(date.getDate() - 6)

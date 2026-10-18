@@ -192,9 +192,10 @@ export default function SummaryPage() {
     const activeProducts = products.filter((product) => product.is_active !== false)
     const lowStockProducts = activeProducts.filter((product) => Number(product.stock_qty || 0) > 0 && Number(product.stock_qty || 0) <= Number(product.min_stock || 0))
     const outOfStockProducts = activeProducts.filter((product) => Number(product.stock_qty || 0) <= 0)
-    const totalStockQty = activeProducts.reduce((sum, product) => sum + Number(product.stock_qty || 0), 0)
-    const stockCostValue = activeProducts.reduce((sum, product) => sum + (Number(product.stock_qty || 0) * Number(product.purchase_price || 0)), 0)
-    const stockSellingValue = activeProducts.reduce((sum, product) => {
+    const inStockProducts = activeProducts.filter((product) => Number(product.stock_qty || 0) > 0)
+    const totalStockQty = inStockProducts.reduce((sum, product) => sum + Number(product.stock_qty || 0), 0)
+    const stockCostValue = inStockProducts.reduce((sum, product) => sum + (Number(product.stock_qty || 0) * Number(product.purchase_price || 0)), 0)
+    const stockSellingValue = inStockProducts.reduce((sum, product) => {
       const sellingPrice = Number(product.selling_price || product.mrp || 0)
       return sum + (Number(product.stock_qty || 0) * sellingPrice)
     }, 0)

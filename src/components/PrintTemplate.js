@@ -1,6 +1,16 @@
 'use client'
 
-import { fmt, numToWords } from '@/lib/gst'
+import { fmt, numToWords, round2 } from '@/lib/gst'
+
+// The payable total may be rounded to the nearest rupee at billing time. Reprints
+// read bill columns instead of the live totals, so derive the adjustment when it
+// was not passed in explicitly.
+function getRoundOffAmount(totals) {
+  const explicit = Number(totals?.roundOffAmount)
+  if (Number.isFinite(explicit) && explicit !== 0) return explicit
+  const preRound = Number(totals?.subtotal || 0) + Number(totals?.gstAmount || 0)
+  return round2(Number(totals?.total || 0) - preRound)
+}
 
 /**
  * Hidden on screen (print-only).  window.print() reveals it.
@@ -32,6 +42,7 @@ function StandardInvoiceTemplate({ data }) {
 
   // CGST/SGST split (intra-state)
   const halfGst = totals.gstAmount / 2
+  const roundOff = getRoundOffAmount(totals)
 
   return (
     <div className="print-only">
@@ -183,6 +194,9 @@ function StandardInvoiceTemplate({ data }) {
                 <div className="row"><span>SGST</span><span>{halfGst.toFixed(2)}</span></div>
               </>
             )}
+            {roundOff !== 0 && (
+              <div className="row"><span>Round Off</span><span>{roundOff > 0 ? '+' : '-'} {Math.abs(roundOff).toFixed(2)}</span></div>
+            )}
             <div className="row grand">
               <span>TOTAL</span>
               <span>{totals.total.toFixed(2)}</span>
@@ -222,6 +236,7 @@ function ThermalReceiptTemplate({ data }) {
   const title = bill.bill_type === 'quotation' ? 'QUOTATION' : bill.bill_type === 'estimate' ? 'ESTIMATE' : 'BILL'
   const printedAt = new Date()
   const gstRows = Object.entries(totals.gstBreakdown || {}).filter(([, d]) => d.gst > 0)
+  const roundOff = getRoundOffAmount(totals)
 
   return (
     <div className="print-only">
@@ -277,6 +292,13 @@ function ThermalReceiptTemplate({ data }) {
             ))}
           </tbody>
         </table>
+
+        {roundOff !== 0 && (
+          <section className="tr-total-row">
+            <span>Round Off</span>
+            <span>{roundOff > 0 ? '+' : '-'} {Math.abs(roundOff).toFixed(2)}</span>
+          </section>
+        )}
 
         <section className="tr-total-row">
           <span>Total Qty: {Number(totalQty).toFixed(3).replace(/\.?0+$/, '')}</span>

@@ -6,7 +6,7 @@ import { useSearchParams } from 'next/navigation'
 import { supabase } from '../../lib/supabase'
 import { fmt } from '../../lib/gst'
 import { calculateCreditBalance, formatSettlementLabel, groupCreditEntriesByAccount } from '../../lib/credits'
-import { monthStartStr, todayStr } from '../../lib/finance'
+import { lastMonthEndStr, lastMonthStartStr, monthStartStr, todayStr } from '../../lib/finance'
 import { readPageCache, writePageCache } from '../../lib/pageCache'
 import LoadingPlaceholder from '../../components/LoadingPlaceholder'
 import { usePageLoadingState } from '../../context/PageLoadingContext'
@@ -211,6 +211,7 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
   const salesItems = Array.isArray(data?.salesItems) ? data.salesItems : []
   const purchaseItems = Array.isArray(data?.purchaseItems) ? data.purchaseItems : []
   const expenses = Array.isArray(data?.expenses) ? data.expenses : []
+  const stockValuation = data?.stockValuation || null
 
   const taxMap = {}
   const hsnMap = {}
@@ -251,61 +252,122 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
   const b2cBillIdSet = new Set(b2cSalesBills.map((bill) => bill.id))
   const b2cSummaryMap = {}
 
-  // Bill-level registers only store GST amounts, so collect the distinct GST
-  // rates charged on each bill's line items (e.g. "5%, 12%" for a mixed bill).
-  function buildGstRateMap(itemList, billIdKey) {
+  // GST returns are filed rate-wise, so a bill carrying more than one GST rate
+  // needs one register row per rate. Line items are totalled per rate here.
+  function buildRateSlabsByBill(itemList, billIdKey) {
     const map = {}
     itemList.forEach((item) => {
       const billId = item[billIdKey]
       if (!billId) return
-      if (!map[billId]) map[billId] = new Set()
-      map[billId].add(num(item.gst_rate))
+      const rate = num(item.gst_rate)
+      if (!map[billId]) map[billId] = {}
+      if (!map[billId][rate]) map[billId][rate] = { rate, taxable: 0, cgst: 0, sgst: 0, igst: 0, gst: 0 }
+      const slab = map[billId][rate]
+      slab.taxable += taxableValue(item)
+      slab.cgst += cgstValue(item)
+      slab.sgst += sgstValue(item)
+      slab.igst += igstValue(item)
+      slab.gst += num(item.gst_amount)
     })
     return map
   }
 
-  function formatGstRates(rateSet) {
-    if (!rateSet || rateSet.size === 0) return ''
-    return [...rateSet].sort((a, b) => a - b).map((rate) => `${rate}%`).join(', ')
+  function sortedSlabs(slabsByRate) {
+    return Object.values(slabsByRate || {}).sort((a, b) => a.rate - b.rate)
   }
 
-  const salesGstRatesByBill = buildGstRateMap(salesItems, 'bill_id')
-  const purchaseGstRatesByBill = buildGstRateMap(purchaseItems, 'purchase_bill_id')
+  const salesSlabsByBill = buildRateSlabsByBill(salesItems, 'bill_id')
 
-  const salesRegisterRows = salesBills.map((bill) => ({
-    Date: formatReportDate(bill.date),
-    'Invoice No': bill.bill_no,
-    Customer: bill.customer_name || 'B2C Customer',
-    GSTIN: bill.customer_gstin || '',
-    Type: bill.customer_gstin ? 'B2B' : 'B2C',
-    'GST Rate': formatGstRates(salesGstRatesByBill[bill.id]),
-    'Taxable Value': round2(num(bill.subtotal)),
-    CGST: round2(num(bill.cgst_amount) || num(bill.gst_amount) / 2),
-    SGST: round2(num(bill.sgst_amount) || num(bill.gst_amount) / 2),
-    IGST: round2(num(bill.igst_amount)),
-    'Total GST': round2(num(bill.gst_amount)),
-    'Invoice Total': round2(num(bill.total)),
-    'Payment Status': bill.payment_status || '',
-  }))
+  // One row per GST rate on the bill. Invoice-level columns (total, status)
+  // repeat on each row, matching GSTR-1 layout — sum "Taxable Value" or
+  // "Total GST" for period figures, not "Invoice Total".
+  const salesRegisterRows = salesBills.flatMap((bill) => {
+    const base = {
+      Date: formatReportDate(bill.date),
+      'Invoice No': bill.bill_no,
+      Customer: bill.customer_name || 'B2C Customer',
+      GSTIN: bill.customer_gstin || '',
+      Type: bill.customer_gstin ? 'B2B' : 'B2C',
+    }
+    const tail = {
+      'Invoice Total': round2(num(bill.total)),
+      'Payment Status': bill.payment_status || '',
+    }
+    const slabs = sortedSlabs(salesSlabsByBill[bill.id])
+
+    // Bills with no stored line items still have to appear, using bill totals.
+    if (slabs.length === 0) {
+      return [{
+        ...base,
+        'GST Rate': '',
+        'Taxable Value': round2(num(bill.subtotal)),
+        CGST: round2(num(bill.cgst_amount) || (num(bill.igst_amount) ? 0 : num(bill.gst_amount) / 2)),
+        SGST: round2(num(bill.sgst_amount) || (num(bill.igst_amount) ? 0 : num(bill.gst_amount) / 2)),
+        IGST: round2(num(bill.igst_amount)),
+        'Total GST': round2(num(bill.gst_amount)),
+        ...tail,
+      }]
+    }
+
+    return slabs.map((slab) => ({
+      ...base,
+      'GST Rate': `${slab.rate}%`,
+      'Taxable Value': round2(slab.taxable),
+      CGST: round2(slab.cgst),
+      SGST: round2(slab.sgst),
+      IGST: round2(slab.igst),
+      'Total GST': round2(slab.gst),
+      ...tail,
+    }))
+  })
   const b2bRegisterRows = salesRegisterRows.filter((row) => row.Type === 'B2B')
   const b2cRegisterRows = salesRegisterRows.filter((row) => row.Type === 'B2C')
 
-  const purchaseRegisterRows = purchaseBills.map((bill) => ({
-    Date: formatReportDate(bill.date),
-    'Purchase No': bill.bill_no,
-    'Supplier Invoice No': bill.supplier_invoice_no || '',
-    Supplier: bill.suppliers?.name || '',
-    'Supplier GSTIN': bill.suppliers?.gstin || '',
-    Interstate: bill.is_interstate ? 'Yes' : 'No',
-    'GST Rate': formatGstRates(purchaseGstRatesByBill[bill.id]),
-    'Taxable Value': round2(num(bill.subtotal)),
-    CGST: bill.is_interstate ? 0 : round2(num(bill.gst_amount) / 2),
-    SGST: bill.is_interstate ? 0 : round2(num(bill.gst_amount) / 2),
-    IGST: bill.is_interstate ? round2(num(bill.gst_amount)) : 0,
-    'Input GST': round2(num(bill.gst_amount)),
-    'Invoice Total': round2(num(bill.total)),
-    'Payment Status': bill.payment_status || '',
-  }))
+  const purchaseSlabsByBill = buildRateSlabsByBill(purchaseItems, 'purchase_bill_id')
+
+  // Interstate purchases attract IGST instead of CGST+SGST. The bill's
+  // `is_interstate` flag is authoritative, so the slab's GST is split here
+  // rather than relying on the line item's stored tax columns.
+  const purchaseRegisterRows = purchaseBills.flatMap((bill) => {
+    const interstate = Boolean(bill.is_interstate)
+    const base = {
+      Date: formatReportDate(bill.date),
+      'Purchase No': bill.bill_no,
+      'Supplier Invoice No': bill.supplier_invoice_no || '',
+      Supplier: bill.suppliers?.name || '',
+      'Supplier GSTIN': bill.suppliers?.gstin || '',
+      Interstate: interstate ? 'Yes' : 'No',
+    }
+    const tail = {
+      'Invoice Total': round2(num(bill.total)),
+      'Payment Status': bill.payment_status || '',
+    }
+    const taxRow = (gst) => ({
+      CGST: interstate ? 0 : round2(gst / 2),
+      SGST: interstate ? 0 : round2(gst / 2),
+      IGST: interstate ? round2(gst) : 0,
+      'Input GST': round2(gst),
+    })
+    const slabs = sortedSlabs(purchaseSlabsByBill[bill.id])
+
+    if (slabs.length === 0) {
+      return [{
+        ...base,
+        'GST Rate': '',
+        'Taxable Value': round2(num(bill.subtotal)),
+        ...taxRow(num(bill.gst_amount)),
+        ...tail,
+      }]
+    }
+
+    return slabs.map((slab) => ({
+      ...base,
+      'GST Rate': `${slab.rate}%`,
+      'Taxable Value': round2(slab.taxable),
+      ...taxRow(slab.gst),
+      ...tail,
+    }))
+  })
 
   const salesItemRows = salesItems.map((item) => {
     const bill = salesBillById[item.bill_id] || {}
@@ -414,6 +476,7 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
           <div key={card.label} className="bg-white border rounded-lg p-3">
             <div className="text-xs text-gray-500">{card.label}</div>
             <div className={`text-xl font-bold mt-1 ${card.cls}`}>{card.value}</div>
+            <div className="text-[11px] text-gray-400 mt-0.5">{formatReportDate(dateFrom)} – {formatReportDate(dateTo)}</div>
           </div>
         ))}
       </div>
@@ -429,6 +492,43 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
           <div className="text-xl font-bold mt-1 text-indigo-700">{b2bSalesBills.length}</div>
           <div className="text-xs text-gray-400">{fmt(b2bSalesBills.reduce((sum, bill) => sum + num(bill.total), 0))}</div>
         </div>
+      </div>
+
+      <div className="bg-white border rounded-lg p-3">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div className="text-xs text-gray-500">Closing Stock Worth (at purchase cost)</div>
+          <span className="text-[11px] text-gray-400">
+            As on {formatReportDate(dateTo)}
+            {stockValuation?.isHistorical ? ' — stock held at period end' : ' (today)'}
+          </span>
+        </div>
+        <div className="text-2xl font-bold mt-1 text-teal-700">{fmt(stockValuation?.purchaseValue || 0)}</div>
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500">
+          <span>Selling value {fmt(stockValuation?.sellingValue || 0)}</span>
+          <span>Expected margin {fmt(Math.max(0, (stockValuation?.sellingValue || 0) - (stockValuation?.purchaseValue || 0)))}</span>
+          <span>{round2(stockValuation?.units || 0)} units across {stockValuation?.products || 0} products</span>
+          {stockValuation?.missingCost > 0 && (
+            <span className="text-orange-600">
+              {stockValuation.missingCost} product{stockValuation.missingCost > 1 ? 's have' : ' has'} no purchase price — valued at 0
+            </span>
+          )}
+        </div>
+        {stockValuation?.isHistorical && (
+          <div className="mt-1 text-[11px] text-gray-400">
+            {stockValuation.laterBills > 0 ? (
+              <>
+                Rebuilt from today&apos;s stock by reversing {stockValuation.laterBills} bill{stockValuation.laterBills > 1 ? 's' : ''} dated after {formatReportDate(dateTo)}
+                {' '}(−{round2(stockValuation.laterPurchaseUnits)} units purchased, +{round2(stockValuation.laterSaleUnits)} units sold back).
+                Valued at each product&apos;s current purchase price.
+              </>
+            ) : (
+              <>
+                No purchases or sales recorded after {formatReportDate(dateTo)}, so closing stock equals today&apos;s stock.
+                Valued at each product&apos;s current purchase price.
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="bg-white rounded-xl border p-4">
@@ -915,8 +1015,96 @@ const TABS = [
   { key:'topproducts', label:'Top Products' },
 ]
 
-async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
-  if (tab === 'sales') {
+// Current stock worth is an "as of now" figure — product stock levels are not
+// historical, so it is deliberately independent of the selected report period.
+// Pages through a table in 1000-row chunks, returning every matching row.
+async function fetchAllRows(buildQuery) {
+  const pageSize = 1000
+  const all = []
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await buildQuery().range(from, from + pageSize - 1)
+    if (error) break
+    const rows = data || []
+    all.push(...rows)
+    if (rows.length < pageSize) break
+  }
+  return all
+}
+
+// Stock movements are keyed by bill id, so ids are fetched first and the item
+// rows pulled in batches — `.in()` has a practical URL length limit.
+async function fetchItemsForBillIds(table, idColumn, billIds, columns) {
+  const batchSize = 200
+  const all = []
+  for (let i = 0; i < billIds.length; i += batchSize) {
+    const batch = billIds.slice(i, i + batchSize)
+    const rows = await fetchAllRows(() => supabase.from(table).select(columns).in(idColumn, batch))
+    all.push(...rows)
+  }
+  return all
+}
+
+// Values stock held on `asOnDate` (the end of the selected period) rather than
+// today: closing qty = current qty − everything bought after the period
+// + everything sold after it. Only products still holding stock on that date
+// are counted. Cost basis is the product master's current purchase price.
+async function fetchStockValuation(shopId, asOnDate) {
+  const valuation = {
+    purchaseValue: 0, sellingValue: 0, units: 0, products: 0, missingCost: 0,
+    asOnDate, isHistorical: false, laterPurchaseUnits: 0, laterSaleUnits: 0, laterBills: 0,
+  }
+
+  const products = await fetchAllRows(() => supabase
+    .from('products')
+    .select('id,stock_qty,purchase_price,selling_price,mrp')
+    .eq('shop_id', shopId))
+
+  const closingQty = new Map(products.map((p) => [p.id, num(p.stock_qty)]))
+  const isHistorical = Boolean(asOnDate) && asOnDate < todayStr()
+  valuation.isHistorical = isHistorical
+
+  if (isHistorical) {
+    const [laterPurchaseBills, laterSalesBills] = await Promise.all([
+      fetchAllRows(() => supabase.from('purchase_bills').select('id').eq('shop_id', shopId).gt('date', asOnDate)),
+      fetchAllRows(() => supabase.from('bills').select('id').eq('shop_id', shopId).eq('bill_type', 'invoice').gt('date', asOnDate)),
+    ])
+
+    const [laterPurchaseItems, laterSalesItems] = await Promise.all([
+      fetchItemsForBillIds('purchase_bill_items', 'purchase_bill_id', laterPurchaseBills.map((b) => b.id), 'product_id,quantity'),
+      fetchItemsForBillIds('bill_items', 'bill_id', laterSalesBills.map((b) => b.id), 'product_id,quantity'),
+    ])
+
+    valuation.laterBills = laterPurchaseBills.length + laterSalesBills.length
+
+    // Rewind later stock movements: purchases added stock, sales removed it.
+    laterPurchaseItems.forEach((row) => {
+      if (!row.product_id || !closingQty.has(row.product_id)) return
+      valuation.laterPurchaseUnits += num(row.quantity)
+      closingQty.set(row.product_id, closingQty.get(row.product_id) - num(row.quantity))
+    })
+    laterSalesItems.forEach((row) => {
+      if (!row.product_id || !closingQty.has(row.product_id)) return
+      valuation.laterSaleUnits += num(row.quantity)
+      closingQty.set(row.product_id, closingQty.get(row.product_id) + num(row.quantity))
+    })
+  }
+
+  products.forEach((product) => {
+    const qty = closingQty.get(product.id) || 0
+    if (qty <= 0) return
+    const cost = num(product.purchase_price)
+    const sale = num(product.selling_price) || num(product.mrp)
+    valuation.products += 1
+    valuation.units += qty
+    valuation.purchaseValue += qty * cost
+    valuation.sellingValue += qty * sale
+    if (cost <= 0) valuation.missingCost += 1
+  })
+
+  return valuation
+}
+
+async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {  if (tab === 'sales') {
     const { data } = await supabase.from('bills').select('*').eq('shop_id', shopId).eq('bill_type', 'invoice').gte('date', dateFrom).lte('date', dateTo).order('date')
     return data || []
   }
@@ -978,7 +1166,7 @@ async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
     return { sales: sales || [], purchases: purchases || [] }
   }
   if (tab === 'auditor') {
-    const [{ data: salesBills }, { data: purchaseBills }, { data: expenses }] = await Promise.all([
+    const [{ data: salesBills }, { data: purchaseBills }, { data: expenses }, stockValuation] = await Promise.all([
       supabase
         .from('bills')
         .select('id,bill_no,date,customer_name,customer_gstin,subtotal,cgst_amount,sgst_amount,igst_amount,gst_amount,total,payment_status')
@@ -1001,6 +1189,7 @@ async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
         .gte('expense_date', dateFrom)
         .lte('expense_date', dateTo)
         .order('expense_date'),
+      fetchStockValuation(shopId, dateTo),
     ])
     const salesBillIds = (salesBills || []).map(b => b.id)
     const purchaseBillIds = (purchaseBills || []).map(b => b.id)
@@ -1018,6 +1207,7 @@ async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
       salesItems: salesItems || [],
       purchaseItems: purchaseItems || [],
       expenses: expenses || [],
+      stockValuation,
     }
   }
   if (tab === 'topproducts') {
@@ -1037,7 +1227,7 @@ async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {
 }
 function emptyDataForTab(tab) {
   if (tab === 'gst') return { sales: [], purchases: [] }
-  if (tab === 'auditor') return { salesBills: [], purchaseBills: [], salesItems: [], purchaseItems: [], expenses: [] }
+  if (tab === 'auditor') return { salesBills: [], purchaseBills: [], salesItems: [], purchaseItems: [], expenses: [], stockValuation: null }
   if (tab === 'stockcheck') return { purchaseItems: [], invoiceItems: [], otherItems: [], products: [] }
   if (tab === 'credits') return { accounts: [], allEntries: [], periodEntries: [] }
   return []
@@ -1141,10 +1331,15 @@ export default function ReportsPage() {
         {[
           { label:'Today',      from: todayStr(),   to: todayStr() },
           { label:'This Month', from: monthStartStr(), to: todayStr() },
+          { label:'Last Month', from: lastMonthStartStr(), to: lastMonthEndStr() },
         ].map(p => (
           <button key={p.label}
             onClick={() => { setDateFrom(p.from); setDateTo(p.to) }}
-            className="px-3 py-2 bg-gray-100 text-gray-700 rounded-lg text-xs hover:bg-gray-200">
+            className={`px-3 py-2 rounded-lg text-xs ${
+              dateFrom === p.from && dateTo === p.to
+                ? 'bg-blue-600 text-white'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}>
             {p.label}
           </button>
         ))}

@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, Fragment } from 'react'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { clearPageCacheByPrefix, readPageCache, writePageCache } from '@/lib/pageCache'
@@ -33,6 +33,35 @@ const CSV_COLUMNS = [
 ]
 const INVENTORY_LIST_LIMIT = 50
 const LIST_SELECT = 'id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,purchase_price,mrp,selling_price,gst_rate,stock_qty,min_stock,hsn_code,category_id,supplier_id,is_active,suppliers(name),categories(name)'
+const VALUE_SELECT = 'id,stock_qty,min_stock,purchase_price,selling_price,mrp'
+
+// `column` is what PostgREST orders by. Category and supplier live on joined
+// tables, so they order through the embedded resource (`categories(name)`),
+// falling back to the product name if the database rejects that form.
+const INVENTORY_SORT_COLUMNS = [
+  { key: 'name',           label: 'Product',  column: 'name' },
+  { key: 'brand',          label: 'Brand',    column: 'brand' },
+  { key: 'barcode',        label: 'Barcode',  column: 'barcode' },
+  { key: 'category',       label: 'Cat',      column: 'categories(name)', referenced: true },
+  { key: 'unit',           label: 'Unit',     column: 'unit', align: 'center' },
+  { key: 'purchase_price', label: 'Purchase', column: 'purchase_price', align: 'right' },
+  { key: 'mrp',            label: 'MRP',      column: 'mrp', align: 'right' },
+  { key: 'selling_price',  label: 'Selling',  column: 'selling_price', align: 'right' },
+  { key: 'gst_rate',       label: 'GST%',     column: 'gst_rate', align: 'center' },
+  { key: 'stock_qty',      label: 'Stock',    column: 'stock_qty', align: 'right' },
+  { key: 'supplier',       label: 'Supplier', column: 'suppliers(name)', referenced: true },
+]
+
+function SortArrows({ active, direction }) {
+  const upActive = active && direction === 'asc'
+  const downActive = active && direction === 'desc'
+  return (
+    <span className="inline-flex flex-col leading-[0.55rem] ml-1 align-middle">
+      <span className={upActive ? 'text-blue-600 text-[11px]' : 'text-gray-300 text-[8px]'}>▲</span>
+      <span className={downActive ? 'text-blue-600 text-[11px]' : 'text-gray-300 text-[8px]'}>▼</span>
+    </span>
+  )
+}
 
 function escapeCsv(value) {
   const text = Array.isArray(value) ? value.join(', ') : String(value ?? '')
@@ -124,6 +153,213 @@ function supplierFilterTree(supplierId) {
   return makeGroup('and', [rule])
 }
 
+// Stock worth of a set of product rows: cost side uses the purchase price, retail
+// side uses selling price (falling back to MRP).
+// Only products actually holding stock carry value. Zero-stock rows would add
+// nothing but inflate the product count, and negative stock (a data error)
+// would wrongly subtract value, so both are excluded and counted separately.
+function summarizeStockValue(rows) {
+  return (rows || []).reduce((acc, product) => {
+    const qty = Number(product.stock_qty) || 0
+    if (qty <= 0) {
+      acc.emptyProducts += 1
+      if (qty < 0) acc.negativeProducts += 1
+      return acc
+    }
+    const cost = Number(product.purchase_price) || 0
+    const sale = Number(product.selling_price) || Number(product.mrp) || 0
+    acc.products += 1
+    acc.units += qty
+    acc.purchaseValue += qty * cost
+    acc.sellingValue += qty * sale
+    if (cost <= 0) acc.missingCost += 1
+    return acc
+  }, { products: 0, units: 0, purchaseValue: 0, sellingValue: 0, missingCost: 0, emptyProducts: 0, negativeProducts: 0 })
+}
+
+function formatHistoryDate(value) {  if (!value) return '—'
+  const date = new Date(`${String(value).slice(0, 10)}T00:00:00`)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleDateString('en-IN')
+}
+
+function PriceDelta({ current, previous }) {
+  const now = Number(current || 0)
+  const before = Number(previous)
+  if (!Number.isFinite(before) || before === 0 || now === before) return null
+  const diff = now - before
+  const pct = (diff / before) * 100
+  return (
+    <span className={`ml-1 text-[11px] font-medium ${diff > 0 ? 'text-red-600' : 'text-green-600'}`}>
+      {diff > 0 ? '▲' : '▼'} {fmt(Math.abs(diff))} ({Math.abs(pct).toFixed(1)}%)
+    </span>
+  )
+}
+
+// Inline purchase summary for one product: every purchase of it, newest first,
+// with the rate/MRP movement against the previous purchase so a supplier price
+// or MRP revision is obvious at a glance.
+function ProductPurchaseHistory({ shopId, product, colSpan }) {
+  const [rows, setRows] = useState(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!shopId || !product?.id) return
+    let cancelled = false
+
+    async function loadHistory() {
+      setError('')
+      setRows(null)
+
+      const { data: itemRows, error: itemErr } = await supabase
+        .from('purchase_bill_items')
+        .select('id,purchase_bill_id,quantity,rate,mrp,total,created_at')
+        .eq('shop_id', shopId)
+        .eq('product_id', product.id)
+        .order('created_at', { ascending: false })
+        .limit(25)
+      if (cancelled) return
+      if (itemErr) {
+        setError(itemErr.message || 'Failed to load purchase history')
+        setRows([])
+        return
+      }
+
+      const billIds = [...new Set((itemRows || []).map((row) => row.purchase_bill_id).filter(Boolean))]
+      const { data: billRows } = billIds.length
+        ? await supabase.from('purchase_bills').select('id,bill_no,date,suppliers(name)').in('id', billIds)
+        : { data: [] }
+      if (cancelled) return
+
+      const billMap = new Map((billRows || []).map((bill) => [bill.id, bill]))
+      const merged = (itemRows || [])
+        .map((row) => {
+          const bill = billMap.get(row.purchase_bill_id)
+          return {
+            ...row,
+            bill_no: bill?.bill_no || '—',
+            bill_date: bill?.date || null,
+            supplier_name: bill?.suppliers?.name || '—',
+          }
+        })
+        .sort((a, b) => String(b.bill_date || b.created_at || '').localeCompare(String(a.bill_date || a.created_at || '')))
+
+      setRows(merged)
+    }
+
+    loadHistory()
+    return () => { cancelled = true }
+  }, [product?.id, shopId])
+
+  const summary = (rows || []).reduce((acc, row) => {
+    const qty = Number(row.quantity) || 0
+    acc.qty += qty
+    acc.value += Number(row.total) || (qty * (Number(row.rate) || 0))
+    return acc
+  }, { qty: 0, value: 0 })
+  const latest = rows?.[0] || null
+  const avgRate = summary.qty > 0 ? summary.value / summary.qty : 0
+
+  const body = (
+    <div className="bg-blue-50/60 border-t px-3 py-3">
+      {rows === null ? (
+        <div className="text-sm text-gray-500">Loading purchase history…</div>
+      ) : error ? (
+        <div className="text-sm text-red-600">{error}</div>
+      ) : rows.length === 0 ? (
+        <div className="text-sm text-gray-500">
+          No purchase bills recorded for {product.name} yet. Stock values use the saved purchase price {fmt(product.purchase_price)}.
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+            <div className="rounded-lg border bg-white px-3 py-2">
+              <div className="text-[11px] text-gray-500">Last purchase rate</div>
+              <div className="text-sm font-semibold text-gray-900">
+                {fmt(latest.rate)}
+                <PriceDelta current={latest.rate} previous={rows[1]?.rate} />
+              </div>
+            </div>
+            <div className="rounded-lg border bg-white px-3 py-2">
+              <div className="text-[11px] text-gray-500">Last purchase MRP</div>
+              <div className="text-sm font-semibold text-gray-900">
+                {fmt(latest.mrp)}
+                <PriceDelta current={latest.mrp} previous={rows[1]?.mrp} />
+              </div>
+            </div>
+            <div className="rounded-lg border bg-white px-3 py-2">
+              <div className="text-[11px] text-gray-500">Average rate</div>
+              <div className="text-sm font-semibold text-gray-900">{fmt(avgRate)}</div>
+            </div>
+            <div className="rounded-lg border bg-white px-3 py-2">
+              <div className="text-[11px] text-gray-500">Total purchased</div>
+              <div className="text-sm font-semibold text-gray-900">{summary.qty} {product.unit}</div>
+            </div>
+            <div className="rounded-lg border bg-white px-3 py-2">
+              <div className="text-[11px] text-gray-500">Total purchase value</div>
+              <div className="text-sm font-semibold text-gray-900">{fmt(summary.value)}</div>
+            </div>
+          </div>
+
+          <div className="mt-3 overflow-x-auto rounded-lg border bg-white">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 text-gray-500">
+                <tr>
+                  <th className="px-3 py-2 text-left">Date</th>
+                  <th className="px-3 py-2 text-left">Purchase No</th>
+                  <th className="px-3 py-2 text-left">Supplier</th>
+                  <th className="px-3 py-2 text-right">Qty</th>
+                  <th className="px-3 py-2 text-right">Rate</th>
+                  <th className="px-3 py-2 text-right">MRP</th>
+                  <th className="px-3 py-2 text-right">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, index) => {
+                  const older = rows[index + 1]
+                  return (
+                    <tr key={row.id} className="border-t">
+                      <td className="px-3 py-2">{formatHistoryDate(row.bill_date || row.created_at)}</td>
+                      <td className="px-3 py-2 font-medium text-gray-900">{row.bill_no}</td>
+                      <td className="px-3 py-2 text-gray-600">{row.supplier_name}</td>
+                      <td className="px-3 py-2 text-right">{row.quantity}</td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        {fmt(row.rate)}
+                        <PriceDelta current={row.rate} previous={older?.rate} />
+                      </td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap">
+                        {fmt(row.mrp)}
+                        <PriceDelta current={row.mrp} previous={older?.mrp} />
+                      </td>
+                      <td className="px-3 py-2 text-right">{fmt(row.total)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
+            <span>
+              Current master: purchase {fmt(product.purchase_price)} · MRP {fmt(product.mrp)} · selling {fmt(product.selling_price || product.mrp)}.
+              Each purchase keeps its own rate and MRP, so old bills stay accurate when a supplier revises prices.
+            </span>
+            <Link href={`/inventory/${product.id}`} className="text-blue-600 hover:underline">
+              Open product to apply the latest rate &amp; MRP →
+            </Link>
+          </div>
+        </>
+      )}
+    </div>
+  )
+
+  if (!colSpan) return body
+  return (
+    <tr className="border-b">
+      <td colSpan={colSpan} className="p-0">{body}</td>
+    </tr>
+  )
+}
+
 export default function InventoryPage() {
   const { shop } = useShop()
   const searchParams = useSearchParams()
@@ -139,11 +375,17 @@ export default function InventoryPage() {
   const [showAdvanced, setShowAdvanced] = useState(Boolean(supplierParam))
   const [queryError, setQueryError] = useState('')
   const [selected, setSelected] = useState(() => new Map())
+  const [sortKey, setSortKey] = useState('name')
+  const [sortDir, setSortDir] = useState('asc')
+  // Set when the database rejects ordering through a joined table, so the list
+  // silently falls back to product-name order instead of showing no rows.
+  const [sortFallback, setSortFallback] = useState('')
+  const [expandedProductId, setExpandedProductId] = useState(null)
   const debouncedSearch = useDebouncedValue(search)
   const advFilter = filterTreeToPostgrest(advTree)
   const advCount = countRules(advTree)
   const advUsesActive = treeHasField(advTree, 'is_active')
-  const cacheKey = shop?.id ? `inventory:${shop.id}:${debouncedSearch}:${filter}:${catId}:${advFilter}:${page}` : ''
+  const cacheKey = shop?.id ? `inventory:${shop.id}:${debouncedSearch}:${filter}:${catId}:${advFilter}:${sortKey}:${sortDir}:${page}` : ''
   const catsCacheKey = shop?.id ? `inventory-categories:${shop.id}` : ''
   const initialListCache = readPageCache(cacheKey)
   const initialCatsCache = readPageCache(catsCacheKey)
@@ -153,6 +395,8 @@ export default function InventoryPage() {
   const [cats,     setCats]     = useState(() => initialCatsCache?.cats || [])
   const [suppliers, setSuppliers] = useState(() => initialCatsCache?.suppliers || [])
   const [csvBusy, setCsvBusy] = useState(false)
+  const [matchingTotals, setMatchingTotals] = useState(null)
+  const [totalsLoading, setTotalsLoading] = useState(false)
   // Guards against a slower earlier request overwriting newer results.
   const loadSeq = useRef(0)
   const [csvMessage, setCsvMessage] = useState('')
@@ -162,7 +406,17 @@ export default function InventoryPage() {
   // Any change to search/filter/category should reset back to page 1.
   useEffect(() => {
     setPage(0)
-  }, [debouncedSearch, filter, catId, advFilter])
+  }, [debouncedSearch, filter, catId, advFilter, sortKey, sortDir])
+
+  // A row's purchase history belongs to that row only — close it when the list changes.
+  useEffect(() => {
+    setExpandedProductId(null)
+  }, [debouncedSearch, filter, catId, advFilter, sortKey, sortDir, page])
+
+  function handleSort(key) {
+    setSortDir((prevDir) => (key === sortKey ? (prevDir === 'asc' ? 'desc' : 'asc') : 'asc'))
+    setSortKey(key)
+  }
 
   // Deep link: /inventory?supplier=<id> pre-applies a supplier condition.
   // The initial value is seeded in useState, so this only handles later changes.
@@ -194,12 +448,17 @@ export default function InventoryPage() {
     })
   }, [catsCacheKey, shop?.id])
 
-  function buildProductsQuery({ select, count }) {
+  function buildProductsQuery({ select, count, orderColumn }) {
+    const sortColumn = INVENTORY_SORT_COLUMNS.find((col) => col.key === sortKey)
+    const column = orderColumn || sortColumn?.column || 'name'
+    const ascending = sortDir === 'asc'
+
     let q = supabase
       .from('products')
       .select(select, count ? { count } : undefined)
       .eq('shop_id', shop.id)
-      .order('name')
+      .order(column, { ascending, nullsFirst: false })
+    if (column !== 'name') q = q.order('name', { ascending: true })
 
     if (debouncedSearch) {
       const term = debouncedSearch.toLowerCase()
@@ -238,12 +497,26 @@ export default function InventoryPage() {
     const from = page * INVENTORY_LIST_LIMIT
     const to = from + INVENTORY_LIST_LIMIT - 1
     const seq = ++loadSeq.current
-    const q = buildProductsQuery({
+    const sortColumn = INVENTORY_SORT_COLUMNS.find((col) => col.key === sortKey)
+    let { data, count, error } = await buildProductsQuery({
       select: LIST_SELECT,
       count: 'exact',
     }).range(from, to)
 
-    const { data, count, error } = await q
+    // Ordering through a joined table is not supported everywhere — retry on the
+    // product name so a sort click can never leave the page empty.
+    if (error && sortColumn?.referenced) {
+      const retry = await buildProductsQuery({ select: LIST_SELECT, count: 'exact', orderColumn: 'name' }).range(from, to)
+      if (!retry.error) {
+        data = retry.data
+        count = retry.count
+        error = null
+        if (seq === loadSeq.current) setSortFallback(sortColumn.label)
+      }
+    } else if (seq === loadSeq.current) {
+      setSortFallback('')
+    }
+
     if (seq !== loadSeq.current) return
     if (error) {
       setQueryError(error.message)
@@ -259,9 +532,39 @@ export default function InventoryPage() {
     setTotalCount(typeof count === 'number' ? count : null)
     writePageCache(cacheKey, { products: rows, totalCount: count })
     setLoading(false)
-  }, [cacheKey, catId, debouncedSearch, filter, page, shop?.id, advFilter, advUsesActive])
+  }, [cacheKey, catId, debouncedSearch, filter, page, shop?.id, advFilter, advUsesActive, sortKey, sortDir])
 
   useEffect(() => { load() }, [load])
+
+  // Stock value across everything the current filters match (not just this page),
+  // so applying a filter immediately shows what that selection is worth.
+  useEffect(() => {
+    if (!shop?.id) {
+      setMatchingTotals(null)
+      return
+    }
+
+    let cancelled = false
+    setTotalsLoading(true)
+
+    async function loadTotals() {
+      try {
+        const rows = await fetchAllMatchingProducts(VALUE_SELECT, { orderColumn: 'name' })
+        if (cancelled) return
+        setMatchingTotals(summarizeStockValue(rows))
+      } catch {
+        if (!cancelled) setMatchingTotals(null)
+      } finally {
+        if (!cancelled) setTotalsLoading(false)
+      }
+    }
+
+    loadTotals()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shop?.id, debouncedSearch, filter, catId, advFilter, advUsesActive])
+
+  const pageTotals = summarizeStockValue(products)
 
   async function toggleActive(id, val) {
     await supabase.from('products').update({ is_active: val }).eq('id', id).eq('shop_id', shop?.id)
@@ -382,7 +685,7 @@ export default function InventoryPage() {
     }
   }
 
-  async function fetchAllMatchingProducts(select = LIST_SELECT) {
+  async function fetchAllMatchingProducts(select = LIST_SELECT, { orderColumn } = {}) {
     const CSV_BATCH_SIZE = 1000
     const all = []
     let from = 0
@@ -391,7 +694,7 @@ export default function InventoryPage() {
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const to = from + CSV_BATCH_SIZE - 1
-      const { data, error } = await buildProductsQuery({ select }).range(from, to)
+      const { data, error } = await buildProductsQuery({ select, orderColumn }).range(from, to)
       if (error) throw error
       const rows = data || []
       all.push(...rows)
@@ -771,6 +1074,11 @@ export default function InventoryPage() {
       </div>
 
       {/* Product list */}
+      {sortFallback && (
+        <div className="mb-2 rounded-lg bg-yellow-50 px-3 py-2 text-xs text-yellow-800">
+          Sorting by {sortFallback} is not supported by the database — showing product-name order instead.
+        </div>
+      )}
       {loading ? (
         <LoadingPlaceholder label="Loading inventory" rows={4} fullPage />
       ) : products.length === 0 ? (
@@ -821,6 +1129,12 @@ export default function InventoryPage() {
                   <div className="flex items-center justify-between mt-2">
                     <span className="text-xs text-gray-400 truncate">{p.suppliers?.name || '—'}</span>
                     <div className="flex items-center gap-3 shrink-0">
+                      <button
+                        onClick={() => setExpandedProductId(id => (id === p.id ? null : p.id))}
+                        className="text-xs text-blue-600 hover:underline"
+                      >
+                        {expandedProductId === p.id ? '▲ Purchases' : '▼ Purchases'}
+                      </button>
                       <Link href={`/inventory/${p.id}`}
                         className="text-blue-600 hover:underline text-xs">Edit</Link>
                       <button
@@ -837,6 +1151,11 @@ export default function InventoryPage() {
                       </button>
                     </div>
                   </div>
+                  {expandedProductId === p.id && (
+                    <div className="-mx-3 mt-2">
+                      <ProductPurchaseHistory shopId={shop?.id} product={p} />
+                    </div>
+                  )}
                 </div>
               )
             })}
@@ -856,20 +1175,38 @@ export default function InventoryPage() {
                       aria-label="Select all rows on this page"
                     />
                   </th>
-                  {['Product','Brand','Barcode','Cat','Unit','Purchase','MRP','Selling','GST%','Stock','Supplier',''].map(h => (
-                    <th key={h} className="px-3 py-2 text-left whitespace-nowrap">{h}</th>
+                  <th className="px-3 py-2 w-6" aria-label="Purchase history" />
+                  {INVENTORY_SORT_COLUMNS.map(col => (
+                    <th key={col.key} className="px-3 py-2 text-left whitespace-nowrap">
+                      <button
+                        type="button"
+                        onClick={() => handleSort(col.key)}
+                        title={`Sort by ${col.label}`}
+                        className={`inline-flex items-center font-medium hover:text-blue-700 ${
+                          sortKey === col.key ? 'text-blue-700' : 'text-gray-600'
+                        }`}
+                      >
+                        {col.label}
+                        <SortArrows active={sortKey === col.key} direction={sortDir} />
+                      </button>
+                    </th>
                   ))}
+                  <th className="px-3 py-2 text-left whitespace-nowrap" />
                 </tr>
               </thead>
               <tbody>
                 {products.map(p => {
                   const isOut = p.stock_qty <= 0
                   const isLow = !isOut && p.min_stock > 0 && p.stock_qty <= p.min_stock
+                  const isExpanded = expandedProductId === p.id
                   return (
-                    <tr key={p.id}
-                      className={`border-b hover:bg-gray-50 ${isOut ? 'bg-red-50' : isLow ? 'bg-yellow-50' : ''} ${selected.has(p.id) ? 'bg-blue-50' : ''}`}
+                    <Fragment key={p.id}>
+                    <tr
+                      onClick={() => setExpandedProductId(id => (id === p.id ? null : p.id))}
+                      className={`border-b cursor-pointer hover:bg-gray-50 ${isOut ? 'bg-red-50' : isLow ? 'bg-yellow-50' : ''} ${selected.has(p.id) ? 'bg-blue-50' : ''} ${isExpanded ? 'bg-blue-50' : ''}`}
+                      title="Click to see purchase history"
                     >
-                      <td className="px-3 py-2">
+                      <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
                         <input
                           type="checkbox"
                           checked={selected.has(p.id)}
@@ -877,6 +1214,9 @@ export default function InventoryPage() {
                           className="h-4 w-4"
                           aria-label={`Select ${p.name}`}
                         />
+                      </td>
+                      <td className="px-1 py-2 text-center text-gray-400">
+                        <span aria-hidden="true">{isExpanded ? '▾' : '▸'}</span>
                       </td>
                       <td className="px-3 py-2 max-w-[220px]" title={[p.name, p.local_name].filter(Boolean).join(' / ')}>
                         <div className="font-medium truncate">{p.name}</div>
@@ -901,7 +1241,7 @@ export default function InventoryPage() {
                         {isOut && ' ⚠'}
                       </td>
                       <td className="px-3 py-2 text-xs text-gray-400">{p.suppliers?.name || '—'}</td>
-                      <td className="px-3 py-2 text-right">
+                      <td className="px-3 py-2 text-right" onClick={e => e.stopPropagation()}>
                         <Link href={`/inventory/${p.id}`}
                           className="text-blue-600 hover:underline text-xs mr-2">Edit</Link>
                         <button
@@ -918,10 +1258,62 @@ export default function InventoryPage() {
                         </button>
                       </td>
                     </tr>
+                    {isExpanded && (
+                      <ProductPurchaseHistory
+                        shopId={shop?.id}
+                        product={p}
+                        colSpan={INVENTORY_SORT_COLUMNS.length + 3}
+                      />
+                    )}
+                    </Fragment>
                   )
                 })}
               </tbody>
             </table>
+          </div>
+
+          <div className="border-t bg-gray-50 px-3 py-2 text-xs">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-1">
+              <span className="font-semibold text-gray-700">
+                Stock value — this page: <span className="text-teal-700">{fmt(pageTotals.purchaseValue)}</span>
+              </span>
+              <span className="text-gray-500">
+                Selling value {fmt(pageTotals.sellingValue)} · {pageTotals.products} in-stock product{pageTotals.products === 1 ? '' : 's'} · {Math.round(pageTotals.units * 1000) / 1000} units
+              </span>
+              {pageTotals.emptyProducts > 0 && (
+                <span className="text-gray-400">
+                  {pageTotals.emptyProducts} with no stock excluded
+                </span>
+              )}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-x-6 gap-y-1">
+              <span className="font-semibold text-gray-700">
+                All {totalCount != null ? totalCount : ''} matching {advCount > 0 || debouncedSearch || catId || filter !== 'all' ? '(filtered)' : ''}:{' '}
+                <span className="text-teal-700">
+                  {totalsLoading && !matchingTotals ? 'calculating…' : fmt(matchingTotals?.purchaseValue || 0)}
+                </span>
+              </span>
+              {matchingTotals && (
+                <span className="text-gray-500">
+                  Selling value {fmt(matchingTotals.sellingValue)} · {matchingTotals.products} in-stock product{matchingTotals.products === 1 ? '' : 's'} · {Math.round(matchingTotals.units * 1000) / 1000} units
+                </span>
+              )}
+              {matchingTotals?.emptyProducts > 0 && (
+                <span className="text-gray-400">
+                  {matchingTotals.emptyProducts} with no stock excluded
+                </span>
+              )}
+              {matchingTotals?.negativeProducts > 0 && (
+                <span className="text-red-600">
+                  {matchingTotals.negativeProducts} product{matchingTotals.negativeProducts > 1 ? 's have' : ' has'} negative stock
+                </span>
+              )}
+              {matchingTotals?.missingCost > 0 && (
+                <span className="text-orange-600">
+                  {matchingTotals.missingCost} in-stock product{matchingTotals.missingCost > 1 ? 's have' : ' has'} no purchase price
+                </span>
+              )}
+            </div>
           </div>
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 py-2 border-t text-xs text-gray-500">

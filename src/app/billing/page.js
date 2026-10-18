@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { calcItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
+import { calcItem, calcBillTotals, fmt, round2, GST_RATES } from '@/lib/gst'
 import { printWithContent } from '@/lib/print'
 import { todayStr } from '@/lib/finance'
 import {
@@ -42,6 +42,31 @@ function historyDueAmount(bill) {
   return Math.max(0, Number(bill.total || 0) - Number(bill.paid_amount || 0))
 }
 
+// Rounds the payable total to the nearest rupee (the usual retail practice) and
+// reports the adjustment so it can be shown on screen and on the printed bill.
+// Line items, subtotal and GST are never touched — only the final payable figure.
+function applyBillRoundOff(totals, enabled) {
+  if (!enabled) return { ...totals, roundOffAmount: 0 }
+  const rounded = Math.round(round2(totals.total))
+  return {
+    ...totals,
+    roundOffAmount: round2(rounded - totals.total),
+    total: round2(rounded),
+  }
+}
+
+// Number inputs snap to the nearest step multiple, which turns a rate like
+// 45.238 into odd fractions when the arrow keys are used. Stepping manually keeps
+// every change an exact 2-decimal rupee move.
+function stepNumericInputValue(currentValue, direction, step = 0.01, min = 0) {
+  const parsed = parseFloat(currentValue)
+  const base = Number.isFinite(parsed) ? parsed : 0
+  const snapped = Math.round(base / step) * step
+  const next = round2(snapped + direction * step)
+  if (min !== null && next < min) return String(round2(min))
+  return String(next)
+}
+
 const HISTORY_SORT_COLUMNS = [
   { key: 'date', label: 'Date', value: (b) => `${String(b.date || '')} ${String(b.created_at || '')}` },
   { key: 'bill_no', label: 'Bill No', value: (b) => String(b.bill_no || '') },
@@ -56,6 +81,18 @@ const HISTORY_SORT_COLUMNS = [
 let _uid = 0
 function uid() { return ++_uid }
 
+// Rate derived from the purchase price: empty markup means rate == cost,
+// 5 means cost + 5%. Returns null when there is no usable purchase price so
+// callers keep whatever rate they already had.
+function markupRateFromCost(purchasePrice, markupPct) {
+  const base = parseFloat(purchasePrice)
+  if (!Number.isFinite(base) || base <= 0) return null
+  const pct = parseFloat(markupPct)
+  const safePct = Number.isFinite(pct) ? pct : 0
+  if (safePct <= -100) return null
+  return round2(base * (1 + safePct / 100))
+}
+
 function emptyItem() {
   return {
     _id:            uid(),
@@ -67,6 +104,9 @@ function emptyItem() {
     mrp:            0,
     purchase_price: '',
     rate:           '',
+    // true once the rate is typed/stepped by hand, which pins the row and stops
+    // the MRP markup box from overwriting it.
+    rate_manual:    false,
     gst_rate:       0,
     discount_pct:   '',
     // computed
@@ -127,11 +167,10 @@ function getProfitPreview(item) {
   const profitPerUnit = effectiveSellingPrice - purchasePrice
   const totalProfit = profitPerUnit * quantity
 
-  // Margin is measured against the printed MRP (the shop's reference price),
-  // falling back to the actual selling price when no MRP is recorded.
-  const mrpPerUnit = parseFloat(item.mrp)
-  const marginBase = Number.isFinite(mrpPerUnit) && mrpPerUnit > 0 ? mrpPerUnit : effectiveSellingPrice
-  const marginPct = (profitPerUnit / marginBase) * 100
+  // Margin is measured on the purchase cost, so it matches the markup % used
+  // to price the row (cost + 5% reads back as 5.0%). This is the same basis as
+  // the margin helper on the product page.
+  const marginPct = (profitPerUnit / purchasePrice) * 100
 
   return {
     totalProfit,
@@ -558,6 +597,13 @@ export default function BillingPage() {
   const [printTemplateChoice, setPrintTemplateChoice] = useState(null)
   // Opt-in per bill: prints the "YOU SAVED ON MRP" line on the thermal receipt.
   const [showSavings, setShowSavings] = useState(false)
+  // Payable total is rounded to the nearest rupee by default, as most counters expect.
+  const [roundOffEnabled, setRoundOffEnabled] = useState(true)
+  // Cost markup mode: when on, Rate is derived from the product's purchase
+  // price for every row that has not been priced by hand. Per-bill, resets on
+  // a new bill.
+  const [rateFromCost, setRateFromCost] = useState(false)
+  const [rateMarkupPct, setRateMarkupPct] = useState('')
   const [saving,      setSaving]      = useState(false)
   const [toast,       setToast]       = useState(null)
   const [mounted,     setMounted]     = useState(false)
@@ -595,6 +641,14 @@ export default function BillingPage() {
       return String(left).localeCompare(String(right), 'en', { numeric: true, sensitivity: 'base' }) * direction
     })
   }, [historyBills, historySortDir, historySortKey])
+
+  const historyTotals = useMemo(() => sortedHistoryBills.reduce((acc, bill) => {
+    acc.count += 1
+    acc.total += Number(bill.total || 0)
+    acc.paid += Number(bill.paid_amount || 0)
+    acc.due += historyDueAmount(bill)
+    return acc
+  }, { count: 0, total: 0, paid: 0, due: 0 }), [sortedHistoryBills])
 
   function handleHistorySort(key) {
     if (key === historySortKey) {
@@ -731,6 +785,9 @@ export default function BillingPage() {
         setNotes(draft.notes || '')
         setPlaceOfSupply(draft.placeOfSupply || shop.state || '')
         setReverseCharge(!!draft.reverseCharge)
+        setRoundOffEnabled(draft.roundOffEnabled !== false)
+        setRateFromCost(!!draft.rateFromCost)
+        setRateMarkupPct(draft.rateMarkupPct || '')
         setConversionSource(draft.conversionSource || null)
         showToast('Restored unsaved bill draft')
       } catch (error) {
@@ -758,9 +815,12 @@ export default function BillingPage() {
       notes,
       placeOfSupply,
       reverseCharge,
+      roundOffEnabled,
+      rateFromCost,
+      rateMarkupPct,
       conversionSource,
     })
-  }, [shop?.id, items, customer, billDate, billNo, billType, payMode, paidAmt, notes, placeOfSupply, reverseCharge, conversionSource])
+  }, [shop?.id, items, customer, billDate, billNo, billType, payMode, paidAmt, notes, placeOfSupply, reverseCharge, roundOffEnabled, rateFromCost, rateMarkupPct, conversionSource])
 
   useEffect(() => {
     if (!shop?.id || !mounted) return
@@ -1112,6 +1172,7 @@ export default function BillingPage() {
           mrp: it.mrp ?? 0,
           purchase_price: it.cost_price ?? product?.purchase_price ?? '',
           rate: it.rate ?? 0,
+          rate_manual: true,
           gst_rate: it.gst_rate ?? 0,
           discount_pct: it.discount_pct ?? 0,
           base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
@@ -1187,6 +1248,7 @@ export default function BillingPage() {
         mrp: it.mrp ?? 0,
         purchase_price: it.cost_price ?? '',
         rate: it.rate ?? 0,
+        rate_manual: true,
         gst_rate: it.gst_rate ?? 0,
         discount_pct: it.discount_pct ?? 0,
         base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
@@ -1229,6 +1291,7 @@ export default function BillingPage() {
         unit:         prefill.unit || 'pcs',
         mrp:          rate,
         rate,
+        rate_manual:  true,
         gst_rate:     prefill.gst_rate || 0,
         quantity:     prefill.quantity || 1,
       }
@@ -1302,16 +1365,70 @@ export default function BillingPage() {
   function updateItem(index, field, value) {
     setItems(prev => {
       const next = [...prev]
-      next[index] = recalc({ ...next[index], [field]: value })
+      const row = { ...next[index], [field]: value }
+
+      if (field === 'rate') {
+        // Typing a rate pins the row; clearing the box hands it back to the % control.
+        row.rate_manual = String(value ?? '').trim() !== ''
+        if (!row.rate_manual && rateFromCost) {
+          const derived = markupRateFromCost(row.purchase_price, rateMarkupPct)
+          if (derived !== null) row.rate = derived
+        }
+      }
+
+      if (field === 'purchase_price' && rateFromCost && !row.rate_manual) {
+        const derived = markupRateFromCost(value, rateMarkupPct)
+        if (derived !== null) row.rate = derived
+      }
+
+      next[index] = recalc(row)
       return next
     })
   }
 
+  // Re-price every unpinned row whenever the markup toggle or % value changes.
+  useEffect(() => {
+    if (!rateFromCost) return
+    setItems(prev => {
+      let changed = false
+      const next = prev.map(item => {
+        if (item.rate_manual) return item
+        const derived = markupRateFromCost(item.purchase_price, rateMarkupPct)
+        if (derived === null || Number(item.rate) === derived) return item
+        changed = true
+        return recalc({ ...item, rate: derived })
+      })
+      return changed ? next : prev
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rateFromCost, rateMarkupPct])
+
   // ── Derived totals ─────────────────────────────────────────────────────────
   // Include free-text items (no product_id) that have a name and rate entered
   const filledItems = items.filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
-  const totals      = calcBillTotals(filledItems)
+  const rawTotals   = calcBillTotals(filledItems)
+  const totals      = applyBillRoundOff(rawTotals, roundOffEnabled)
   const profitSummary = getBillProfitSummary(filledItems)
+  const manualRateCount = items.filter(i => i.rate_manual && (i.product_id || i.product_name)).length
+  // Rows the cost-markup control cannot price, and rows whose markup pushed the
+  // rate above the printed MRP — both need to be visible before saving.
+  const costMarkupIssues = useMemo(() => {
+    if (!rateFromCost) return { missingCost: 0, aboveMrp: 0 }
+    return items.reduce((acc, item) => {
+      if (!item.product_id && !item.product_name) return acc
+      const cost = parseFloat(item.purchase_price)
+      if (!Number.isFinite(cost) || cost <= 0) {
+        if (!item.rate_manual) acc.missingCost += 1
+        return acc
+      }
+      const mrp = parseFloat(item.mrp)
+      const rate = parseFloat(item.rate)
+      if (!item.rate_manual && Number.isFinite(mrp) && mrp > 0 && Number.isFinite(rate) && rate > mrp) {
+        acc.aboveMrp += 1
+      }
+      return acc
+    }, { missingCost: 0, aboveMrp: 0 })
+  }, [items, rateFromCost])
   const filteredCustomerDirectory = useMemo(
     () => customerDirectory.filter((entry) => matchesCustomerSearch(entry, debouncedCustomerPickerSearch)),
     [customerDirectory, debouncedCustomerPickerSearch]
@@ -1660,7 +1777,8 @@ export default function BillingPage() {
 
   // ── Product selected from modal ───────────────────────────────────────────
   function handleProductSelect(product) {
-    const rate = product.selling_price || product.mrp || 0
+    const derived = rateFromCost ? markupRateFromCost(product.purchase_price, rateMarkupPct) : null
+    const rate = derived !== null ? derived : (product.selling_price || product.mrp || 0)
     setItems(prev => {
       const next = [...prev]
       const item = {
@@ -1669,9 +1787,10 @@ export default function BillingPage() {
         product_name: getBillProductName(product),
         hsn_code:     product.hsn_code || '',
         unit:         product.unit     || 'pcs',
-        mrp:          product.mrp      || rate,
+        mrp:          product.mrp      || product.selling_price || 0,
         purchase_price: product.purchase_price || 0,
         rate,
+        rate_manual:  false,
         gst_rate:     product.gst_rate || 0,
         quantity:     1,
         discount_pct: '',
@@ -1699,6 +1818,7 @@ export default function BillingPage() {
         purchase_price: '',
         mrp:          '',
         rate:         '',
+        rate_manual:  false,
         gst_rate:     0,
         base_amount:  0,
         gst_amount:   0,
@@ -1741,6 +1861,8 @@ export default function BillingPage() {
     setPrintData(null)
     setPrintTemplateChoice(null)
     setShowSavings(false)
+    setRateFromCost(false)
+    setRateMarkupPct('')
     setSearchOpen(false)
     setConversionSource(null)
   }
@@ -2235,6 +2357,25 @@ export default function BillingPage() {
             ) : historyBills.length === 0 ? (
               <div className="text-center text-gray-400 py-10">No {billType}s found</div>
             ) : (
+              <>
+              <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                <div className="rounded-lg border bg-white px-3 py-2">
+                  <div className="text-[11px] text-gray-500">{billType === 'invoice' ? 'Total Sales' : 'Total Amount'}</div>
+                  <div className="text-lg font-bold text-blue-700">₹{historyTotals.total.toFixed(2)}</div>
+                </div>
+                <div className="rounded-lg border bg-white px-3 py-2">
+                  <div className="text-[11px] text-gray-500">Total Received</div>
+                  <div className="text-lg font-bold text-green-700">₹{historyTotals.paid.toFixed(2)}</div>
+                </div>
+                <div className="rounded-lg border bg-white px-3 py-2">
+                  <div className="text-[11px] text-gray-500">Total Due</div>
+                  <div className="text-lg font-bold text-orange-700">₹{historyTotals.due.toFixed(2)}</div>
+                </div>
+                <div className="rounded-lg border bg-white px-3 py-2">
+                  <div className="text-[11px] text-gray-500">Bills Listed</div>
+                  <div className="text-lg font-bold text-gray-800">{historyTotals.count}</div>
+                </div>
+              </div>
               <div className="bg-white rounded-xl border overflow-x-auto">
                 <table className="w-full text-sm">
                   <thead>
@@ -2358,8 +2499,21 @@ export default function BillingPage() {
                       </tr>
                     ))}
                   </tbody>
+                  <tfoot>
+                    <tr className="bg-gray-50 border-t-2 font-semibold text-gray-800">
+                      <td className="px-3 py-2" />
+                      <td className="px-3 py-2 text-xs text-gray-500" colSpan={3}>
+                        Total of {historyTotals.count} {billType}{historyTotals.count === 1 ? '' : 's'} listed
+                      </td>
+                      <td className="px-3 py-2 text-right">₹{historyTotals.total.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-right">₹{historyTotals.paid.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-right text-orange-700">₹{historyTotals.due.toFixed(2)}</td>
+                      <td className="px-3 py-2" colSpan={3} />
+                    </tr>
+                  </tfoot>
                 </table>
               </div>
+              </>
             )}
           </div>
         )}
@@ -2522,6 +2676,11 @@ export default function BillingPage() {
                         if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
                           e.preventDefault()
                           focusId(`rate-${i}`)
+                          return
+                        }
+                        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                          e.preventDefault()
+                          updateItem(i, 'mrp', stepNumericInputValue(item.mrp, e.key === 'ArrowUp' ? 1 : -1))
                         }
                       }}
                       className="w-full border rounded px-1 py-0.5 text-right"
@@ -2542,10 +2701,24 @@ export default function BillingPage() {
                         if (e.key === 'Enter' || (e.key === 'Tab' && !e.shiftKey)) {
                           e.preventDefault()
                           focusId(`disc-${i}`)
+                          return
+                        }
+                        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                          e.preventDefault()
+                          updateItem(i, 'rate', stepNumericInputValue(item.rate, e.key === 'ArrowUp' ? 1 : -1))
                         }
                       }}
-                      className="w-full border rounded px-1 py-0.5 text-right"
+                      className={`w-full border rounded px-1 py-0.5 text-right ${
+                        !rateFromCost || item.rate_manual
+                          ? ''
+                          : parseFloat(item.mrp) > 0 && parseFloat(item.rate) > parseFloat(item.mrp)
+                            ? 'bg-amber-50 border-amber-400'
+                            : 'bg-blue-50 border-blue-300'
+                      }`}
                       min="0" step="0.01"
+                      title={rateFromCost && !item.rate_manual
+                        ? 'Auto-set from the purchase price. Type a rate here to price this row by hand.'
+                        : undefined}
                     />
                   </td>
 
@@ -2591,7 +2764,7 @@ export default function BillingPage() {
                         <span>Cost {fmt(profitPreview.totalCost)}</span>
                         <span>·</span>
                         <span>{profitPreview.isLoss ? 'Loss' : 'Profit'} {fmt(Math.abs(profitPreview.totalProfit))}</span>
-                        <span title="Margin on MRP">({profitPreview.marginPct.toFixed(1)}%)</span>
+                        <span title="Margin on purchase cost">({profitPreview.marginPct.toFixed(1)}%)</span>
                       </div>
                     )}
                   </td>
@@ -2612,14 +2785,84 @@ export default function BillingPage() {
               })}
             </tbody>
           </table>
-
-          <button
-            onClick={addRow}
-            className="mt-2 text-sm text-blue-600 hover:text-blue-800 hover:underline"
-          >
-            + Add Row &nbsp;<kbd className="hidden md:inline text-xs">F4</kbd>
-          </button>
           </div>{/* end table-scroll */}
+
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
+            <button
+              onClick={addRow}
+              className="text-sm text-blue-600 hover:text-blue-800 hover:underline"
+            >
+              + Add Row &nbsp;<kbd className="hidden md:inline text-xs">F4</kbd>
+            </button>
+
+            {/* Rate from cost: off = normal selling price, on = purchase price + markup % */}
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setRateFromCost(v => !v)}
+                className={`rounded border px-2 py-1 text-xs font-semibold ${
+                  rateFromCost
+                    ? 'border-blue-600 bg-blue-600 text-white'
+                    : 'border-gray-300 bg-white text-gray-600 hover:bg-gray-50'
+                }`}
+                title="Price every row from its purchase cost. Leave the % empty for Rate = cost."
+              >
+                Rate = Cost {rateFromCost ? '✓' : '+ %'}
+              </button>
+
+              {rateFromCost && (
+                <>
+                  <div className="flex items-center gap-1">
+                    <input
+                      type="number"
+                      value={rateMarkupPct}
+                      onChange={e => setRateMarkupPct(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                          e.preventDefault()
+                          setRateMarkupPct(stepNumericInputValue(rateMarkupPct, e.key === 'ArrowUp' ? 1 : -1, 1, -99))
+                        }
+                      }}
+                      placeholder="0"
+                      step="0.5"
+                      className="w-20 rounded border px-2 py-1 text-right text-sm"
+                      title="Empty = Rate is the same as the purchase price. 5 = cost + 5%."
+                    />
+                    <span className="text-sm text-gray-500">% over cost</span>
+                  </div>
+                  <span className="text-xs text-gray-500">
+                    {parseFloat(rateMarkupPct)
+                      ? `Rate = purchase price + ${parseFloat(rateMarkupPct)}%`
+                      : 'Rate = purchase price (no margin)'}
+                  </span>
+                  {costMarkupIssues.aboveMrp > 0 && (
+                    <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                      {costMarkupIssues.aboveMrp} row{costMarkupIssues.aboveMrp > 1 ? 's' : ''} above MRP
+                    </span>
+                  )}
+                  {costMarkupIssues.missingCost > 0 && (
+                    <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
+                      {costMarkupIssues.missingCost} row{costMarkupIssues.missingCost > 1 ? 's have' : ' has'} no purchase price — rate unchanged
+                    </span>
+                  )}
+                  {manualRateCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setItems(prev => prev.map(item => {
+                        if (!item.rate_manual) return item
+                        const derived = markupRateFromCost(item.purchase_price, rateMarkupPct)
+                        return recalc({ ...item, rate_manual: false, rate: derived === null ? item.rate : derived })
+                      }))}
+                      className="text-xs text-blue-600 hover:underline"
+                      title="Rows where you typed a rate by hand keep that rate. This re-applies the % to all of them."
+                    >
+                      {manualRateCount} row{manualRateCount > 1 ? 's' : ''} priced manually — apply % to all
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
         </div>
 
         {/* ── Footer: payment + totals + actions ──────────────────────── */}
@@ -2688,6 +2931,17 @@ export default function BillingPage() {
               </div>
               <div className="flex items-center gap-1.5 pb-1.5">
                 <input
+                  id="roundOff"
+                  type="checkbox"
+                  checked={roundOffEnabled}
+                  onChange={e => setRoundOffEnabled(e.target.checked)}
+                />
+                <label htmlFor="roundOff" className="text-xs text-gray-600" title="Rounds the payable total to the nearest rupee">
+                  Round off total
+                </label>
+              </div>
+              <div className="flex items-center gap-1.5 pb-1.5">
+                <input
                   id="showSavings"
                   type="checkbox"
                   checked={showSavings}
@@ -2746,6 +3000,15 @@ export default function BillingPage() {
               <span className="text-gray-500">Total GST</span>
               <span>{fmt(totals.gstAmount)}</span>
             </div>
+            {roundOffEnabled && (
+              <div className="flex justify-between text-xs">
+                <span className="text-gray-500">Round Off</span>
+                <span className={totals.roundOffAmount < 0 ? 'text-red-500' : 'text-gray-600'}>
+                  {totals.roundOffAmount > 0 ? '+' : totals.roundOffAmount < 0 ? '– ' : ''}
+                  {fmt(Math.abs(totals.roundOffAmount))}
+                </span>
+              </div>
+            )}
             <div className="flex justify-between font-bold text-lg border-t pt-2 mt-1">
               <span>Total</span>
               <span className="text-blue-700">{fmt(totals.total)}</span>
