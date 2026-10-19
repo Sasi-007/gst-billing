@@ -17,6 +17,7 @@ const NAV = [
   { href: '/credits',   icon: '📒', label: 'Credit Book',key: 'u' },
   { href: '/inventory', icon: '📦', label: 'Inventory',  key: 'i' },
   { href: '/price-check', icon: '💰', label: 'Price Check', key: null },
+  { href: '/inventory/bulk-rates', icon: '📋', label: 'Bulk Rates', key: null },
   { href: '/online',    icon: '🌐', label: 'Online Store', key: 'o' },
   { href: '/categories', icon: '🏷️', label: 'Categories', key: null },
   { href: '/purchases', icon: '🛒', label: 'Purchases',  key: 'p' },
@@ -27,6 +28,7 @@ const NAV = [
   { href: '/banking',   icon: '🏛️', label: 'Banking',    key: 'l' },
   { href: '/summary',   icon: '🧮', label: 'Summary',    key: 'm' },
   { href: '/reports',   icon: '📈', label: 'Reports',    key: 't' },
+  { href: '/extracts',  icon: '📤', label: 'Extracts',   key: null },
   { href: '/files',     icon: '📁', label: 'Files',      key: null },
   { href: '/settings',  icon: '⚙️', label: 'Settings',   key: null },
   { href: '/superadmin',icon: '🛡️', label: 'Admin',       key: null },
@@ -35,15 +37,15 @@ const NAV = [
 const NAV_SECTIONS = [
   {
     title: 'Main',
-    items: NAV.slice(0, 12),
+    items: NAV.slice(0, 13),
   },
   {
     title: 'Finance',
-    items: NAV.slice(12, 19),
+    items: NAV.slice(13, 21),
   },
   {
     title: 'System',
-    items: NAV.slice(19),
+    items: NAV.slice(21),
   },
 ]
 

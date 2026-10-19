@@ -222,7 +222,7 @@ export default function PriceCheckPage() {
     try {
       const { error } = await supabase
         .from('products')
-        .update({ [field]: nextValue })
+        .update({ [field]: nextValue, last_price_source: 'price-check' })
         .eq('id', id)
         .eq('shop_id', shop.id)
       if (error) throw error

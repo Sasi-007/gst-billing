@@ -12,6 +12,7 @@ import InventoryFilterPanel from '@/components/InventoryFilterPanel'
 import { countRules, emptyFilterTree, filterTreeToPostgrest, makeGroup, makeRule, treeHasField } from '@/lib/inventoryFilters'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
+import { describeChange, fetchLatestPriceChanges, sourceLabel } from '@/lib/priceHistory'
 
 const CSV_COLUMNS = [
   'name',
@@ -395,6 +396,7 @@ export default function InventoryPage() {
   const [cats,     setCats]     = useState(() => initialCatsCache?.cats || [])
   const [suppliers, setSuppliers] = useState(() => initialCatsCache?.suppliers || [])
   const [csvBusy, setCsvBusy] = useState(false)
+  const [latestRateChanges, setLatestRateChanges] = useState(new Map())
   const [matchingTotals, setMatchingTotals] = useState(null)
   const [totalsLoading, setTotalsLoading] = useState(false)
   // Guards against a slower earlier request overwriting newer results.
@@ -535,6 +537,20 @@ export default function InventoryPage() {
   }, [cacheKey, catId, debouncedSearch, filter, page, shop?.id, advFilter, advUsesActive, sortKey, sortDir])
 
   useEffect(() => { load() }, [load])
+
+  // Latest rate change per visible product, for the ▲/▼ indicator. Kept out of
+  // load() so a failure here (e.g. migration not applied) never blocks the list.
+  useEffect(() => {
+    let cancelled = false
+    if (!shop?.id || products.length === 0) {
+      setLatestRateChanges(new Map())
+      return
+    }
+    fetchLatestPriceChanges(shop.id, products.map((p) => p.id))
+      .then((map) => { if (!cancelled) setLatestRateChanges(map) })
+      .catch(() => { if (!cancelled) setLatestRateChanges(new Map()) })
+    return () => { cancelled = true }
+  }, [shop?.id, products])
 
   // Stock value across everything the current filters match (not just this page),
   // so applying a filter immediately shows what that selection is worth.
@@ -867,7 +883,7 @@ export default function InventoryPage() {
         if (existing?.id) {
           const { error } = await supabase
             .from('products')
-            .update(payload)
+            .update({ ...payload, last_price_source: 'import' })
             .eq('id', existing.id)
             .eq('shop_id', shop.id)
           if (error) throw new Error(`Row ${rowIndex + 2}: ${error.message}`)
@@ -955,6 +971,12 @@ export default function InventoryPage() {
             className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium"
           >
             ⚡ Quick Add
+          </Link>
+          <Link
+            href="/inventory/bulk-rates"
+            className="px-4 py-2 bg-amber-600 text-white rounded-lg hover:bg-amber-700 text-sm font-medium"
+          >
+            📋 Bulk Rates
           </Link>
           <Link
             href="/inventory/new"
@@ -1121,6 +1143,19 @@ export default function InventoryPage() {
                       <span className="text-gray-500">Pur: {fmt(p.purchase_price)}</span>
                       <span className="text-gray-500">MRP: {fmt(p.mrp)}</span>
                       <span className="font-medium text-blue-700">Sell: {fmt(p.selling_price || p.mrp)}</span>
+                      {(() => {
+                        const change = describeChange(latestRateChanges.get(p.id))
+                        if (!change) return null
+                        const up = change.direction === 'up'
+                        return (
+                          <span
+                            title={`${sourceLabel(latestRateChanges.get(p.id)?.source)} on ${latestRateChanges.get(p.id)?.effective_date}`}
+                            className={`text-xs font-medium ${up ? 'text-red-600' : 'text-green-600'}`}
+                          >
+                            {up ? '▲' : '▼'}{fmt(change.prev)}
+                          </span>
+                        )
+                      })()}
                     </div>
                     {Number(p.gst_rate) > 0
                       ? <span className="text-xs text-gray-500">{p.gst_rate}%</span>

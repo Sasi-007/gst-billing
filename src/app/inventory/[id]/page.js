@@ -8,6 +8,7 @@ import { useShop } from '@/context/ShopContext'
 import { findProductNameSuggestions, saveProductNameSuggestion } from '@/lib/productNameSuggestions'
 import { suggestGstRateForHsn } from '@/lib/hsnGstReference'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
+import RateHistoryPanel from '@/components/RateHistoryPanel'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'dozen', 'box', 'pack', 'bottle', 'roll', 'strip', 'pair']
 
@@ -84,6 +85,7 @@ export default function ProductFormPage() {
   const [similarProducts, setSimilarProducts] = useState([])
   const [similarLoading, setSimilarLoading] = useState(false)
   const [dismissedSimilar, setDismissedSimilar] = useState(false)
+  const [rateNote, setRateNote] = useState('')
   const debouncedHsnCode = useDebouncedValue(form.hsn_code, 400)
   const debouncedProductName = useDebouncedValue(form.name, 350)
   const { shop } = useShop()
@@ -449,6 +451,9 @@ export default function ProductFormPage() {
       category_id:    form.category_id  || null,
       supplier_id:    form.supplier_id  || null,
       updated_at:     new Date().toISOString(),
+      // Consumed and cleared by the rate-history trigger.
+      last_price_source: 'manual',
+      last_price_note: rateNote.trim() || null,
     }
 
     const { error: err } = isNew
@@ -727,6 +732,23 @@ export default function ProductFormPage() {
             </p>
           </div>
 
+          {!isNew && (
+            <div className="col-span-2">
+              <label className="block text-xs font-medium text-gray-600 mb-1">
+                Reason for rate change <span className="text-gray-400">(optional)</span>
+              </label>
+              <input
+                type="text"
+                value={rateNote}
+                onChange={e => setRateNote(e.target.value)}
+                placeholder="e.g. supplier revised rate, festival offer"
+                className="w-full border rounded-lg px-3 py-2 text-sm" />
+              <p className="text-xs text-gray-400 mt-0.5">
+                Saved against this change in the rate history below. Ignored if no rate changed.
+              </p>
+            </div>
+          )}
+
           <div className="col-span-2 rounded-xl border border-amber-200 bg-amber-50/70 p-4">
             <label className="flex items-center gap-2 text-sm font-medium text-amber-900">
               <input
@@ -880,6 +902,10 @@ export default function ProductFormPage() {
                 </>
               )}
             </div>
+          )}
+
+          {!isNew && (
+            <RateHistoryPanel shopId={shop?.id} productId={id} />
           )}
         </div>
 

@@ -144,6 +144,16 @@ body {
     display: none !important;
   }
 
+  /* The installed-PWA shell pins the body (position:fixed; overflow:hidden),
+     which would clip the printout to a single page. Release it while printing. */
+  body.app-shell-locked {
+    position: static;
+    inset: auto;
+    width: auto;
+    height: auto;
+    overflow: visible;
+  }
+
   .print-only {
     display: block !important;
   }
@@ -156,6 +166,96 @@ body {
   .invoice-pack-print > .print-only:last-child {
     break-after: auto;
     page-break-after: auto;
+  }
+
+  /* Stock and supplier listings are wide, so they print landscape and repeat
+     their header row on every page. */
+  @page stockReport {
+    size: A4 landscape;
+    margin: 0;
+  }
+
+  .stock-pack-print > .print-only {
+    break-after: page;
+    page-break-after: always;
+  }
+
+  .stock-pack-print > .print-only:last-child {
+    break-after: auto;
+    page-break-after: auto;
+  }
+
+  .report-sheet {
+    page: stockReport;
+    padding: 8mm;
+    font-size: 8.5px;
+    color: #000;
+  }
+
+  .report-head {
+    text-align: center;
+    border-bottom: 1.5px solid #000;
+    padding-bottom: 4px;
+    margin-bottom: 6px;
+  }
+
+  .report-head h1 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 800;
+    text-transform: uppercase;
+  }
+
+  .report-head h2 {
+    margin: 3px 0 1px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .5px;
+  }
+
+  .report-head p {
+    margin: 0;
+    font-size: 8px;
+  }
+
+  .report-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+
+  .report-table thead {
+    display: table-header-group;
+  }
+
+  .report-table tfoot {
+    display: table-footer-group;
+  }
+
+  .report-table th,
+  .report-table td {
+    border: 0.5px solid #555;
+    padding: 2px 3px;
+    vertical-align: top;
+    word-break: break-word;
+  }
+
+  .report-table th {
+    background: #eee;
+    font-weight: 700;
+    text-align: left;
+  }
+
+  .report-table tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .report-table .tc {
+    text-align: center;
+  }
+
+  .report-table .tr {
+    text-align: right;
   }
 
   body {

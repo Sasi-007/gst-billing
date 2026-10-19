@@ -251,7 +251,7 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
         const updatePayload = replaceStock ? { ...payload, stock_qty: num(row.stock_qty) } : payload
         const { error: updErr } = await supabase
           .from('products')
-          .update(updatePayload)
+          .update({ ...updatePayload, last_price_source: 'import' })
           .eq('shop_id', shopId)
           .eq('id', match.id)
         if (updErr) throw updErr

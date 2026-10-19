@@ -126,6 +126,15 @@ export const COMMANDS = [
     keywords: ['price check', 'price', 'rate', 'mrp', 'scan price', 'barcode check', 'check rate'],
   },
   {
+    id: 'bulk-rates',
+    label: 'Bulk Rate Update',
+    hint: 'Revise purchase, selling and MRP rates for many products at once',
+    href: '/inventory/bulk-rates',
+    icon: '📋',
+    group: 'Find',
+    keywords: ['bulk rate', 'bulk rates', 'rate update', 'price update', 'revise rates', 'change prices', 'rate revision', 'price list', 'increase price', 'rate history'],
+  },
+  {
     id: 'search-customer',
     label: 'Search Customers',
     hint: 'Find a customer',
@@ -145,6 +154,15 @@ export const COMMANDS = [
   },
 
   // ── Reports ─────────────────────────────────────────────────
+  {
+    id: 'monthly-extract',
+    label: 'Monthly Extract / Download Books',
+    hint: 'One ZIP with a month of GST registers, stock and masters',
+    href: '/extracts',
+    icon: '📤',
+    group: 'Reports',
+    keywords: ['extract', 'extracts', 'monthly extract', 'month end', 'download', 'backup', 'export', 'export all', 'data export', 'zip', 'books', 'close month', 'month close', 'give auditor', 'send to ca', 'archive'],
+  },
   {
     id: 'gst-summary',
     label: 'GST Summary',

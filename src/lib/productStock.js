@@ -94,6 +94,7 @@ export async function syncProductPricingFromLatestPurchases(shopId, productIds) 
       .update({
         purchase_price: Math.round(netPerUnit * 100) / 100,
         mrp: Number(latestRow.mrp || 0),
+        last_price_source: 'purchase',
       })
       .eq('id', productId)
       .eq('shop_id', shopId)

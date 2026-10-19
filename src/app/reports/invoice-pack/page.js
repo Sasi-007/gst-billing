@@ -8,8 +8,16 @@ import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { todayStr } from '@/lib/finance'
 import { printWithContent } from '@/lib/print'
+import { fetchAllRows, fetchAllRowsByIds } from '@/lib/supabaseBatch'
 import { useShop } from '@/context/ShopContext'
 import PrintTemplate from '@/components/PrintTemplate'
+
+// Batched reads lose the server-side ordering, so the pack is sorted here.
+function compareBills(a, b) {
+  const dateDiff = String(a.date || '').localeCompare(String(b.date || ''))
+  if (dateDiff !== 0) return dateDiff
+  return String(a.bill_no || '').localeCompare(String(b.bill_no || ''), undefined, { numeric: true })
+}
 
 function buildGstBreakdown(items) {
   const gstBreakdown = {}
@@ -66,51 +74,43 @@ export default function InvoicePackPage() {
           .map((id) => id.trim())
           .filter(Boolean)
 
-        let billsQuery = supabase
+        const buildBillsQuery = () => supabase
           .from('bills')
           .select('*')
           .eq('shop_id', shop.id)
           .eq('bill_type', 'invoice')
-          .order('date')
-          .order('bill_no')
 
-        if (invoiceIds.length > 0) {
-          billsQuery = billsQuery.in('id', invoiceIds)
-        } else {
-          billsQuery = billsQuery
-            .gte('date', dateFrom)
-            .lte('date', dateTo)
-        }
-
-        const [{ data: latestShop, error: shopErr }, { data: billRows, error: billsErr }] = await Promise.all([
+        const [{ data: latestShop, error: shopErr }, billRows] = await Promise.all([
           supabase.from('shops').select('*').eq('id', shop.id).single(),
-          billsQuery,
+          invoiceIds.length > 0
+            ? fetchAllRowsByIds(buildBillsQuery, 'id', invoiceIds)
+            : fetchAllRows(() => buildBillsQuery().gte('date', dateFrom).lte('date', dateTo)),
         ])
 
         if (shopErr) throw shopErr
-        if (billsErr) throw billsErr
 
-        const billIds = (billRows || []).map((bill) => bill.id)
-        const { data: itemRows, error: itemsErr } = billIds.length
-          ? await supabase
+        const sortedBills = [...billRows].sort(compareBills)
+        const itemRows = await fetchAllRowsByIds(
+          () => supabase
             .from('bill_items')
             .select('id,bill_id,sl_no,product_name,hsn_code,quantity,unit,mrp,rate,gst_rate,gst_amount,total')
-            .in('bill_id', billIds)
-            .eq('shop_id', shop.id)
-            .order('sl_no')
-          : { data: [], error: null }
-
-        if (itemsErr) throw itemsErr
+            .eq('shop_id', shop.id),
+          'bill_id',
+          sortedBills.map((bill) => bill.id)
+        )
 
         const grouped = {}
-        ;(itemRows || []).forEach((item) => {
+        itemRows.forEach((item) => {
           if (!grouped[item.bill_id]) grouped[item.bill_id] = []
           grouped[item.bill_id].push(item)
+        })
+        Object.values(grouped).forEach((items) => {
+          items.sort((a, b) => Number(a.sl_no || 0) - Number(b.sl_no || 0))
         })
 
         if (!cancelled) {
           setPrintShop({ ...shop, ...latestShop })
-          setBills(billRows || [])
+          setBills(sortedBills)
           setItemsByBill(grouped)
         }
       } catch (err) {
@@ -162,7 +162,10 @@ export default function InvoicePackPage() {
               </Link>
               <button
                 type="button"
-                onClick={() => printWithContent()}
+                onClick={() => printWithContent(undefined, {
+                  fileName: `invoices-${idsParam ? 'selected' : `${dateFrom}-to-${dateTo}`}.png`,
+                  title: 'GST Invoices',
+                })}
                 disabled={bills.length === 0}
                 className="rounded-lg bg-red-600 px-3 py-2 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-300"
               >
