@@ -7,7 +7,7 @@ import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { todayStr } from '@/lib/finance'
-import { printWithContent } from '@/lib/print'
+import { printWithContent, exportPdfWithContent } from '@/lib/print'
 import { fetchAllRows, fetchAllRowsByIds } from '@/lib/supabaseBatch'
 import { useShop } from '@/context/ShopContext'
 import PrintTemplate from '@/components/PrintTemplate'
@@ -58,8 +58,28 @@ export default function InvoicePackPage() {
   const [itemsByBill, setItemsByBill] = useState({})
   const [printShop, setPrintShop] = useState(null)
   const [mounted, setMounted] = useState(false)
+  const [pdfBusy, setPdfBusy] = useState(false)
+  const [pdfStatus, setPdfStatus] = useState('')
+  const [pdfError, setPdfError] = useState('')
 
   useEffect(() => setMounted(true), [])
+
+  async function handleDownloadPdf() {
+    setPdfBusy(true)
+    setPdfError('')
+    setPdfStatus('Building PDF…')
+    try {
+      await exportPdfWithContent(undefined, {
+        fileName: `invoices-${idsParam ? 'selected' : `${dateFrom}-to-${dateTo}`}.pdf`,
+        title: 'GST Invoices',
+        onStatus: (message) => setPdfError(message),
+        onProgress: (done, total) => setPdfStatus(`Invoice ${done} of ${total}…`),
+      })
+    } finally {
+      setPdfBusy(false)
+      setPdfStatus('')
+    }
+  }
 
   useEffect(() => {
     if (!shop?.id) return
@@ -153,7 +173,8 @@ export default function InvoicePackPage() {
                 {idsParam ? 'Selected invoices' : `${dateFrom} to ${dateTo}`} · {bills.length} invoice{bills.length === 1 ? '' : 's'} · {fmt(totalAmount)}
               </p>
               <p className="mt-2 text-xs text-gray-500">
-                Click print, then choose "Save as PDF" to send one merged invoice file to your auditor.
+                Download PDF builds the merged invoice file directly — it works on phones too,
+                where browsers offer no &quot;Save as PDF&quot; print destination.
               </p>
             </div>
             <div className="flex gap-2">
@@ -163,16 +184,28 @@ export default function InvoicePackPage() {
               <button
                 type="button"
                 onClick={() => printWithContent(undefined, {
-                  fileName: `invoices-${idsParam ? 'selected' : `${dateFrom}-to-${dateTo}`}.png`,
+                  fileName: `invoices-${idsParam ? 'selected' : `${dateFrom}-to-${dateTo}`}.pdf`,
                   title: 'GST Invoices',
                 })}
-                disabled={bills.length === 0}
+                disabled={bills.length === 0 || pdfBusy}
+                className="rounded-lg border px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-300"
+              >
+                Print
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadPdf}
+                disabled={bills.length === 0 || pdfBusy}
                 className="rounded-lg bg-red-600 px-3 py-2 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-300"
               >
-                Print / Save as PDF
+                {pdfBusy ? pdfStatus || 'Building PDF…' : 'Download PDF'}
               </button>
             </div>
           </div>
+
+          {pdfError && (
+            <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{pdfError}</div>
+          )}
 
           {bills.length === 0 ? (
             <div className="mt-4 rounded-lg bg-gray-50 p-6 text-center text-sm text-gray-400">

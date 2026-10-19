@@ -1721,7 +1721,12 @@ export default function BillingPage() {
           total: Number(bill.total || 0),
           gstBreakdown,
         },
-      }))
+      }), {
+        fileName: `bill-${bill.bill_no}.pdf`,
+        title: `Bill ${bill.bill_no}`,
+        onStatus: (message) => showToast(message, 'error'),
+        onFallbackComplete: () => setPrintData(null),
+      })
     } catch (error) {
       showToast('Print failed: ' + (error?.message || 'Unknown error'), 'error')
     } finally {
@@ -2023,7 +2028,12 @@ export default function BillingPage() {
             totals,
             printTemplate: printTemplateChoice || printShop?.print_template || 'standard',
             showSavings,
-          }))
+          }), {
+            fileName: `bill-${finalNo}.pdf`,
+            title: `Bill ${finalNo}`,
+            onStatus: (message) => showToast(message, 'error'),
+            onFallbackComplete: clearAfterPrint,
+          })
         } else {
           resetBillForm()
         }
@@ -2102,7 +2112,12 @@ export default function BillingPage() {
           totals,
           printTemplate: printTemplateChoice || printShop?.print_template || 'standard',
           showSavings,
-        }))
+        }), {
+          fileName: `bill-${finalNo}.pdf`,
+          title: `Bill ${finalNo}`,
+          onStatus: (message) => showToast(message, 'error'),
+          onFallbackComplete: clearAfterPrint,
+        })
       } else {
         resetBillForm()
       }

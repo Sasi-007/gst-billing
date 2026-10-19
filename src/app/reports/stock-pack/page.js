@@ -7,7 +7,7 @@ import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { todayStr } from '@/lib/finance'
-import { printWithContent } from '@/lib/print'
+import { printWithContent, exportPdfWithContent } from '@/lib/print'
 import { fetchAllRows } from '@/lib/supabaseBatch'
 import { buildStockOnHand, fetchStockAsOn } from '@/lib/monthlyExtract'
 import { num, round2 } from '@/lib/gstRegisters'
@@ -27,8 +27,28 @@ export default function StockPackPage() {
   const [suppliers, setSuppliers] = useState([])
   const [printShop, setPrintShop] = useState(null)
   const [mounted, setMounted] = useState(false)
+  const [pdfBusy, setPdfBusy] = useState(false)
+  const [pdfStatus, setPdfStatus] = useState('')
+  const [pdfError, setPdfError] = useState('')
 
   useEffect(() => setMounted(true), [])
+
+  async function handleDownloadPdf() {
+    setPdfBusy(true)
+    setPdfError('')
+    setPdfStatus('Building PDF…')
+    try {
+      await exportPdfWithContent(undefined, {
+        fileName: `stock-report-${dateTo}.pdf`,
+        title: 'Stock Report',
+        onStatus: (message) => setPdfError(message),
+        onProgress: (done, total) => setPdfStatus(`Sheet ${done} of ${total}…`),
+      })
+    } finally {
+      setPdfBusy(false)
+      setPdfStatus('')
+    }
+  }
 
   useEffect(() => {
     if (!shop?.id) return
@@ -113,7 +133,7 @@ export default function StockPackPage() {
                 <p className="mt-1 text-xs text-amber-700">{stockBasisNote}</p>
               )}
               <p className="mt-2 text-xs text-gray-500">
-                Click print, then choose &quot;Save as PDF&quot;.
+                Download PDF builds the file directly, so it works on phones as well as desktop.
                 {stockAsOn?.isHistorical
                   ? ' Rates shown are the current ones; only quantities are rewound to the period end.'
                   : ' Stock quantities are the live values at this moment.'}
@@ -126,16 +146,28 @@ export default function StockPackPage() {
               <button
                 type="button"
                 onClick={() => printWithContent(undefined, {
-                  fileName: `stock-report-${dateTo}.png`,
+                  fileName: `stock-report-${dateTo}.pdf`,
                   title: 'Stock Report',
                 })}
-                disabled={stockRows.length === 0 && suppliers.length === 0}
+                disabled={(stockRows.length === 0 && suppliers.length === 0) || pdfBusy}
+                className="rounded-lg border px-3 py-2 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:text-gray-300"
+              >
+                Print
+              </button>
+              <button
+                type="button"
+                onClick={handleDownloadPdf}
+                disabled={(stockRows.length === 0 && suppliers.length === 0) || pdfBusy}
                 className="rounded-lg bg-red-600 px-3 py-2 text-xs font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-300"
               >
-                Print / Save as PDF
+                {pdfBusy ? pdfStatus || 'Building PDF…' : 'Download PDF'}
               </button>
             </div>
           </div>
+
+          {pdfError && (
+            <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{pdfError}</div>
+          )}
 
           <div className="mt-4 grid grid-cols-3 gap-2 text-center">
             <div className="rounded-lg border p-2">

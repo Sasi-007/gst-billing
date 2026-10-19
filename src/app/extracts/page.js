@@ -283,8 +283,8 @@ export default function ExtractsPage() {
           <div className="rounded-xl border bg-white p-3 sm:p-4">
             <div className="text-sm font-semibold text-gray-800">PDFs for this period</div>
             <p className="mt-1 text-xs text-gray-500">
-              Browsers can only create a PDF through the print dialog, so these open in a print view —
-              choose &quot;Save as PDF&quot; as the destination.
+              These open a preview with a Download PDF button that builds the file on the
+              device — no print dialog needed, so it works on phones too.
             </p>
             <div className="mt-3 flex flex-col gap-2 sm:flex-row">
               <Link

@@ -6,7 +6,7 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
-import { printWithContent } from '@/lib/print'
+import { printWithContent, exportPdfWithContent } from '@/lib/print'
 import { useShop } from '@/context/ShopContext'
 import {
   buildQuantityMap,
@@ -26,6 +26,7 @@ export default function PurchaseDetailsPage() {
   const [deleting, setDeleting] = useState(false)
   const [mounted, setMounted] = useState(false)
   const [printOpen, setPrintOpen] = useState(false)
+  const [pdfBusy, setPdfBusy] = useState(false)
 
   useEffect(() => setMounted(true), [])
 
@@ -94,7 +95,23 @@ export default function PurchaseDetailsPage() {
 
   function handlePrint() {
     window.addEventListener('afterprint', () => setPrintOpen(false), { once: true })
-    printWithContent(() => setPrintOpen(true))
+    printWithContent(() => setPrintOpen(true), {
+      fileName: `purchase-${bill.bill_no || bill.id}.pdf`,
+      title: 'Purchase',
+    })
+  }
+
+  async function handleDownloadPdf() {
+    setPdfBusy(true)
+    try {
+      await exportPdfWithContent(() => setPrintOpen(true), {
+        fileName: `purchase-${bill.bill_no || bill.id}.pdf`,
+        title: 'Purchase',
+      })
+    } finally {
+      setPdfBusy(false)
+      setPrintOpen(false)
+    }
   }
 
   if (loading) return <div className="p-4 text-gray-500">Loading purchase details…</div>
@@ -133,6 +150,7 @@ export default function PurchaseDetailsPage() {
             </div>
             <div className="flex justify-end gap-2 mt-2">
               <button onClick={handlePrint} className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">Print</button>
+              <button onClick={handleDownloadPdf} disabled={pdfBusy} className="px-3 py-1.5 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50">PDF</button>
               <Link href={`/purchases/new?editId=${bill.id}`} className="px-3 py-1.5 text-xs bg-amber-500 text-white rounded hover:bg-amber-600">Edit</Link>
               <button onClick={handleDelete} disabled={deleting} className="px-3 py-1.5 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50">
                 {deleting ? 'Deleting…' : 'Delete'}

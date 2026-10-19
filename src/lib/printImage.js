@@ -1,21 +1,21 @@
 /**
- * Rasterises the on-page print markup to a PNG so it can be shared or saved.
+ * Rasterises the on-page print markup to a canvas, which the PDF writer in
+ * pdf.js turns into paper-sized pages.
  *
  * Installed PWAs cannot open a print dialog on either mobile platform:
  * Android Chrome removes printing entirely in standalone display mode, and
  * iOS Safari's standalone shell exposes no print affordance either, so
- * `window.print()` is a silent no-op on both. Turning the receipt into an
- * image lets the user hand it to a Bluetooth thermal printer app, the system
- * print service (AirPrint on iOS), or just save it to Photos/Files.
+ * `window.print()` is a silent no-op on both. Rendering the markup ourselves
+ * is what lets those platforms produce a file at all.
  */
 
-const MM_TO_PX = 96 / 25.4
+export const MM_TO_PX = 96 / 25.4
 
 function isAndroid() {
   return /Android/i.test(navigator.userAgent || '')
 }
 
-function isIos() {
+export function isIos() {
   const ua = navigator.userAgent || ''
   // iPadOS 13+ reports a desktop Mac UA, so fall back to the touch-point probe.
   return /iPad|iPhone|iPod/i.test(ua)
@@ -102,17 +102,22 @@ function waitForIframeImages(doc) {
   })))
 }
 
-function collectPrintRoots() {
+export function collectPrintRoots() {
   return Array.from(document.querySelectorAll('.print-only'))
     .filter((node) => node.innerHTML.trim())
 }
 
 /**
- * Renders the current print markup to a PNG blob.
- * Returns null when there is nothing to print.
+ * Rasterises the given print nodes into a single canvas.
+ *
+ * `widthPx` forces the layout width (the PDF writer pins it to the paper size);
+ * when omitted the node is measured at its natural width, except for thermal
+ * receipts which are sized in mm and therefore pinned to 80mm.
+ *
+ * Returns null when there is nothing to draw.
  */
-export async function renderPrintAreaToPng({ scale = 3 } = {}) {
-  const roots = collectPrintRoots()
+export async function rasterisePrintNodes(nodes, { scale = 3, widthPx = null } = {}) {
+  const roots = Array.isArray(nodes) ? nodes : [nodes]
   if (!roots.length) return null
 
   const stage = document.createElement('div')
@@ -122,7 +127,7 @@ export async function renderPrintAreaToPng({ scale = 3 } = {}) {
   const printCss = extractPrintCss()
   const iframe = document.createElement('iframe')
   iframe.setAttribute('aria-hidden', 'true')
-  iframe.style.cssText = 'position:fixed;left:-10000px;top:0;width:794px;height:10px;border:0;visibility:hidden;'
+  iframe.style.cssText = `position:fixed;left:-10000px;top:0;width:${widthPx || 794}px;height:10px;border:0;visibility:hidden;`
   document.body.appendChild(iframe)
 
   try {
@@ -153,7 +158,7 @@ export async function renderPrintAreaToPng({ scale = 3 } = {}) {
     // Thermal receipts are sized in mm; fall back to a sane pixel width.
     const measured = holder.getBoundingClientRect()
     const thermal = holder.querySelector('.thermal-receipt')
-    const width = Math.ceil(thermal ? 80 * MM_TO_PX : (measured.width || 794))
+    const width = Math.ceil(widthPx || (thermal ? 80 * MM_TO_PX : (measured.width || 794)))
     holder.style.width = `${width}px`
     const height = Math.ceil(holder.getBoundingClientRect().height || measured.height || 1123)
 
@@ -183,91 +188,8 @@ export async function renderPrintAreaToPng({ scale = 3 } = {}) {
     ctx.setTransform(scale, 0, 0, scale, 0, 0)
     ctx.drawImage(image, 0, 0)
 
-    return await new Promise((resolve, reject) => {
-      canvas.toBlob(
-        (blob) => (blob ? resolve(blob) : reject(new Error('Could not build the image'))),
-        'image/png',
-      )
-    })
+    return canvas
   } finally {
     iframe.remove()
   }
-}
-
-function saveBlob(blob, fileName) {
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = fileName
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  setTimeout(() => URL.revokeObjectURL(url), 10000)
-}
-
-/**
- * iOS standalone ignores the `download` attribute, so show the PNG inline and
- * let the user long-press it to save or print via the system sheet.
- */
-function showImageOverlay(blob) {
-  const url = URL.createObjectURL(blob)
-  const overlay = document.createElement('div')
-  overlay.className = 'no-print'
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:rgba(17,24,39,.92);display:flex;flex-direction:column;overflow:auto;-webkit-overflow-scrolling:touch'
-
-  const bar = document.createElement('div')
-  bar.style.cssText = 'position:sticky;top:0;display:flex;align-items:center;gap:8px;padding:12px 14px;padding-top:max(12px,env(safe-area-inset-top));background:rgba(17,24,39,.96);color:#fff;font:500 13px system-ui,-apple-system,sans-serif'
-
-  const hint = document.createElement('span')
-  hint.style.cssText = 'flex:1;line-height:1.35'
-  hint.textContent = 'Touch and hold the receipt to save or print it.'
-
-  const close = document.createElement('button')
-  close.type = 'button'
-  close.textContent = 'Done'
-  close.style.cssText = 'border:1px solid rgba(255,255,255,.35);background:transparent;color:#fff;border-radius:8px;padding:7px 14px;font:600 13px system-ui,-apple-system,sans-serif'
-
-  const img = document.createElement('img')
-  img.src = url
-  img.alt = 'Receipt'
-  img.style.cssText = 'display:block;width:auto;max-width:calc(100% - 24px);margin:12px auto 24px;background:#fff;border-radius:6px'
-
-  function dismiss() {
-    overlay.remove()
-    URL.revokeObjectURL(url)
-  }
-  close.addEventListener('click', dismiss)
-  overlay.addEventListener('click', (event) => { if (event.target === overlay) dismiss() })
-
-  bar.append(hint, close)
-  overlay.append(bar, img)
-  document.body.appendChild(overlay)
-}
-
-/**
- * Shares the print markup as a PNG, falling back to a download when the Web
- * Share API is unavailable or dismissed.
- */
-export async function sharePrintAreaAsImage({ fileName = 'receipt.png', title = 'Receipt' } = {}) {
-  const blob = await renderPrintAreaToPng()
-  if (!blob) return { status: 'empty' }
-
-  const file = new File([blob], fileName, { type: 'image/png' })
-  if (navigator.canShare?.({ files: [file] })) {
-    try {
-      await navigator.share({ files: [file], title })
-      return { status: 'shared' }
-    } catch (error) {
-      // AbortError means the user closed the sheet on purpose.
-      if (error?.name === 'AbortError') return { status: 'cancelled' }
-    }
-  }
-
-  if (isIos()) {
-    showImageOverlay(blob)
-    return { status: 'preview' }
-  }
-
-  saveBlob(blob, fileName)
-  return { status: 'downloaded' }
 }

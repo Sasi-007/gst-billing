@@ -1,5 +1,6 @@
 import { flushSync } from 'react-dom'
-import { isPrintDialogBlocked, sharePrintAreaAsImage } from './printImage'
+import { isPrintDialogBlocked } from './printImage'
+import { exportPrintAreaAsPdf } from './pdf'
 
 /**
  * Renders the print markup and opens the print dialog in the same task as the
@@ -8,8 +9,9 @@ import { isPrintDialogBlocked, sharePrintAreaAsImage } from './printImage'
  * drops that activation and makes some browsers show a
  * "This web page is trying to print" confirmation first.
  *
- * Android Chrome refuses to print at all while the PWA runs standalone, so on
- * that platform the receipt is shared/saved as an image instead.
+ * Android Chrome refuses to print at all while the PWA runs standalone, and
+ * iOS standalone exposes no print affordance, so on those platforms a real PDF
+ * is generated instead.
  */
 export function printWithContent(renderPrintContent, options = {}) {
   if (typeof window === 'undefined') return
@@ -19,7 +21,7 @@ export function printWithContent(renderPrintContent, options = {}) {
   }
 
   if (isPrintDialogBlocked()) {
-    shareAsImageFallback(options)
+    exportPdfFallback(options)
     return
   }
 
@@ -45,23 +47,54 @@ export function printWithContent(renderPrintContent, options = {}) {
   ).then(() => window.print())
 }
 
-function shareAsImageFallback({ fileName, title, onStatus } = {}) {
-  const notify = typeof onStatus === 'function'
+/**
+ * Renders the print markup and exports it as a real PDF on every platform.
+ * Use this for "Export PDF" actions; `printWithContent` remains the path for
+ * sending paper or receipts to a physical printer.
+ */
+export function exportPdfWithContent(renderPrintContent, options = {}) {
+  if (typeof window === 'undefined') return Promise.resolve({ status: 'empty' })
+
+  if (typeof renderPrintContent === 'function') {
+    flushSync(renderPrintContent)
+  }
+
+  return runPdfExport(options)
+}
+
+function notifier(onStatus) {
+  return typeof onStatus === 'function'
     ? onStatus
     : (message) => { if (message) window.alert(message) }
+}
 
-  sharePrintAreaAsImage({
-    fileName: fileName || `receipt-${new Date().toISOString().slice(0, 10)}.png`,
-    title: title || 'Receipt',
+function runPdfExport({ fileName, title, onStatus, onProgress } = {}) {
+  const notify = notifier(onStatus)
+
+  return exportPrintAreaAsPdf({
+    fileName: fileName || `export-${new Date().toISOString().slice(0, 10)}.pdf`,
+    title: title || 'Export',
+    onProgress,
   })
     .then((result) => {
-      if (result.status === 'downloaded') {
-        notify('The installed app cannot open a print dialog. The receipt was saved as an image you can print or send to your printer app.')
-      } else if (result.status === 'empty') {
-        notify('Nothing to print yet.')
-      }
+      if (result.status === 'empty') notify('Nothing to export yet.')
+      return result
     })
     .catch((error) => {
-      notify(`Could not prepare the receipt image: ${error.message}`)
+      notify(`Could not create the PDF: ${error.message}`)
+      return { status: 'failed', error }
     })
+}
+
+function exportPdfFallback(options = {}) {
+  const notify = notifier(options.onStatus)
+
+  runPdfExport(options).then((result) => {
+    if (result.status === 'downloaded' || result.status === 'opened') {
+      notify('The installed app cannot open a print dialog, so the document was saved as a PDF you can print or share.')
+    }
+    // `afterprint` never fires on this path, so callers still need the signal
+    // that let them clear the print markup and reset their form.
+    if (typeof options.onFallbackComplete === 'function') options.onFallbackComplete(result)
+  })
 }

@@ -692,6 +692,6 @@ function buildReadme({ summary, shop }) {
     '    rewound to the period end.',
     '  * CSVs are UTF-8 with a BOM so Excel shows the rupee sign and Tamil names.',
     '  * The consolidated invoice PDF is produced separately from the Extracts',
-    '    page using "Open invoice PDF", then Print > Save as PDF.',
+    '    page using "Open invoice PDF", then "Download PDF".',
   ].join('\r\n')
 }

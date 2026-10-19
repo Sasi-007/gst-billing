@@ -6,7 +6,7 @@ import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
-import { printWithContent } from '@/lib/print'
+import { printWithContent, exportPdfWithContent } from '@/lib/print'
 import { useShop } from '@/context/ShopContext'
 import PrintTemplate from '@/components/PrintTemplate'
 
@@ -22,6 +22,7 @@ export default function BillDetailsPage() {
   const [error, setError] = useState('')
   const [deleting, setDeleting] = useState(false)
   const [printData, setPrintData] = useState(null)
+  const [pdfBusy, setPdfBusy] = useState(false)
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => setMounted(true), [])
@@ -93,7 +94,7 @@ export default function BillDetailsPage() {
     return { ...shop, ...data }
   }
 
-  async function handlePrint() {
+  async function buildPrintData() {
     const gstBreakdown = {}
     for (const it of items) {
       const rate = String(it.gst_rate || 0)
@@ -107,10 +108,10 @@ export default function BillDetailsPage() {
       printShop = await getLatestShopForPrint()
     } catch (err) {
       setError(err.message || 'Failed to load print settings')
-      return
+      return null
     }
 
-    printWithContent(() => setPrintData({
+    return {
       bill,
       items,
       shop: printShop,
@@ -121,7 +122,30 @@ export default function BillDetailsPage() {
         total: Number(bill.total || 0),
         gstBreakdown,
       },
-    }))
+    }
+  }
+
+  async function handlePrint() {
+    const data = await buildPrintData()
+    if (!data) return
+    printWithContent(() => setPrintData(data), {
+      fileName: `bill-${bill.bill_no}.pdf`,
+      title: `Bill ${bill.bill_no}`,
+    })
+  }
+
+  async function handleDownloadPdf() {
+    const data = await buildPrintData()
+    if (!data) return
+    setPdfBusy(true)
+    try {
+      await exportPdfWithContent(() => setPrintData(data), {
+        fileName: `bill-${bill.bill_no}.pdf`,
+        title: `Bill ${bill.bill_no}`,
+      })
+    } finally {
+      setPdfBusy(false)
+    }
   }
 
   async function handleDelete() {
@@ -238,6 +262,9 @@ export default function BillDetailsPage() {
           <div className="flex justify-end gap-2 mt-2">
             <button onClick={handlePrint} className="px-3 py-1.5 text-xs bg-blue-600 text-white rounded hover:bg-blue-700">
               Print
+            </button>
+            <button onClick={handleDownloadPdf} disabled={pdfBusy} className="px-3 py-1.5 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50">
+              {pdfBusy ? 'PDF…' : 'PDF'}
             </button>
             {bill.bill_type !== 'invoice' && (
               <Link href={`/billing?convertFrom=${bill.id}`} className="px-3 py-1.5 text-xs bg-cyan-600 text-white rounded hover:bg-cyan-700">
