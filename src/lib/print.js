@@ -62,10 +62,43 @@ export function exportPdfWithContent(renderPrintContent, options = {}) {
   return runPdfExport(options)
 }
 
+/**
+ * Callers normally pass `onStatus` so the message lands in their own UI. When
+ * they do not, show a small in-app toast rather than window.alert: the native
+ * dialog blocks the thread mid-export and some installed-PWA shells suppress
+ * it entirely, which would swallow the failure silently.
+ */
+function showFallbackNotice(message) {
+  if (typeof document === 'undefined') return
+
+  const toast = document.createElement('div')
+  toast.className = 'no-print'
+  toast.setAttribute('role', 'status')
+  toast.textContent = message
+  Object.assign(toast.style, {
+    position: 'fixed',
+    left: '50%',
+    bottom: '24px',
+    transform: 'translateX(-50%)',
+    zIndex: '2147483647',
+    maxWidth: 'min(90vw, 420px)',
+    padding: '10px 16px',
+    borderRadius: '10px',
+    background: '#1f2937',
+    color: '#fff',
+    font: '500 14px/1.4 system-ui, sans-serif',
+    boxShadow: '0 8px 24px rgba(0,0,0,0.25)',
+    textAlign: 'center',
+  })
+
+  document.body.appendChild(toast)
+  setTimeout(() => toast.remove(), 5000)
+}
+
 function notifier(onStatus) {
   return typeof onStatus === 'function'
     ? onStatus
-    : (message) => { if (message) window.alert(message) }
+    : (message) => { if (message) showFallbackNotice(message) }
 }
 
 function runPdfExport({ fileName, title, onStatus, onProgress } = {}) {

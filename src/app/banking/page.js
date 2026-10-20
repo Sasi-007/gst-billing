@@ -8,6 +8,7 @@ import { readPageCache, writePageCache } from '@/lib/pageCache'
 import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 
 const blankAccount = {
   account_name: '',
@@ -44,6 +45,7 @@ function StatsCard({ label, value, className = '', hint }) {
 
 export default function BankingPage() {
   const { shop } = useShop()
+  const { confirm } = useConfirm()
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState(monthStartStr())
   const [dateTo, setDateTo] = useState(todayStr())
@@ -271,7 +273,12 @@ export default function BankingPage() {
   }
 
   async function deactivateAccount(id) {
-    if (!window.confirm('Remove this bank account?')) return
+    const ok = await confirm({
+      title: 'Remove this bank account?',
+      message: 'The account is hidden from this list.\nTransactions already recorded against it are kept for your reports.',
+      confirmLabel: 'Remove account',
+    })
+    if (!ok) return
     setError('')
     const { error: removeErr } = await supabase.from('bank_accounts').update({ is_active: false, updated_at: new Date().toISOString() }).eq('id', id).eq('shop_id', shop?.id)
     if (removeErr) {
@@ -282,7 +289,12 @@ export default function BankingPage() {
   }
 
   async function deactivateTransaction(id) {
-    if (!window.confirm('Remove this bank transaction?')) return
+    const ok = await confirm({
+      title: 'Remove this bank transaction?',
+      message: 'The entry is hidden from this list and stops counting towards your bank balance.',
+      confirmLabel: 'Remove entry',
+    })
+    if (!ok) return
     setError('')
     const { error: removeErr } = await supabase.from('bank_transactions').update({ is_active: false, updated_at: new Date().toISOString() }).eq('id', id).eq('shop_id', shop?.id)
     if (removeErr) {

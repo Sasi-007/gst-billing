@@ -6,7 +6,9 @@ import { supabase } from '../../lib/supabase'
 import { fmt } from '../../lib/gst'
 import { monthStartStr, todayStr } from '../../lib/finance'
 import { useShop } from '../../context/ShopContext'
+import { useConfirm } from '../../context/ConfirmDialogContext'
 import { clearPageCacheByPrefix, readPageCache, writePageCache } from '../../lib/pageCache'
+import { fetchAllRowsByIds } from '../../lib/supabaseBatch'
 import LoadingPlaceholder from '../../components/LoadingPlaceholder'
 import { usePageLoadingState } from '../../context/PageLoadingContext'
 import { useDebouncedValue } from '../../lib/useDebouncedValue'
@@ -15,11 +17,13 @@ const blank = { name:'', contact_person:'', phone:'', email:'', gstin:'', addres
 
 export default function SuppliersPage() {
   const { shop } = useShop()
+  const { confirm } = useConfirm()
   const [search,    setSearch]    = useState('')
+  const [statusFilter, setStatusFilter] = useState('active')
   const [dateFrom,  setDateFrom]  = useState(monthStartStr())
   const [dateTo,    setDateTo]    = useState(todayStr())
   const debouncedSearch = useDebouncedValue(search)
-  const cacheKey = shop?.id ? `suppliers:${shop.id}:${debouncedSearch}:${dateFrom}:${dateTo}` : ''
+  const cacheKey = shop?.id ? `suppliers:${shop.id}:${debouncedSearch}:${statusFilter}:${dateFrom}:${dateTo}` : ''
   const initialCache = readPageCache(cacheKey)
   const [suppliers, setSuppliers] = useState(() => initialCache?.suppliers || [])
   const [billStats, setBillStats] = useState(() => initialCache?.billStats || [])
@@ -49,7 +53,9 @@ export default function SuppliersPage() {
       setLoading(true)
     }
 
-    let q = supabase.from('suppliers').select('*').eq('shop_id', shop.id).eq('is_active', true).order('name')
+    let q = supabase.from('suppliers').select('*').eq('shop_id', shop.id).order('name')
+    if (statusFilter === 'active') q = q.eq('is_active', true)
+    else if (statusFilter === 'inactive') q = q.eq('is_active', false)
     if (debouncedSearch) q = q.ilike('name', `%${debouncedSearch}%`)
     const [{ data }, statsRes] = await Promise.all([
       q,
@@ -66,7 +72,7 @@ export default function SuppliersPage() {
     setBillStats(nextStats)
     writePageCache(cacheKey, { suppliers: nextSuppliers, billStats: nextStats })
     setLoading(false)
-  }, [cacheKey, dateFrom, dateTo, debouncedSearch, shop?.id])
+  }, [cacheKey, dateFrom, dateTo, debouncedSearch, shop?.id, statusFilter])
 
   useEffect(() => { load() }, [load])
 
@@ -109,9 +115,19 @@ export default function SuppliersPage() {
     setSaving(false)
   }
 
-  async function deactivate(id) {
-    if (!window.confirm('Remove this supplier?')) return
-    await supabase.from('suppliers').update({ is_active: false }).eq('id', id).eq('shop_id', shop?.id)
+  async function setActive(id, active) {
+    if (!active) {
+      const ok = await confirm({
+        title: 'Disable this supplier?',
+        message: 'It is hidden from new purchase entries, but its past bills and reports are kept exactly as they are.',
+        details: 'You can bring it back any time using the "Inactive" filter above the list.',
+        tone: 'warning',
+        confirmLabel: 'Disable supplier',
+      })
+      if (!ok) return
+    }
+    await supabase.from('suppliers').update({ is_active: active }).eq('id', id).eq('shop_id', shop?.id)
+    clearPageCacheByPrefix([`suppliers:${shop?.id}:`])
     load()
   }
 
@@ -136,23 +152,66 @@ export default function SuppliersPage() {
     })
   }
 
-  // Counts purchase bills still pointing at these suppliers so the confirmation can
-  // warn before the link is severed (FK is ON DELETE SET NULL — bills themselves stay).
-  async function countLinkedPurchases(supplierIds) {
-    if (!shop?.id || !supplierIds.length) return new Map()
+  // Both tables that point at a supplier use ON DELETE SET NULL, so deleting one
+  // never removes a bill or a product — it silently severs the link. The counts
+  // let the confirmation say exactly what would lose its supplier.
+  async function fetchSupplierUsage(supplierIds) {
+    const empty = { bills: new Map(), products: new Map(), totalBills: 0, totalProducts: 0 }
+    if (!shop?.id || !supplierIds.length) return empty
 
-    const { data, error } = await supabase
-      .from('purchase_bills')
-      .select('supplier_id')
-      .eq('shop_id', shop.id)
-      .in('supplier_id', supplierIds)
-    if (error) throw error
+    const [billRows, productRows] = await Promise.all([
+      fetchAllRowsByIds(
+        () => supabase.from('purchase_bills').select('supplier_id').eq('shop_id', shop.id),
+        'supplier_id',
+        supplierIds,
+      ),
+      fetchAllRowsByIds(
+        () => supabase.from('products').select('supplier_id').eq('shop_id', shop.id),
+        'supplier_id',
+        supplierIds,
+      ),
+    ])
 
-    const counts = new Map()
-    for (const row of data || []) {
-      counts.set(row.supplier_id, (counts.get(row.supplier_id) || 0) + 1)
+    const tally = (rows) => {
+      const counts = new Map()
+      for (const row of rows) {
+        counts.set(row.supplier_id, (counts.get(row.supplier_id) || 0) + 1)
+      }
+      return counts
     }
-    return counts
+
+    const bills = tally(billRows)
+    const products = tally(productRows)
+    return {
+      bills,
+      products,
+      totalBills: billRows.length,
+      totalProducts: productRows.length,
+    }
+  }
+
+  function buildDeleteDetails(usage, isSingle = false) {
+    const { totalBills, totalProducts, bills, products } = usage
+
+    // Sales invoices reference products, never suppliers, so they cannot be
+    // affected by this delete — worth saying outright before a permanent action.
+    if (!totalBills && !totalProducts) {
+      return isSingle
+        ? '✓ Checked: no purchase bills and no products are linked to this supplier, so no records lose data. Sales bills never reference a supplier.'
+        : '✓ Checked: no purchase bills and no products are linked to these suppliers, so no records lose data. Sales bills never reference a supplier.'
+    }
+
+    const who = isSingle ? 'this supplier' : `${new Set([...bills.keys(), ...products.keys()]).size} of these suppliers`
+    const linked = []
+    if (totalBills) linked.push(`${totalBills} purchase bill${totalBills === 1 ? '' : 's'}`)
+    if (totalProducts) linked.push(`${totalProducts} product${totalProducts === 1 ? '' : 's'}`)
+
+    let text = `⚠ ${linked.join(' and ')} ${linked.length > 1 || totalBills > 1 || totalProducts > 1 ? 'are' : 'is'} linked to ${who}.\n`
+    if (totalBills) text += `Those bills are NOT deleted, but they lose their supplier link and will show "—" as the supplier.\n`
+    if (totalProducts) text += `Those products are NOT deleted, but they lose their supplier link.\n`
+    text += 'Sales bills never reference a supplier, so they are unaffected.\n'
+    text += '\nUse "Disable" instead if you only want to hide the supplier from new entries.'
+    return text
   }
 
   async function deleteSupplierIds(supplierIds) {
@@ -173,26 +232,20 @@ export default function SuppliersPage() {
     if (supplierIds.includes(editId)) cancelEdit()
   }
 
-  function buildDeleteWarning(linkedCounts, isSingle = false) {
-    const totalBills = [...linkedCounts.values()].reduce((sum, count) => sum + count, 0)
-    if (!totalBills) return ''
-    const scope = isSingle
-      ? `${totalBills} purchase bill(s) are linked to this supplier.`
-      : `${totalBills} purchase bill(s) are linked to ${linkedCounts.size} of these suppliers.`
-    return `\n\n⚠ ${scope} `
-      + 'Those bills will NOT be deleted, but they will lose their supplier link (and will show "—" as supplier). '
-      + 'Products pointing at these suppliers also lose that link. '
-      + 'Use "Remove" instead if you only want to hide the supplier from new entries.'
-  }
-
   async function handleDeleteSupplier(supplier) {
     if (!shop?.id || !supplier?.id) return
     setDeleting(true)
     try {
-      const linkedCounts = await countLinkedPurchases([supplier.id])
-      const message = `Permanently delete supplier "${supplier.name}"? This cannot be undone.`
-        + buildDeleteWarning(linkedCounts, true)
-      if (!window.confirm(message)) return
+      const usage = await fetchSupplierUsage([supplier.id])
+      const isClean = !usage.totalBills && !usage.totalProducts
+      const ok = await confirm({
+        title: `Permanently delete "${supplier.name}"?`,
+        message: 'The supplier record is removed from this shop for good. This cannot be undone.',
+        details: buildDeleteDetails(usage, true),
+        detailsTone: isClean ? 'ok' : '',
+        confirmLabel: 'Delete supplier',
+      })
+      if (!ok) return
 
       await deleteSupplierIds([supplier.id])
       setNotice('')
@@ -210,12 +263,16 @@ export default function SuppliersPage() {
 
     setDeleting(true)
     try {
-      const linkedCounts = await countLinkedPurchases(ids)
-      const message = `Permanently delete ${ids.length} supplier${ids.length > 1 ? 's' : ''}?`
-        + `\n\n${names.slice(0, 10).join(', ')}${names.length > 10 ? `, +${names.length - 10} more` : ''}`
-        + '\n\nThis cannot be undone.'
-        + buildDeleteWarning(linkedCounts)
-      if (!window.confirm(message)) return
+      const usage = await fetchSupplierUsage(ids)
+      const isClean = !usage.totalBills && !usage.totalProducts
+      const ok = await confirm({
+        title: `Permanently delete ${ids.length} supplier${ids.length > 1 ? 's' : ''}?`,
+        message: `${names.slice(0, 10).join(', ')}${names.length > 10 ? `, +${names.length - 10} more` : ''}\n${ids.length > 1 ? 'These supplier records are' : 'This supplier record is'} removed from this shop for good. This cannot be undone.`,
+        details: buildDeleteDetails(usage),
+        detailsTone: isClean ? 'ok' : '',
+        confirmLabel: `Delete ${ids.length} supplier${ids.length > 1 ? 's' : ''}`,
+      })
+      if (!ok) return
 
       await deleteSupplierIds(ids)
       setNotice('')
@@ -252,6 +309,12 @@ export default function SuppliersPage() {
           <input value={search} onChange={e => setSearch(e.target.value)}
             placeholder="🔍 Search suppliers…"
             className="border rounded-lg px-3 py-2 text-sm w-full sm:flex-1 sm:w-auto sm:min-w-48" />
+          <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)}
+            className="border rounded-lg px-2 py-2 text-sm">
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+            <option value="all">All</option>
+          </select>
           <span className="text-xs text-gray-500">Purchases from</span>
           <input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)}
             className="border rounded-lg px-2 py-2 text-sm min-w-0 flex-1 sm:flex-none" />
@@ -326,6 +389,9 @@ export default function SuppliersPage() {
                       />
                       <div className="min-w-0 flex-1">
                         <Link href={`/suppliers/${s.id}`} className="font-medium text-blue-600 break-words">{s.name}</Link>
+                        {s.is_active === false && (
+                          <span className="ml-1.5 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">Inactive</span>
+                        )}
                         {s.contact_person && <div className="text-xs text-gray-400">{s.contact_person}</div>}
                         {s.phone && <div className="text-xs text-gray-500">📞 {s.phone}</div>}
                         {s.gstin && <div className="text-xs text-gray-500 font-mono break-all">{s.gstin}</div>}
@@ -348,7 +414,12 @@ export default function SuppliersPage() {
                     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-2 text-xs">
                       <Link href={`/suppliers/${s.id}`} className="text-indigo-600">Summary</Link>
                       <button onClick={() => { startEdit(s); scrollToForm() }} className="text-blue-600">Edit</button>
-                      <button onClick={() => deactivate(s.id)} className="text-gray-500">Remove</button>
+                      <button
+                        onClick={() => setActive(s.id, s.is_active === false)}
+                        className={s.is_active === false ? 'text-green-600' : 'text-gray-500'}
+                      >
+                        {s.is_active === false ? 'Enable' : 'Disable'}
+                      </button>
                       <button
                         onClick={() => handleDeleteSupplier(s)}
                         disabled={deleting}
@@ -398,6 +469,9 @@ export default function SuppliersPage() {
                       </td>
                       <td className="px-3 py-2 font-medium">
                         <Link href={`/suppliers/${s.id}`} className="text-blue-600 hover:underline">{s.name}</Link>
+                        {s.is_active === false && (
+                          <span className="ml-1.5 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">Inactive</span>
+                        )}
                         {s.contact_person && <div className="text-xs text-gray-400">{s.contact_person}</div>}
                       </td>
                       <td className="px-3 py-2">{s.phone || '—'}</td>
@@ -415,8 +489,10 @@ export default function SuppliersPage() {
                           className="text-indigo-600 hover:underline text-xs mr-3">Summary</Link>
                         <button onClick={() => startEdit(s)}
                           className="text-blue-600 hover:underline text-xs mr-3">Edit</button>
-                        <button onClick={() => deactivate(s.id)}
-                          className="text-gray-400 hover:text-gray-600 text-xs mr-3">Remove</button>
+                        <button onClick={() => setActive(s.id, s.is_active === false)}
+                          className={`text-xs mr-3 hover:underline ${s.is_active === false ? 'text-green-600' : 'text-gray-400 hover:text-gray-600'}`}>
+                          {s.is_active === false ? 'Enable' : 'Disable'}
+                        </button>
                         <button onClick={() => handleDeleteSupplier(s)}
                           disabled={deleting}
                           className="text-red-600 hover:underline text-xs disabled:opacity-50">Delete</button>

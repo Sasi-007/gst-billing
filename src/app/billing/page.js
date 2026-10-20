@@ -19,6 +19,7 @@ import {
 import ProductSearch from '@/components/ProductSearch'
 import PrintTemplate from '@/components/PrintTemplate'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 import { readPageCache, writePageCache } from '@/lib/pageCache'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import {
@@ -673,6 +674,8 @@ export default function BillingPage() {
   }, [])
 
   const { shop } = useShop()
+
+  const { confirm } = useConfirm()
   const customerDirectoryCacheKey = shop?.id ? `customers-directory:${shop.id}` : ''
 
   // Default place of supply to the shop's own registered state (most common case)
@@ -1741,7 +1744,13 @@ export default function BillingPage() {
       return
     }
     const selectedCount = historySelectedBillIds.length
-    if (!window.confirm(`Delete ${selectedCount} selected invoice${selectedCount > 1 ? 's' : ''}? This cannot be undone.`)) return
+    const ok = await confirm({
+      title: `Delete ${selectedCount} invoice${selectedCount > 1 ? 's' : ''}?`,
+      message: 'The invoices and their items are permanently removed.\nStock for the products sold is added back automatically.\nAny credit entries created automatically by these invoices are reversed too.',
+      details: 'This cannot be undone.',
+      confirmLabel: `Delete ${selectedCount} invoice${selectedCount > 1 ? 's' : ''}`,
+    })
+    if (!ok) return
 
     setHistoryDeleting(true)
     try {
@@ -1873,8 +1882,17 @@ export default function BillingPage() {
   }
 
   // ── New bill ───────────────────────────────────────────────────────────────
-  function handleNewBill() {
-    if (filledItems.length > 0 && !window.confirm('Clear current bill and start new?')) return
+  async function handleNewBill() {
+    if (filledItems.length > 0) {
+      const ok = await confirm({
+        title: 'Clear current bill?',
+        message: `${filledItems.length} item${filledItems.length === 1 ? '' : 's'} on this unsaved bill will be discarded so you can start a new one.`,
+        tone: 'warning',
+        confirmLabel: 'Clear and start new',
+        cancelLabel: 'Keep editing',
+      })
+      if (!ok) return
+    }
     resetBillForm()
     setTimeout(() => openSearch(0), 60)
   }

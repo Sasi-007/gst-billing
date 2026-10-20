@@ -193,6 +193,8 @@ function GSTAuditorReport({ data, dateFrom, dateTo }) {
   const stockValuation = data?.stockValuation || null
 
   const {
+    taxRows,
+    hsnRows,
     salesRegisterRows,
     b2bRegisterRows,
     b2cRegisterRows,

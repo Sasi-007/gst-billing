@@ -6,6 +6,7 @@ import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { calculateCreditBalance, groupCreditEntriesByAccount } from '@/lib/credits'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 import { fmt } from '@/lib/gst'
 import {
   archiveCustomerRecord,
@@ -115,6 +116,7 @@ async function updateCustomerCreditAccounts(shopId, accountIds, payload) {
 
 export default function CustomersPage() {
   const { shop } = useShop()
+  const { confirm } = useConfirm()
   const cacheKey = shop?.id ? `customers-directory:${shop.id}` : ''
   const initialCache = readPageCache(cacheKey, 5 * 60 * 1000)
   const [customers, setCustomers] = useState(() => initialCache?.customers || [])
@@ -342,7 +344,12 @@ export default function CustomersPage() {
     const accountIds = [...new Set(targetCustomers.flatMap((customer) => customer.sourceAccountIds || []).filter(Boolean))]
 
     const count = targetCustomers.length
-    if (!window.confirm(`Remove ${count} customer${count === 1 ? '' : 's'} from customer list? Invoices will stay, saved details will be cleared, and zero-balance credit accounts will be hidden.`)) return
+    const ok = await confirm({
+      title: `Remove ${count} customer${count === 1 ? '' : 's'}?`,
+      message: 'Saved contact details are cleared and the customer disappears from this list.\nInvoices already raised for them stay exactly as they are.\nCredit accounts are hidden only when their balance is zero.',
+      confirmLabel: `Remove ${count} customer${count === 1 ? '' : 's'}`,
+    })
+    if (!ok) return
 
     setDeleting(true)
     try {

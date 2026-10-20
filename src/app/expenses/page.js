@@ -8,6 +8,7 @@ import { readPageCache, writePageCache } from '@/lib/pageCache'
 import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 
 const blank = {
   expense_date: todayStr(),
@@ -34,6 +35,7 @@ function StatsCard({ label, value, className = '' }) {
 
 export default function ExpensesPage() {
   const { shop } = useShop()
+  const { confirm } = useConfirm()
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState(monthStartStr())
   const [dateTo, setDateTo] = useState(todayStr())
@@ -161,7 +163,12 @@ export default function ExpensesPage() {
   }
 
   async function deactivate(id) {
-    if (!window.confirm('Remove this expense entry?')) return
+    const ok = await confirm({
+      title: 'Remove this expense?',
+      message: 'The entry is hidden from this list and stops counting towards your expense totals.',
+      confirmLabel: 'Remove entry',
+    })
+    if (!ok) return
     setError('')
     const { error: removeErr } = await supabase.from('expenses').update({ is_active: false, updated_at: new Date().toISOString() }).eq('id', id).eq('shop_id', shop?.id)
     if (removeErr) {

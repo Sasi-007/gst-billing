@@ -9,6 +9,7 @@ import { readPageCache, writePageCache } from '@/lib/pageCache'
 import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 
 const blank = {
   drawing_date: todayStr(),
@@ -34,6 +35,7 @@ function StatsCard({ label, value, className = '' }) {
 
 export default function DrawingsPage() {
   const { shop } = useShop()
+  const { confirm } = useConfirm()
   const [search, setSearch] = useState('')
   const [dateFrom, setDateFrom] = useState(monthStartStr())
   const [dateTo, setDateTo] = useState(todayStr())
@@ -160,7 +162,12 @@ export default function DrawingsPage() {
   }
 
   async function deactivate(id) {
-    if (!window.confirm('Remove this owner withdrawal entry?')) return
+    const ok = await confirm({
+      title: 'Remove this owner withdrawal?',
+      message: 'The entry is hidden from this list and stops counting towards owner drawings totals.',
+      confirmLabel: 'Remove entry',
+    })
+    if (!ok) return
     setError('')
     const { error: removeErr } = await supabase.from('owner_drawings').update({ is_active: false, updated_at: new Date().toISOString() }).eq('id', id).eq('shop_id', shop?.id)
     if (removeErr) {

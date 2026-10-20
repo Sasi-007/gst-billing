@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 import { loadProductSnapshot, saveProductSnapshot } from '@/lib/offlineBilling'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { getBillProductName, getProductSubtitle } from '@/lib/productNames'
@@ -36,6 +37,7 @@ function matchesProductSearch(product, query, terms) {
 // same cached product snapshot as billing (edits require being online).
 export default function PriceCheckPage() {
   const { shop } = useShop()
+  const { alert } = useConfirm()
   const [query, setQuery] = useState('')
   const [products, setProducts] = useState([])
   const [loading, setLoading] = useState(false)
@@ -233,7 +235,11 @@ export default function PriceCheckPage() {
       offlineProductsRef.current = merged
       await saveProductSnapshot(shop.id, merged)
     } catch (err) {
-      alert('Could not save price. ' + (err?.message || 'Please check your connection and try again.'))
+      alert({
+        title: 'Could not save price',
+        message: err?.message || 'Please check your connection and try again.',
+        tone: 'danger',
+      })
     } finally {
       setSaving(false)
     }

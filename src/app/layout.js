@@ -1,6 +1,7 @@
 import './globals.css'
 import { ShopProvider } from '@/context/ShopContext'
 import { PageLoadingProvider } from '@/context/PageLoadingContext'
+import { ConfirmDialogProvider } from '@/context/ConfirmDialogContext'
 import AppShell from '@/components/AppShell'
 import PwaBootstrap from '@/components/PwaBootstrap'
 
@@ -24,8 +25,10 @@ export default function RootLayout({ children }) {
       <body className="bg-gray-50 antialiased">
         <ShopProvider>
           <PageLoadingProvider>
-            <PwaBootstrap />
-            <AppShell>{children}</AppShell>
+            <ConfirmDialogProvider>
+              <PwaBootstrap />
+              <AppShell>{children}</AppShell>
+            </ConfirmDialogProvider>
           </PageLoadingProvider>
         </ShopProvider>
       </body>

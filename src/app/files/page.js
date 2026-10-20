@@ -6,6 +6,7 @@ import { EditorView } from '@codemirror/view'
 import { loadLanguage } from '@uiw/codemirror-extensions-langs'
 import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import {
   createBinaryFile,
@@ -39,6 +40,7 @@ function languageExtensionFor(name) {
 
 export default function FilesPage() {
   const { shop } = useShop()
+  const { confirm } = useConfirm()
   const [files, setFiles] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -209,8 +211,15 @@ export default function FilesPage() {
     if (!shop?.id) return
     // Switching files — or re-opening the current one, which reloads it from
     // the database — would otherwise discard edits without warning.
-    if (dirty && !window.confirm(`Discard unsaved changes to "${activeFile?.name}"?`)) {
-      return
+    if (dirty) {
+      const ok = await confirm({
+        title: 'Discard unsaved changes?',
+        message: `Your edits to "${activeFile?.name}" have not been saved and will be lost.`,
+        tone: 'warning',
+        confirmLabel: 'Discard changes',
+        cancelLabel: 'Keep editing',
+      })
+      if (!ok) return
     }
     setOpening(true)
     setError('')
@@ -231,8 +240,17 @@ export default function FilesPage() {
     setDirty(false)
   }
 
-  function closeEditor({ force = false } = {}) {
-    if (!force && dirty && !window.confirm('Discard unsaved changes?')) return
+  async function closeEditor({ force = false } = {}) {
+    if (!force && dirty) {
+      const ok = await confirm({
+        title: 'Discard unsaved changes?',
+        message: `Your edits to "${activeFile?.name || 'this file'}" have not been saved and will be lost once the editor closes.`,
+        tone: 'warning',
+        confirmLabel: 'Discard changes',
+        cancelLabel: 'Keep editing',
+      })
+      if (!ok) return
+    }
     setActiveId('')
     setActiveFile(null)
     setContent('')
@@ -277,10 +295,15 @@ export default function FilesPage() {
     const oldExt = fileExtension(file.name)
     const newExt = fileExtension(name)
     if (oldExt !== newExt) {
-      const warning = file.kind === 'binary'
-        ? `This is a ${oldExt ? `.${oldExt}` : 'binary'} file. Renaming it to ${newExt ? `.${newExt}` : 'no extension'} will not convert it, and the download may not open correctly. Continue?`
-        : `Changing .${oldExt || '(none)'} to .${newExt || '(none)'} will change syntax highlighting. Continue?`
-      if (!window.confirm(warning)) return
+      const ok = await confirm({
+        title: 'Change the file extension?',
+        message: file.kind === 'binary'
+          ? `This is a ${oldExt ? `.${oldExt}` : 'binary'} file. Renaming it to ${newExt ? `.${newExt}` : 'no extension'} does not convert the contents, so the download may not open correctly.`
+          : `Changing .${oldExt || '(none)'} to .${newExt || '(none)'} changes how this file is syntax highlighted. The contents are not changed.`,
+        tone: 'warning',
+        confirmLabel: 'Rename anyway',
+      })
+      if (!ok) return
     }
 
     setBusyId(file.id)
@@ -342,7 +365,13 @@ export default function FilesPage() {
 
   async function removeFile(file) {
     if (!shop?.id) return
-    if (!window.confirm(`Delete "${file.name}"? This cannot be undone.`)) return
+    const ok = await confirm({
+      title: `Delete "${file.name}"?`,
+      message: 'The file and its stored contents are removed from this shop.',
+      details: 'This cannot be undone.',
+      confirmLabel: 'Delete file',
+    })
+    if (!ok) return
 
     setBusyId(file.id)
     setError('')

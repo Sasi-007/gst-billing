@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 
 const STATES = [
   'Andhra Pradesh','Arunachal Pradesh','Assam','Bihar','Chhattisgarh','Goa','Gujarat',
@@ -14,6 +15,7 @@ const STATES = [
 
 export default function SettingsPage() {
   const { shop, setShop, allShops } = useShop()
+  const { confirm } = useConfirm()
   const [form,   setForm]   = useState({
     name:'', address:'', city:'', state:'Tamil Nadu', state_code:'33',
     pincode:'', phone:'', email:'', gstin:'', footer_text:'Thank you for your business!',
@@ -113,7 +115,14 @@ export default function SettingsPage() {
 
   async function resetInvoiceCounter() {
     if (!shop?.id) return
-    if (!window.confirm('Reset invoice numbering to start again from INV-0001? This is allowed only when there are no invoices.')) return
+    const ok = await confirm({
+      title: 'Reset invoice numbering?',
+      message: 'The next invoice will start again from INV-0001.',
+      details: 'This is allowed only when the shop has no invoices at all. If any exist, the reset is refused and nothing changes.',
+      tone: 'warning',
+      confirmLabel: 'Reset counter',
+    })
+    if (!ok) return
 
     setResettingInvoiceCounter(true)
     setError('')
@@ -153,8 +162,14 @@ export default function SettingsPage() {
 
   async function forceResetInvoiceCounter() {
     if (!shop?.id) return
-    const confirmation = window.prompt('Force reset can create duplicate invoice numbers if old invoices exist. Type RESET to force next invoice number to INV-0001.')
-    if (confirmation !== 'RESET') return
+    const ok = await confirm({
+      title: 'Force reset invoice numbering?',
+      message: 'This skips the safety check and forces the next invoice number to INV-0001.',
+      details: 'If older invoices already use these numbers, you will end up with duplicate invoice numbers. Use this only for demo or testing data.',
+      requireText: 'RESET',
+      confirmLabel: 'Force reset',
+    })
+    if (!ok) return
 
     setResettingInvoiceCounter(true)
     setError('')
@@ -176,7 +191,14 @@ export default function SettingsPage() {
 
   async function resetPurchaseCounter() {
     if (!shop?.id) return
-    if (!window.confirm('Reset purchase numbering to start again from PUR-0001? This is allowed only when there are no purchase bills.')) return
+    const ok = await confirm({
+      title: 'Reset purchase numbering?',
+      message: 'The next purchase bill will start again from PUR-0001.',
+      details: 'This is allowed only when the shop has no purchase bills at all. If any exist, the reset is refused and nothing changes.',
+      tone: 'warning',
+      confirmLabel: 'Reset counter',
+    })
+    if (!ok) return
 
     setResettingPurchaseCounter(true)
     setError('')
@@ -215,8 +237,14 @@ export default function SettingsPage() {
 
   async function forceResetPurchaseCounter() {
     if (!shop?.id) return
-    const confirmation = window.prompt('Force reset can create duplicate purchase numbers if old purchases exist. Type RESET to force next purchase number to PUR-0001.')
-    if (confirmation !== 'RESET') return
+    const ok = await confirm({
+      title: 'Force reset purchase numbering?',
+      message: 'This skips the safety check and forces the next purchase number to PUR-0001.',
+      details: 'If older purchases already use these numbers, you will end up with duplicate purchase numbers. Use this only for demo or testing data.',
+      requireText: 'RESET',
+      confirmLabel: 'Force reset',
+    })
+    if (!ok) return
 
     setResettingPurchaseCounter(true)
     setError('')
@@ -306,27 +334,20 @@ export default function SettingsPage() {
     const targetShopName = String(shop.name || '').trim()
 
     const otherShopCount = Math.max(0, (allShops?.length || 1) - 1)
-    const first = window.confirm(
-      `Delete ALL business data for "${targetShopName}"?\n\n`
-      + 'This permanently removes invoices, purchases, products, categories, suppliers, customers, '
-      + 'expenses, investments, drawings, credit book entries and bank records for this shop only.\n\n'
-      + (otherShopCount > 0
-        ? `Your other ${otherShopCount} shop${otherShopCount > 1 ? 's are' : ' is'} NOT affected.\n\n`
-        : '')
-      + 'Your shop profile, settings and login are kept. This CANNOT be undone.',
-    )
-    if (!first) return
-
     // Typing the shop name (not a generic phrase) makes it impossible to wipe the
     // wrong shop by muscle memory when several shops share one login.
-    const typed = window.prompt(
-      `There is no undo. To confirm, type this shop's name exactly:\n\n${targetShopName}`,
-    )
-    if (typed === null) return
-    if (typed.trim() !== targetShopName) {
-      setWipeNotice(`Cancelled — you typed "${typed.trim()}", which does not match "${targetShopName}". Nothing was deleted.`)
-      return
-    }
+    const ok = await confirm({
+      title: `Delete ALL business data for "${targetShopName}"?`,
+      message: 'This permanently removes invoices, purchases, products, categories, suppliers, customers, expenses, investments, drawings, credit book entries and bank records for this shop only.\n'
+        + (otherShopCount > 0
+          ? `Your other ${otherShopCount} shop${otherShopCount > 1 ? 's are' : ' is'} NOT affected.\n`
+          : '')
+        + 'Your shop profile, settings and login are kept.',
+      details: 'There is no undo. Nothing is deleted until you type the shop name below exactly.',
+      requireText: targetShopName,
+      confirmLabel: 'Delete all data',
+    })
+    if (!ok) return
 
     setWiping(true)
     setError('')

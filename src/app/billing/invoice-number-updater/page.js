@@ -5,6 +5,7 @@ import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 
 const AUTO_INVOICE_CREDIT_TAG_PREFIX = '[AUTO-INVOICE:'
 const TEMP_RENUMBER_PREFIX = '__REN-'
@@ -52,6 +53,7 @@ function formatBillNo(prefix, number, digits) {
 export default function InvoiceNumberUpdaterPage() {
   const searchParams = useSearchParams()
   const { shop, setShop } = useShop()
+  const { confirm } = useConfirm()
   const [bills, setBills] = useState([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -311,7 +313,14 @@ export default function InvoiceNumberUpdaterPage() {
         return
       }
 
-      if (!window.confirm(`Refresh invoice numbers for ${previewRows.length} ${scope === 'all' ? 'invoice' : 'selected invoice'}${previewRows.length > 1 ? 's' : ''}? The bill counter will also move to ${numericStart + previewRows.length - 1} so the next new bill continues this series.`)) {
+      const ok = await confirm({
+        title: `Refresh ${previewRows.length} invoice number${previewRows.length > 1 ? 's' : ''}?`,
+        message: `They will become ${previewRows[0].next_bill_no} … ${previewRows[previewRows.length - 1].next_bill_no} in bill-date order.\nOnly the number changes — items, stock, payments and credit entries stay exactly as they are.`,
+        details: `The bill counter also moves to ${numericStart + previewRows.length - 1}, so the next new bill continues this series.`,
+        tone: 'warning',
+        confirmLabel: 'Refresh numbers',
+      })
+      if (!ok) {
         return
       }
 

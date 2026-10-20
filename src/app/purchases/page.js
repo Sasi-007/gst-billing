@@ -8,6 +8,7 @@ import { readPageCache, writePageCache } from '@/lib/pageCache'
 import LoadingPlaceholder from '@/components/LoadingPlaceholder'
 import PurchaseImportPanel from '@/components/PurchaseImportPanel'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import Link from 'next/link'
@@ -92,6 +93,7 @@ async function fetchPurchasesDirect(shopId, dateFrom, dateTo, search) {
 
 export default function PurchasesPage() {
   const { shop } = useShop()
+  const { confirm } = useConfirm()
   const router = useRouter()
   const [dateFrom, setDateFrom] = useState(monthStartStr())
   const [dateTo, setDateTo] = useState(todayStr())
@@ -459,7 +461,13 @@ export default function PurchasesPage() {
 
   async function handleDeleteBill(bill) {
     if (!shop?.id || !bill?.id) return
-    if (!window.confirm(`Delete purchase ${bill.bill_no}? This cannot be undone.`)) return
+    const ok = await confirm({
+      title: `Delete purchase ${bill.bill_no}?`,
+      message: 'The bill and its items are removed, and the stock added by this purchase is taken back out automatically.',
+      details: 'Sales bills are not affected. This cannot be undone.',
+      confirmLabel: 'Delete purchase',
+    })
+    if (!ok) return
 
     setDeletingBillId(bill.id)
     try {
@@ -547,20 +555,27 @@ export default function PurchasesPage() {
         .filter(Boolean)
 
       const billList = selectedBills.map((bill) => bill.bill_no).join(', ')
-      let message = `Delete ${selectedBillIds.length} purchase${selectedBillIds.length > 1 ? 's' : ''} (${billList})?\n\n`
-      message += 'This will NOT affect any sales bills — sales records stay untouched.\n'
-      message += 'It will reduce stock for the products on these purchases by the quantities purchased.'
+      let message = `${billList}\n`
+      message += 'Sales bills are not affected — those records stay untouched.\n'
+      message += 'Stock for the products on these purchases is reduced by the quantities purchased.'
 
+      let details = 'This cannot be undone.'
       if (negativeStockWarnings.length) {
-        message += '\n\n⚠ Warning: some of this stock appears to have already been sold or used elsewhere. '
-        message += 'Deleting will push these products\' stock below zero:\n'
-        message += negativeStockWarnings
-          .map((w) => `• ${w.name}: current ${w.currentStock} − ${w.removeQty} = ${w.resultingStock}`)
-          .join('\n')
-        message += '\n\nYou may want to adjust stock manually afterwards. Continue anyway?'
+        details = 'Some of this stock appears to have already been sold or used elsewhere. '
+          + 'Deleting pushes these products below zero stock:\n'
+          + negativeStockWarnings
+            .map((w) => `• ${w.name}: current ${w.currentStock} − ${w.removeQty} = ${w.resultingStock}`)
+            .join('\n')
+          + '\nYou may want to adjust stock manually afterwards.'
       }
 
-      if (!window.confirm(message)) {
+      const ok = await confirm({
+        title: `Delete ${selectedBillIds.length} purchase${selectedBillIds.length > 1 ? 's' : ''}?`,
+        message,
+        details,
+        confirmLabel: `Delete ${selectedBillIds.length} purchase${selectedBillIds.length > 1 ? 's' : ''}`,
+      })
+      if (!ok) {
         setBulkDeleting(false)
         return
       }

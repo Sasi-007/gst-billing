@@ -6,6 +6,7 @@ import { useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { fmt } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 
 const AUTO_PURCHASE_CREDIT_TAG_PREFIX = '[AUTO-PURCHASE:'
 
@@ -52,6 +53,7 @@ function formatBillNo(prefix, number, digits) {
 export default function PurchaseNumberUpdaterPage() {
   const searchParams = useSearchParams()
   const { shop, setShop } = useShop()
+  const { confirm } = useConfirm()
   const [purchases, setPurchases] = useState([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -224,11 +226,13 @@ export default function PurchaseNumberUpdaterPage() {
         return
       }
 
-      if (!window.confirm(
-        `Refresh purchase numbers for ${previewRows.length} purchase${previewRows.length > 1 ? 's' : ''}?`
-        + `\n\nThey will become ${previewRows[0].next_bill_no} … ${previewRows[previewRows.length - 1].next_bill_no} in bill-date order.`
-        + '\n\nOnly the number changes — items, stock, payments and credit entries stay exactly as they are.'
-      )) {
+      const ok = await confirm({
+        title: `Refresh ${previewRows.length} purchase number${previewRows.length > 1 ? 's' : ''}?`,
+        message: `They will become ${previewRows[0].next_bill_no} … ${previewRows[previewRows.length - 1].next_bill_no} in bill-date order.\nOnly the number changes — items, stock, payments and credit entries stay exactly as they are.`,
+        tone: 'warning',
+        confirmLabel: 'Refresh numbers',
+      })
+      if (!ok) {
         return
       }
 

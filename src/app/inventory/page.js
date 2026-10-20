@@ -10,6 +10,7 @@ import { usePageLoadingState } from '@/context/PageLoadingContext'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import InventoryFilterPanel from '@/components/InventoryFilterPanel'
 import { countRules, emptyFilterTree, filterTreeToPostgrest, makeGroup, makeRule, treeHasField } from '@/lib/inventoryFilters'
+import { fetchAllRowsByIds } from '@/lib/supabaseBatch'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { describeChange, fetchLatestPriceChanges, sourceLabel } from '@/lib/priceHistory'
@@ -361,6 +362,323 @@ function ProductPurchaseHistory({ shopId, product, colSpan }) {
   )
 }
 
+function emptyUsage() {
+  return {
+    saleLines: 0,
+    saleQty: 0,
+    saleValue: 0,
+    lastSaleDate: null,
+    lastSaleBillNo: null,
+    purchaseLines: 0,
+    purchaseQty: 0,
+    purchaseValue: 0,
+    lastPurchaseDate: null,
+    lastPurchaseBillNo: null,
+  }
+}
+
+/**
+ * Sale and purchase footprint for each product, used by the delete dialog.
+ *
+ * The product FK on both line-item tables is ON DELETE SET NULL, so removing a
+ * product never deletes a bill — but it does sever the link, which silently
+ * drops that history out of product-wise reporting. Showing the real numbers
+ * lets the shop decide between deleting and disabling.
+ */
+async function fetchProductUsage(shopId, productIds) {
+  const usage = new Map(productIds.map((id) => [id, emptyUsage()]))
+  if (!shopId || !productIds.length) return usage
+
+  const [saleRows, purchaseRows] = await Promise.all([
+    fetchAllRowsByIds(
+      () => supabase
+        .from('bill_items')
+        .select('product_id,quantity,total,bills(date,bill_no,bill_type)')
+        .eq('shop_id', shopId),
+      'product_id',
+      productIds
+    ),
+    fetchAllRowsByIds(
+      () => supabase
+        .from('purchase_bill_items')
+        .select('product_id,quantity,total,purchase_bills(date,bill_no)')
+        .eq('shop_id', shopId),
+      'product_id',
+      productIds
+    ),
+  ])
+
+  saleRows.forEach((row) => {
+    const entry = usage.get(row.product_id)
+    if (!entry) return
+    entry.saleLines += 1
+    entry.saleQty += Number(row.quantity || 0)
+    entry.saleValue += Number(row.total || 0)
+    const date = row.bills?.date
+    if (date && (!entry.lastSaleDate || date > entry.lastSaleDate)) {
+      entry.lastSaleDate = date
+      entry.lastSaleBillNo = row.bills?.bill_no || null
+    }
+  })
+
+  purchaseRows.forEach((row) => {
+    const entry = usage.get(row.product_id)
+    if (!entry) return
+    entry.purchaseLines += 1
+    entry.purchaseQty += Number(row.quantity || 0)
+    entry.purchaseValue += Number(row.total || 0)
+    const date = row.purchase_bills?.date
+    if (date && (!entry.lastPurchaseDate || date > entry.lastPurchaseDate)) {
+      entry.lastPurchaseDate = date
+      entry.lastPurchaseBillNo = row.purchase_bills?.bill_no || null
+    }
+  })
+
+  return usage
+}
+
+function formatDay(value) {
+  if (!value) return null
+  const parsed = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(parsed.getTime())) return null
+  return parsed.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+}
+
+function roundQty(value) {
+  return Math.round(Number(value || 0) * 1000) / 1000
+}
+
+function UsageLine({ tone, title, lines, qty, value, lastDate, lastBillNo }) {
+  if (!lines) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-gray-400">
+        <span className="text-green-600">✓</span>
+        <span>No {title.toLowerCase()} history</span>
+      </div>
+    )
+  }
+
+  const day = formatDay(lastDate)
+  return (
+    <div className={`rounded-md px-2 py-1.5 text-xs ${tone}`}>
+      <div className="font-medium">
+        {title}: {lines} line{lines > 1 ? 's' : ''} · {roundQty(qty)} units · {fmt(value)}
+      </div>
+      {day && (
+        <div className="opacity-80">
+          Last {lastBillNo ? `on bill ${lastBillNo} ` : ''}({day})
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Confirmation for permanently removing products.
+ *
+ * The old window.confirm could only report how many of the selection had
+ * history, never which ones or how much, so there was no safe way to judge the
+ * impact before clicking OK.
+ */
+function DeleteProductsDialog({
+  products,
+  usage,
+  loading,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+  onDisableInstead,
+}) {
+  useEffect(() => {
+    function onKeyDown(event) {
+      if (event.key === 'Escape' && !busy) onCancel()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [busy, onCancel])
+
+  const rows = products.map((product) => ({
+    product,
+    usage: usage?.get(product.id) || emptyUsage(),
+  }))
+
+  // Without the history lookup every product would render as "safe to delete",
+  // so the dialog stays blocked until it succeeds.
+  const ready = !loading && !!usage
+
+  const linked = rows.filter(({ usage: u }) => u.saleLines > 0 || u.purchaseLines > 0)
+  const soldOnly = rows.filter(({ usage: u }) => u.saleLines > 0)
+  const stillActive = products.filter((product) => product.is_active !== false)
+  const stockUnits = products.reduce((sum, product) => sum + Number(product.stock_qty || 0), 0)
+  const stockValue = products.reduce(
+    (sum, product) => sum + Number(product.stock_qty || 0) * Number(product.purchase_price || 0),
+    0
+  )
+
+  return (
+    <div className="no-print fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3 sm:p-4">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Confirm product deletion"
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-white shadow-xl"
+      >
+        <div className="flex items-start gap-3 border-b px-4 py-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-100 text-lg text-red-600">
+            ⚠
+          </div>
+          <div className="min-w-0 flex-1">
+            <h2 className="text-base font-semibold text-gray-900">
+              Delete {products.length} product{products.length > 1 ? 's' : ''}?
+            </h2>
+            <p className="mt-0.5 text-xs text-gray-500">
+              This permanently removes {products.length > 1 ? 'these items' : 'this item'} from your inventory and cannot be undone.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            aria-label="Close"
+            className="shrink-0 rounded px-1.5 text-xl leading-none text-gray-400 hover:text-gray-700 disabled:opacity-40"
+          >
+            ×
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="px-4 py-10 text-center text-sm text-gray-500">
+            Checking sale &amp; purchase history…
+          </div>
+        ) : !ready ? (
+          <div className="px-4 py-10 text-center text-sm text-gray-500">
+            Billing history could not be checked, so deleting is not safe right now.
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-3 gap-2 border-b bg-gray-50 px-4 py-3 text-center">
+              <div>
+                <div className="text-[11px] text-gray-500">Safe to delete</div>
+                <div className="text-lg font-bold text-green-700">{products.length - linked.length}</div>
+                <div className="text-[10px] text-gray-400">never billed</div>
+              </div>
+              <div>
+                <div className="text-[11px] text-gray-500">Has history</div>
+                <div className={`text-lg font-bold ${linked.length ? 'text-red-700' : 'text-gray-400'}`}>
+                  {linked.length}
+                </div>
+                <div className="text-[10px] text-gray-400">
+                  {soldOnly.length} with sales
+                </div>
+              </div>
+              <div>
+                <div className="text-[11px] text-gray-500">Stock removed</div>
+                <div className="text-lg font-bold text-gray-800">{roundQty(stockUnits)}</div>
+                <div className="text-[10px] text-gray-400">units · {fmt(stockValue)} at cost</div>
+              </div>
+            </div>
+
+            {linked.length > 0 && (
+              <div className="border-b bg-amber-50 px-4 py-2.5 text-xs text-amber-900">
+                <strong>{linked.length}</strong> of these {linked.length > 1 ? 'products appear' : 'product appears'} on
+                existing bills. Those bills keep their amounts and totals — nothing is lost from your GST returns — but
+                they lose the link to the product, so <strong>product-wise reports will no longer show this history</strong>.
+                Disabling hides a product from new bills while keeping its reporting intact.
+              </div>
+            )}
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+              <div className="space-y-2">
+                {rows.map(({ product, usage: u }) => {
+                  const hasHistory = u.saleLines > 0 || u.purchaseLines > 0
+                  return (
+                    <div
+                      key={product.id}
+                      className={`rounded-lg border px-3 py-2 ${hasHistory ? 'border-red-200 bg-red-50/40' : 'border-gray-200'}`}
+                    >
+                      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                        <div className="min-w-0">
+                          <span className="text-sm font-medium text-gray-900">{product.name}</span>
+                          {product.local_name && (
+                            <span className="ml-1.5 text-xs text-gray-500">{product.local_name}</span>
+                          )}
+                          {product.is_active === false && (
+                            <span className="ml-1.5 rounded bg-gray-200 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">
+                              Inactive
+                            </span>
+                          )}
+                        </div>
+                        <div className="shrink-0 text-xs text-gray-500">
+                          Stock {roundQty(product.stock_qty)} {product.unit || 'pcs'} · {fmt(product.purchase_price)} cost
+                        </div>
+                      </div>
+
+                      <div className="mt-1.5 grid gap-1.5 sm:grid-cols-2">
+                        <UsageLine
+                          tone="bg-red-100 text-red-900"
+                          title="Sales"
+                          lines={u.saleLines}
+                          qty={u.saleQty}
+                          value={u.saleValue}
+                          lastDate={u.lastSaleDate}
+                          lastBillNo={u.lastSaleBillNo}
+                        />
+                        <UsageLine
+                          tone="bg-purple-100 text-purple-900"
+                          title="Purchases"
+                          lines={u.purchaseLines}
+                          qty={u.purchaseQty}
+                          value={u.purchaseValue}
+                          lastDate={u.lastPurchaseDate}
+                          lastBillNo={u.lastPurchaseBillNo}
+                        />
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          </>
+        )}
+
+        {error && (
+          <div className="border-t bg-red-50 px-4 py-2 text-xs text-red-700">{error}</div>
+        )}
+
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t bg-gray-50 px-4 py-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-lg border bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          {stillActive.length > 0 && (
+            <button
+              type="button"
+              onClick={onDisableInstead}
+              disabled={busy || !ready}
+              className="rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Disable {stillActive.length} instead
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={busy || !ready}
+            className="rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-gray-300"
+          >
+            {busy ? 'Deleting…' : `Delete ${products.length} permanently`}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function InventoryPage() {
   const { shop } = useShop()
   const searchParams = useSearchParams()
@@ -403,6 +721,13 @@ export default function InventoryPage() {
   const loadSeq = useRef(0)
   const [csvMessage, setCsvMessage] = useState('')
   const csvInputRef = useRef(null)
+  const [deleteTargets, setDeleteTargets] = useState(null)
+  const [deleteUsage, setDeleteUsage] = useState(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
+  // Guards against a slow history lookup landing after the dialog was closed.
+  const deleteSeq = useRef(0)
   usePageLoadingState('inventory-page', loading)
 
   // Any change to search/filter/category should reset back to page 1.
@@ -587,23 +912,86 @@ export default function InventoryPage() {
     load()
   }
 
-  // Checks whether products have any historical sale/purchase line items, so the
-  // delete confirmation can warn before severing that history (FK is ON DELETE
-  // SET NULL — the bill/purchase itself is never touched, only the product link).
-  async function findProductsWithHistory(productIds) {
-    if (!shop?.id || !productIds.length) return new Set()
+  // Opens the confirmation dialog and loads each product's sale/purchase
+  // footprint, so the shop can see what deleting would detach before agreeing.
+  function openDeleteDialog(targets) {
+    const list = (targets || []).filter(Boolean)
+    if (!shop?.id || !list.length) return
 
-    const [saleRes, purchaseRes] = await Promise.all([
-      supabase.from('bill_items').select('product_id').eq('shop_id', shop.id).in('product_id', productIds),
-      supabase.from('purchase_bill_items').select('product_id').eq('shop_id', shop.id).in('product_id', productIds),
-    ])
-    if (saleRes.error) throw saleRes.error
-    if (purchaseRes.error) throw purchaseRes.error
+    const seq = ++deleteSeq.current
+    setDeleteTargets(list)
+    setDeleteUsage(null)
+    setDeleteError('')
+    setDeleteLoading(true)
+    setCsvMessage('')
 
-    const used = new Set()
-    ;(saleRes.data || []).forEach((row) => used.add(row.product_id))
-    ;(purchaseRes.data || []).forEach((row) => used.add(row.product_id))
-    return used
+    fetchProductUsage(shop.id, list.map((product) => product.id))
+      .then((map) => {
+        if (seq !== deleteSeq.current) return
+        setDeleteUsage(map)
+      })
+      .catch((error) => {
+        if (seq !== deleteSeq.current) return
+        setDeleteError(`Could not load billing history: ${error.message}. Delete is blocked until this succeeds.`)
+      })
+      .finally(() => {
+        if (seq !== deleteSeq.current) return
+        setDeleteLoading(false)
+      })
+  }
+
+  function closeDeleteDialog() {
+    deleteSeq.current += 1
+    setDeleteTargets(null)
+    setDeleteUsage(null)
+    setDeleteLoading(false)
+    setDeleteError('')
+  }
+
+  async function confirmDelete() {
+    const list = deleteTargets || []
+    if (!list.length) return
+
+    setDeleteBusy(true)
+    setDeleteError('')
+    try {
+      await deleteProductsByIds(list.map((product) => product.id))
+      closeDeleteDialog()
+      setCsvMessage(`Deleted ${list.length} product${list.length > 1 ? 's' : ''}`)
+      await load()
+    } catch (error) {
+      setDeleteError(`Delete failed: ${error.message}`)
+    } finally {
+      setDeleteBusy(false)
+    }
+  }
+
+  async function disableInstead() {
+    const ids = (deleteTargets || [])
+      .filter((product) => product.is_active !== false)
+      .map((product) => product.id)
+    if (!ids.length) return
+
+    setDeleteBusy(true)
+    setDeleteError('')
+    try {
+      const { error } = await supabase
+        .from('products')
+        .update({ is_active: false })
+        .eq('shop_id', shop.id)
+        .in('id', ids)
+      if (error) throw error
+
+      clearPageCacheByPrefix([`inventory:${shop.id}:`])
+      setSelected(new Map())
+      closeDeleteDialog()
+      setCsvMessage(`Disabled ${ids.length} product${ids.length > 1 ? 's' : ''} — history kept`)
+      await load()
+    } catch (error) {
+      setDeleteError(`Could not disable: ${error.message}`)
+    } finally {
+      setDeleteBusy(false)
+    }
   }
 
   async function deleteProductsByIds(productIds) {
@@ -623,48 +1011,14 @@ export default function InventoryPage() {
     })
   }
 
-  async function handleDeleteProduct(product) {
-    if (!shop?.id || !product?.id) return
-
-    try {
-      const used = await findProductsWithHistory([product.id])
-      let message = `Delete "${product.name}"? This cannot be undone.`
-      if (used.has(product.id)) {
-        message += '\n\n⚠ This product has existing sale/purchase bills. Those bills will NOT be deleted or changed in '
-          + 'total, but they will lose their link to this product (reports grouped by product will no longer include '
-          + 'this history). Consider clicking "Disable" instead if you just want to hide it from new bills.'
-      }
-      if (!window.confirm(message)) return
-
-      await deleteProductsByIds([product.id])
-      setCsvMessage('')
-    } catch (error) {
-      setCsvMessage(`Delete failed: ${error.message}`)
-    }
+  function handleDeleteProduct(product) {
+    if (!product?.id) return
+    openDeleteDialog([product])
   }
 
-  async function handleDeleteSelected() {
-    if (!shop?.id || selected.size === 0) return
-    const ids = Array.from(selected.keys())
-    const names = Array.from(selected.values()).map((p) => p.name)
-
-    try {
-      const used = await findProductsWithHistory(ids)
-      let message = `Delete ${ids.length} selected product${ids.length > 1 ? 's' : ''}?\n\n${names.slice(0, 10).join(', ')}`
-        + (names.length > 10 ? `, +${names.length - 10} more` : '')
-        + '\n\nThis cannot be undone.'
-      if (used.size) {
-        message += `\n\n⚠ ${used.size} of these have existing sale/purchase bills. Those bills will NOT be deleted or `
-          + 'changed in total, but they will lose their link to these products (reports grouped by product will no '
-          + 'longer include this history). Consider "Disable" instead if you just want to hide them from new bills.'
-      }
-      if (!window.confirm(message)) return
-
-      await deleteProductsByIds(ids)
-      setCsvMessage('')
-    } catch (error) {
-      setCsvMessage(`Delete failed: ${error.message}`)
-    }
+  function handleDeleteSelected() {
+    if (selected.size === 0) return
+    openDeleteDialog(Array.from(selected.values()))
   }
 
   function toggleSelect(product) {
@@ -1382,6 +1736,19 @@ export default function InventoryPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {deleteTargets && (
+        <DeleteProductsDialog
+          products={deleteTargets}
+          usage={deleteUsage}
+          loading={deleteLoading}
+          busy={deleteBusy}
+          error={deleteError}
+          onCancel={closeDeleteDialog}
+          onConfirm={confirmDelete}
+          onDisableInstead={disableInstead}
+        />
       )}
     </div>
   )

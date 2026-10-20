@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
 
 const SUPERADMIN_EMAILS = process.env.NEXT_PUBLIC_SUPERADMIN_EMAILS || ''
 
@@ -48,6 +49,7 @@ async function adminFetch(path, options = {}) {
 
 export default function SuperadminPage() {
   const { user, loading: shopLoading } = useShop()
+  const { confirm } = useConfirm()
   const [tab,     setTab]     = useState('shops')
   const [shops,   setShops]   = useState([])
   const [users,   setUsers]   = useState([])
@@ -198,11 +200,14 @@ export default function SuperadminPage() {
   }
 
   async function resetShopData(shop) {
-    const typed = window.prompt(`Type RESET to clear all business data for "${shop.name}" and restart counters from 1 on next bill.`)
-    if (typed !== 'RESET') {
-      if (typed !== null) setError('Reset cancelled: you must type RESET exactly.')
-      return
-    }
+    const ok = await confirm({
+      title: `Clear all business data for "${shop.name}"?`,
+      message: 'Every invoice, purchase, product, supplier, customer and ledger entry for this shop is deleted, and the bill counters restart from 1 on the next bill.',
+      details: 'There is no undo. Nothing is deleted until you type RESET below.',
+      requireText: 'RESET',
+      confirmLabel: 'Clear shop data',
+    })
+    if (!ok) return
 
     setError('')
     setResettingShopId(shop.id)
