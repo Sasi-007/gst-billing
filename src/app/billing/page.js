@@ -7,7 +7,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { calcItem, calcBillTotals, fmt, round2, GST_RATES } from '@/lib/gst'
 import { printWithContent } from '@/lib/print'
-import { todayStr } from '@/lib/finance'
+import { todayStr, monthStartStr, lastMonthStartStr, lastMonthEndStr } from '@/lib/finance'
 import {
   ensureCustomerRecord,
   fetchCustomerDirectory,
@@ -615,6 +615,10 @@ export default function BillingPage() {
   const [historyBills, setHistoryBills] = useState([])
   const [historyLoading, setHistoryLoading] = useState(false)
   const [historySearch, setHistorySearch] = useState('')
+  // History opens on the current month so the common case needs no clicks.
+  const [historyPeriod, setHistoryPeriod] = useState('this')
+  const [historyFrom, setHistoryFrom] = useState(monthStartStr)
+  const [historyTo, setHistoryTo] = useState(todayStr)
   const [historyPaymentDrafts, setHistoryPaymentDrafts] = useState({})
   const [historySelectedBillIds, setHistorySelectedBillIds] = useState([])
   const [historyDeleting, setHistoryDeleting] = useState(false)
@@ -650,6 +654,20 @@ export default function BillingPage() {
     acc.due += historyDueAmount(bill)
     return acc
   }, { count: 0, total: 0, paid: 0, due: 0 }), [sortedHistoryBills])
+
+  function handleHistoryPeriod(period) {
+    setHistoryPeriod(period)
+    if (period === 'this') {
+      setHistoryFrom(monthStartStr())
+      setHistoryTo(todayStr())
+    } else if (period === 'last') {
+      setHistoryFrom(lastMonthStartStr())
+      setHistoryTo(lastMonthEndStr())
+    } else if (period === 'all') {
+      setHistoryFrom('')
+      setHistoryTo('')
+    }
+  }
 
   function handleHistorySort(key) {
     if (key === historySortKey) {
@@ -962,6 +980,9 @@ export default function BillingPage() {
         .order('created_at', { ascending: false })
         .limit(debouncedHistorySearch.trim() ? 200 : 50)
 
+      if (historyFrom) q = q.gte('date', historyFrom)
+      if (historyTo) q = q.lte('date', historyTo)
+
       const { data, error } = await q
       if (cancelled) return
       if (error) {
@@ -1101,7 +1122,7 @@ export default function BillingPage() {
 
     loadHistoryBills()
     return () => { cancelled = true }
-  }, [view, billType, debouncedHistorySearch, historyRefreshKey, shop?.id])
+  }, [view, billType, debouncedHistorySearch, historyRefreshKey, historyFrom, historyTo, shop?.id])
 
   // ── Load existing bill into form when ?editId= is provided ───────────────────
   useEffect(() => {
@@ -2346,6 +2367,48 @@ export default function BillingPage() {
         {view === 'history' && (
           <div className="flex-1 overflow-y-auto p-4">
             <div className="mb-3 flex flex-wrap items-center gap-2">
+              <div className="inline-flex rounded-lg border bg-white p-0.5">
+                {[
+                  { key: 'this', label: 'This Month' },
+                  { key: 'last', label: 'Last Month' },
+                  { key: 'all', label: 'All' },
+                ].map((option) => (
+                  <button
+                    key={option.key}
+                    type="button"
+                    onClick={() => handleHistoryPeriod(option.key)}
+                    className={`px-3 py-1.5 rounded-md text-sm font-medium ${
+                      historyPeriod === option.key
+                        ? 'bg-blue-600 text-white'
+                        : 'text-gray-600 hover:bg-gray-50'
+                    }`}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="date"
+                  value={historyFrom}
+                  onChange={(e) => { setHistoryFrom(e.target.value); setHistoryPeriod('custom') }}
+                  className="border rounded-lg px-2 py-1.5 text-sm"
+                />
+                <span className="text-xs text-gray-400">to</span>
+                <input
+                  type="date"
+                  value={historyTo}
+                  onChange={(e) => { setHistoryTo(e.target.value); setHistoryPeriod('custom') }}
+                  className="border rounded-lg px-2 py-1.5 text-sm"
+                />
+              </div>
+              <span className="text-xs text-gray-500">
+                {historyFrom || historyTo
+                  ? `Showing ${historyFrom || 'start'} to ${historyTo || 'today'}`
+                  : 'Showing all dates'}
+              </span>
+            </div>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
               <input
                 value={historySearch}
                 onChange={e => setHistorySearch(e.target.value)}
@@ -2388,7 +2451,10 @@ export default function BillingPage() {
             {historyLoading ? (
               <div className="text-center text-gray-400 py-10">Loading…</div>
             ) : historyBills.length === 0 ? (
-              <div className="text-center text-gray-400 py-10">No {billType}s found</div>
+              <div className="text-center text-gray-400 py-10">
+                No {billType}s found
+                {historyFrom || historyTo ? ' for the selected dates' : ''}
+              </div>
             ) : (
               <>
               <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">

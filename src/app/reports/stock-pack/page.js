@@ -9,7 +9,7 @@ import { fmt } from '@/lib/gst'
 import { todayStr } from '@/lib/finance'
 import { printWithContent, exportPdfWithContent } from '@/lib/print'
 import { fetchAllRows } from '@/lib/supabaseBatch'
-import { buildStockOnHand, fetchStockAsOn } from '@/lib/monthlyExtract'
+import { buildStockOnHand, fetchStockAsOn, fetchStockAgeing, buildStockByMonth } from '@/lib/monthlyExtract'
 import { num, round2 } from '@/lib/gstRegisters'
 import { useShop } from '@/context/ShopContext'
 
@@ -23,6 +23,7 @@ export default function StockPackPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [stockRows, setStockRows] = useState([])
+  const [monthGroups, setMonthGroups] = useState([])
   const [stockAsOn, setStockAsOn] = useState(null)
   const [suppliers, setSuppliers] = useState([])
   const [printShop, setPrintShop] = useState(null)
@@ -77,9 +78,17 @@ export default function StockPackPage() {
         const asOn = await fetchStockAsOn({ shopId: shop.id, asOnDate: dateTo, products })
         if (cancelled) return
 
+        const ageing = await fetchStockAgeing({
+          shopId: shop.id,
+          asOnDate: dateTo,
+          quantities: asOn.quantities,
+        })
+        if (cancelled) return
+
         setPrintShop({ ...shop, ...latestShop })
         setStockAsOn(asOn)
-        setStockRows(buildStockOnHand(products, asOn.quantities))
+        setStockRows(buildStockOnHand(products, asOn.quantities, ageing))
+        setMonthGroups(buildStockByMonth(products, asOn.quantities, ageing))
         setSuppliers([...supplierRows].sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''))))
       } catch (err) {
         if (!cancelled) setError(err.message || 'Failed to load stock pack')
@@ -118,6 +127,8 @@ export default function StockPackPage() {
     ? `Quantities as at close of ${dateTo} — ${stockAsOn.laterPurchaseUnits} units purchased and `
       + `${stockAsOn.laterSaleUnits} units sold on ${stockAsOn.laterBills} later bills have been reversed out.`
     : ''
+  const ageingNote = 'Stock is grouped by the month it was purchased (oldest sold first). '
+    + 'A product bought in more than one month appears under each, split by quantity.'
 
   return (
     <>
@@ -197,6 +208,7 @@ export default function StockPackPage() {
                 <h2>STOCK ON HAND</h2>
                 <p>{heading} · Printed {printedAt}</p>
                 {stockBasisNote && <p>{stockBasisNote}</p>}
+                <p>{ageingNote}</p>
               </div>
 
               <table className="report-table">
@@ -210,37 +222,52 @@ export default function StockPackPage() {
                     <th className="tc">GST%</th>
                     <th className="tr">Qty</th>
                     <th>Unit</th>
+                    <th>Purchased On</th>
                     <th className="tr">Cost</th>
                     <th className="tr">Sell</th>
                     <th className="tr">MRP</th>
                     <th className="tr">Value</th>
                   </tr>
                 </thead>
-                <tbody>
-                  {stockRows.length === 0 ? (
-                    <tr><td colSpan={12} className="tc">No stock on hand</td></tr>
-                  ) : stockRows.map((row, index) => (
-                    <tr key={`${row.Product}-${index}`}>
-                      <td className="tc">{index + 1}</td>
-                      <td>{row.Product}{row['Local Name'] ? ` (${row['Local Name']})` : ''}</td>
-                      <td>{row.Brand || '—'}</td>
-                      <td>{row.Category || '—'}</td>
-                      <td>{row.HSN || '—'}</td>
-                      <td className="tc">{row['GST Rate']}</td>
-                      <td className="tr">{row.Quantity}</td>
-                      <td>{row.Unit}</td>
-                      <td className="tr">{row['Purchase Price'].toFixed(2)}</td>
-                      <td className="tr">{row['Selling Price'].toFixed(2)}</td>
-                      <td className="tr">{row.MRP.toFixed(2)}</td>
-                      <td className="tr">{row['Stock Value (Cost)'].toFixed(2)}</td>
+                {monthGroups.length === 0 ? (
+                  <tbody>
+                    <tr><td colSpan={13} className="tc">No stock on hand</td></tr>
+                  </tbody>
+                ) : monthGroups.map((group) => (
+                  <tbody key={group.key}>
+                    <tr className="group-head">
+                      <td colSpan={13}><strong>{group.label}</strong> · {group.rows.length} products · {group.units} units · {group.cost.toFixed(2)}</td>
                     </tr>
-                  ))}
-                </tbody>
+                    {group.rows.map((row, index) => (
+                      <tr key={`${group.key}-${row.Product}-${index}`}>
+                        <td className="tc">{index + 1}</td>
+                        <td>{row.Product}{row['Local Name'] ? ` (${row['Local Name']})` : ''}</td>
+                        <td>{row.Brand || '—'}</td>
+                        <td>{row.Category || '—'}</td>
+                        <td>{row.HSN || '—'}</td>
+                        <td className="tc">{row['GST Rate']}</td>
+                        <td className="tr">{row.Quantity}</td>
+                        <td>{row.Unit}</td>
+                        <td>{row['Purchased On'] || '—'}</td>
+                        <td className="tr">{row['Purchase Price'].toFixed(2)}</td>
+                        <td className="tr">{row['Selling Price'].toFixed(2)}</td>
+                        <td className="tr">{row.MRP.toFixed(2)}</td>
+                        <td className="tr">{row['Stock Value (Cost)'].toFixed(2)}</td>
+                      </tr>
+                    ))}
+                    <tr className="group-total">
+                      <td colSpan={6} className="tr"><strong>{group.label} total</strong></td>
+                      <td className="tr"><strong>{group.units}</strong></td>
+                      <td colSpan={5}></td>
+                      <td className="tr"><strong>{group.cost.toFixed(2)}</strong></td>
+                    </tr>
+                  </tbody>
+                ))}
                 <tfoot>
                   <tr>
-                    <td colSpan={6} className="tr"><strong>Total</strong></td>
+                    <td colSpan={6} className="tr"><strong>Grand Total</strong></td>
                     <td className="tr"><strong>{round2(totals.units)}</strong></td>
-                    <td colSpan={4}></td>
+                    <td colSpan={5}></td>
                     <td className="tr"><strong>{round2(totals.cost).toFixed(2)}</strong></td>
                   </tr>
                 </tfoot>

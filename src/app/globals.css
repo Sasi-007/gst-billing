@@ -258,6 +258,19 @@ body {
     text-align: right;
   }
 
+  /* Month bands in the stock report need to stand out from the product rows
+     they introduce, and must not be orphaned at the foot of a page. */
+  .report-table .group-head td {
+    background: #ddd;
+    font-size: 10.5px;
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+
+  .report-table .group-total td {
+    background: #f4f4f4;
+  }
+
   body {
     background: white;
     margin: 0;

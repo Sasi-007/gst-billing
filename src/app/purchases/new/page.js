@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
 import { calcPurchaseItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
@@ -145,6 +145,7 @@ export default function NewPurchasePage() {
   const [billNo, setBillNo] = useState('')
   const [offlineNotice, setOfflineNotice] = useState('')
   const [unmatchedCsvItems, setUnmatchedCsvItems] = useState([])
+  const supplierIds = useMemo(() => new Set(suppliers.map((s) => s.id)), [suppliers])
   const syncInProgressRef = useRef(false)
   const importInputRef = useRef(null)
 
@@ -156,7 +157,7 @@ export default function NewPurchasePage() {
       return
     }
 
-    supabase.from('suppliers').select('id,name,phone').eq('is_active', true).order('name')
+    supabase.from('suppliers').select('id,name,phone').eq('shop_id', shop.id).eq('is_active', true).order('name')
       .then(({ data }) => setSuppliers(data || []))
       .catch(() => setSuppliers([]))
     supabase.from('shops').select('*').eq('id', shop?.id || '').single()
@@ -378,7 +379,7 @@ export default function NewPurchasePage() {
       return n
     })
     setUnmatchedCsvItems((prev) => prev.filter((name) => name !== items[activeRow]?.product_name))
-    if (product.supplier_id && !suppId) {
+    if (product.supplier_id && !suppId && supplierIds.has(product.supplier_id)) {
       setSuppId(product.supplier_id)
       setSupplierAutoFilled(true)
     }
@@ -541,7 +542,7 @@ export default function NewPurchasePage() {
       setItems(imported)
       setActiveRow(0)
       if (!suppId) {
-        const matchedSupplierId = imported.map((item) => item.supplier_id).find(Boolean)
+        const matchedSupplierId = imported.map((item) => item.supplier_id).find((id) => id && supplierIds.has(id))
         if (matchedSupplierId) {
           setSuppId(matchedSupplierId)
           setSupplierAutoFilled(true)
@@ -687,10 +688,11 @@ export default function NewPurchasePage() {
         oldImpactMap = buildQuantityMap(oldItems || [])
       }
 
+      const validSuppId = suppId && supplierIds.has(suppId) ? suppId : null
       const purchaseRow = {
         shop_id:            shop.id,
         bill_no:            no,
-        supplier_id: suppId || null,
+        supplier_id: validSuppId,
         supplier_invoice_no: suppInv || null,
         date,
         subtotal: totals.subtotal,
@@ -703,7 +705,7 @@ export default function NewPurchasePage() {
         payment_status: paid >= grandTotal ? 'paid' : paid > 0 ? 'partial' : 'unpaid',
         notes: notes || null,
       }
-      const selectedSupplier = suppliers.find((supplier) => supplier.id === (suppId || '')) || null
+      const selectedSupplier = suppliers.find((supplier) => supplier.id === validSuppId) || null
 
       let purchaseId = editPurchaseId
       if (editPurchaseId) {

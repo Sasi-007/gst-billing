@@ -119,6 +119,188 @@ export async function fetchStockAsOn({ shopId, asOnDate, products }) {
   return result
 }
 
+/** Whole months between two ISO dates, floored at 0. */
+function monthsBetween(fromDate, toDate) {
+  const from = new Date(`${fromDate}T00:00:00`)
+  const to = new Date(`${toDate}T00:00:00`)
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return 0
+  let months = (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth())
+  if (to.getDate() < from.getDate()) months -= 1
+  return Math.max(0, months)
+}
+
+export const STOCK_AGE_BUCKETS = ['This month', '1 month', '2 months', '3+ months']
+
+function bucketFor(months) {
+  if (months <= 0) return STOCK_AGE_BUCKETS[0]
+  if (months === 1) return STOCK_AGE_BUCKETS[1]
+  if (months === 2) return STOCK_AGE_BUCKETS[2]
+  return STOCK_AGE_BUCKETS[3]
+}
+
+/**
+ * Splits each product's stock on hand into age buckets by purchase date.
+ *
+ * Stock is stored as a single running quantity, so the age of what remains on
+ * the shelf has to be inferred. Goods move oldest-first (FIFO), which means
+ * the units still held are the most recently purchased ones: quantity on hand
+ * is therefore filled from the newest purchase backwards. Anything left over
+ * after all purchases are consumed predates the recorded history and is
+ * reported as the oldest bucket.
+ *
+ * Returns a Map of product_id → { buckets: {label: qty}, oldestDate, newestDate }.
+ */
+export async function fetchStockAgeing({ shopId, asOnDate, quantities }) {
+  const ageing = new Map()
+  if (!shopId || !quantities || quantities.size === 0) return ageing
+
+  const bills = await fetchAllRows(() => supabase
+    .from('purchase_bills')
+    .select('id,date')
+    .eq('shop_id', shopId)
+    .lte('date', asOnDate))
+  if (bills.length === 0) return ageing
+
+  const dateByBill = new Map(bills.map((bill) => [bill.id, bill.date]))
+  const items = await fetchAllRowsByIds(
+    () => supabase
+      .from('purchase_bill_items')
+      .select('purchase_bill_id,product_id,quantity')
+      .eq('shop_id', shopId),
+    'purchase_bill_id',
+    bills.map((bill) => bill.id)
+  )
+
+  const purchasesByProduct = new Map()
+  items.forEach((row) => {
+    const date = dateByBill.get(row.purchase_bill_id)
+    if (!row.product_id || !date || !quantities.has(row.product_id)) return
+    if (!purchasesByProduct.has(row.product_id)) purchasesByProduct.set(row.product_id, [])
+    purchasesByProduct.get(row.product_id).push({ date, quantity: num(row.quantity) })
+  })
+
+  quantities.forEach((qtyOnHand, productId) => {
+    let remaining = num(qtyOnHand)
+    if (remaining <= 0) return
+
+    const buckets = {}
+    const months = new Map()
+    let oldestDate = ''
+    let newestDate = ''
+    const purchases = (purchasesByProduct.get(productId) || [])
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)))
+
+    for (const purchase of purchases) {
+      if (remaining <= 0) break
+      const used = Math.min(remaining, purchase.quantity)
+      if (used <= 0) continue
+      const label = bucketFor(monthsBetween(purchase.date, asOnDate))
+      buckets[label] = round2((buckets[label] || 0) + used)
+      const monthKey = String(purchase.date).slice(0, 7)
+      const month = months.get(monthKey) || { key: monthKey, quantity: 0, lastDate: purchase.date }
+      month.quantity = round2(month.quantity + used)
+      if (String(purchase.date) > String(month.lastDate)) month.lastDate = purchase.date
+      months.set(monthKey, month)
+      remaining = round2(remaining - used)
+      if (!newestDate) newestDate = purchase.date
+      oldestDate = purchase.date
+    }
+
+    // Opening stock entered directly on the product has no purchase bill
+    // behind it, so it cannot be dated and is treated as the oldest holding.
+    if (remaining > 0) {
+      const label = STOCK_AGE_BUCKETS[3]
+      buckets[label] = round2((buckets[label] || 0) + remaining)
+      months.set(UNDATED_STOCK_KEY, { key: UNDATED_STOCK_KEY, quantity: remaining, lastDate: '' })
+    }
+
+    ageing.set(productId, {
+      buckets,
+      months: [...months.values()],
+      oldestDate,
+      newestDate,
+      undated: remaining > 0,
+    })
+  })
+
+  return ageing
+}
+
+export const UNDATED_STOCK_KEY = 'undated'
+
+/** "2026-09" → "September 2026"; the undated bucket keeps a plain label. */
+export function stockMonthLabel(key) {
+  if (!key || key === UNDATED_STOCK_KEY) return 'Opening stock (no purchase bill)'
+  const [year, month] = String(key).split('-')
+  const name = MONTH_NAMES[Number(month) - 1]
+  return name ? `${name} ${year}` : key
+}
+
+/**
+ * Rearranges stock into month-of-purchase sections, newest month first, so the
+ * report reads "October: these goods, September: these goods" rather than
+ * spreading each product across age columns. A product held from two different
+ * months appears once under each, split by quantity.
+ */
+export function buildStockByMonth(products, quantities = null, ageing = null) {
+  const qtyFor = (product) => (
+    quantities && quantities.has(product.id) ? num(quantities.get(product.id)) : num(product.stock_qty)
+  )
+  const groups = new Map()
+
+  products.forEach((product) => {
+    const totalQty = qtyFor(product)
+    if (totalQty <= 0) return
+
+    const entry = ageing?.get(product.id)
+    const splits = entry?.months?.length
+      ? entry.months
+      : [{ key: UNDATED_STOCK_KEY, quantity: totalQty, lastDate: '' }]
+
+    splits.forEach((split) => {
+      const qty = round2(split.quantity)
+      if (qty <= 0) return
+      const cost = num(product.purchase_price)
+      const sell = num(product.selling_price) || num(product.mrp)
+      if (!groups.has(split.key)) groups.set(split.key, [])
+      groups.get(split.key).push({
+        Month: stockMonthLabel(split.key),
+        Product: product.name || '',
+        'Local Name': product.local_name || '',
+        Brand: product.brand || '',
+        Category: product.categories?.name || '',
+        HSN: product.hsn_code || '',
+        Unit: product.unit || '',
+        'GST Rate': `${num(product.gst_rate)}%`,
+        Quantity: qty,
+        'Purchased On': split.lastDate ? formatReportDate(split.lastDate) : '',
+        'Purchase Price': round2(cost),
+        'Selling Price': round2(product.selling_price),
+        MRP: round2(product.mrp),
+        'Stock Value (Cost)': round2(qty * cost),
+        'Stock Value (Selling)': round2(qty * sell),
+        Supplier: product.suppliers?.name || '',
+      })
+    })
+  })
+
+  // Newest month first; undated opening stock always sits at the bottom.
+  return [...groups.entries()]
+    .sort(([a], [b]) => {
+      if (a === UNDATED_STOCK_KEY) return 1
+      if (b === UNDATED_STOCK_KEY) return -1
+      return String(b).localeCompare(String(a))
+    })
+    .map(([key, rows]) => ({
+      key,
+      label: stockMonthLabel(key),
+      rows: rows.sort((a, b) => b['Stock Value (Cost)'] - a['Stock Value (Cost)']),
+      units: round2(rows.reduce((sum, row) => sum + num(row.Quantity), 0)),
+      cost: round2(rows.reduce((sum, row) => sum + num(row['Stock Value (Cost)']), 0)),
+      selling: round2(rows.reduce((sum, row) => sum + num(row['Stock Value (Selling)']), 0)),
+    }))
+}
+
 /**
  * Finds the earliest and latest dated records so the period picker can offer
  * only months the shop actually traded in. Returns `[]` when there is no data.
@@ -344,7 +526,7 @@ function buildOtherBillRows(otherBills) {
  * reports the position at period end. Rates are necessarily the current ones:
  * only quantities can be rewound, not historical cost.
  */
-export function buildStockOnHand(products, quantities = null) {
+export function buildStockOnHand(products, quantities = null, ageing = null) {
   const qtyFor = (product) => (
     quantities && quantities.has(product.id) ? num(quantities.get(product.id)) : num(product.stock_qty)
   )
@@ -355,6 +537,13 @@ export function buildStockOnHand(products, quantities = null) {
       const qty = round2(qtyFor(product))
       const cost = num(product.purchase_price)
       const sell = num(product.selling_price) || num(product.mrp)
+      const age = ageing?.get(product.id) || null
+      const ageColumns = {}
+      if (ageing) {
+        STOCK_AGE_BUCKETS.forEach((label) => { ageColumns[label] = round2(age?.buckets?.[label] || 0) })
+        ageColumns['Last Purchased'] = age?.newestDate ? formatReportDate(age.newestDate) : ''
+        ageColumns['Oldest Stock From'] = age?.oldestDate ? formatReportDate(age.oldestDate) : ''
+      }
       return {
         Product: product.name || '',
         'Local Name': product.local_name || '',
@@ -365,6 +554,7 @@ export function buildStockOnHand(products, quantities = null) {
         Unit: product.unit || '',
         'GST Rate': `${num(product.gst_rate)}%`,
         Quantity: qty,
+        ...ageColumns,
         'Purchase Price': round2(cost),
         'Selling Price': round2(product.selling_price),
         MRP: round2(product.mrp),

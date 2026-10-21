@@ -188,7 +188,7 @@ export default function ProductFormPage() {
 
     loadCats()
     loadBrands()
-    supabase.from('suppliers').select('id,name').eq('is_active',true).order('name').then(({ data }) => setSuppliers(data || []))
+    supabase.from('suppliers').select('id,name').eq('shop_id', shop?.id || '').eq('is_active',true).order('name').then(({ data }) => setSuppliers(data || []))
 
     async function loadRecentPurchases(productId) {
       if (!shop?.id || !productId) {
