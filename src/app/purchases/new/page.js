@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabase'
-import { calcPurchaseItem, calcBillTotals, fmt, GST_RATES } from '@/lib/gst'
+import { calcPurchaseItem, calcBillTotals, fmt, basePrice, round2, GST_RATES } from '@/lib/gst'
 import { todayStr } from '@/lib/finance'
 import ProductSearch from '@/components/ProductSearch'
 import BillScanner from '@/components/BillScanner'
@@ -39,6 +39,23 @@ function emptyItem() {
     base_amount: 0, taxable_amount: 0, gst_amount: 0,
     cgst_amount: 0, sgst_amount: 0, igst_amount: 0, total: 0,
   }
+}
+
+// When the supplier's printed Taxable Amt is entered, it — not the typed rate —
+// is the authoritative figure for the line. Derive the GST-exclusive base rate
+// back from it so the Base Rate column, the saved purchase line and the
+// inventory cost all agree instead of keeping a stale typed rate.
+function withRateFromTaxable(item) {
+  const override = String(item.taxable_override ?? '').trim()
+  if (!override) return item
+
+  const taxable = parseFloat(override)
+  const qty = parseFloat(item.quantity) || 0
+  if (!Number.isFinite(taxable) || qty <= 0) return item
+
+  const schDisc = parseFloat(item.sch_disc_amount) || 0
+  const cashDisc = parseFloat(item.cash_disc_amount) || 0
+  return { ...item, rate: round2((taxable + schDisc + cashDisc) / qty) }
 }
 
 function focusId(id) {
@@ -202,29 +219,39 @@ export default function NewPurchasePage() {
       setIsInterstate(!!b.is_interstate)
       setRoundOff(b.round_off_amount ? String(b.round_off_amount) : '')
 
-      const loaded = (lines || []).map((it) => ({
-        _id: uid(),
-        product_id: it.product_id || null,
-        product_name: it.product_name || '',
-        hsn_code: it.hsn_code || '',
-        unit: it.unit || 'pcs',
-        quantity: it.quantity ?? 1,
-        rate: it.rate ?? 0,
-        mrp: it.mrp ?? 0,
-        gst_rate: it.gst_rate ?? 0,
-        sch_disc_pct: it.sch_disc_pct ?? '',
-        sch_disc_amount: it.sch_disc_amount ?? 0,
-        cash_disc_pct: it.cash_disc_pct ?? '',
-        cash_disc_amount: it.cash_disc_amount ?? 0,
-        taxable_amount: it.taxable_amount ?? 0,
-        base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
-        gst_amount: it.gst_amount ?? 0,
-        cgst_amount: it.cgst_amount ?? 0,
-        sgst_amount: it.sgst_amount ?? 0,
-        igst_amount: it.igst_amount ?? 0,
-        total: it.total ?? 0,
-      }))
-      setItems(loaded.length ? loaded : [emptyItem()])
+      const loaded = (lines || []).map((it) => {
+        const qty = Number(it.quantity ?? 1)
+        const schDisc = Number(it.sch_disc_amount || 0)
+        const cashDisc = Number(it.cash_disc_amount || 0)
+        const storedTaxable = Number(it.taxable_amount || 0)
+        const computedTaxable = round2(round2(Number(it.rate || 0) * qty) - schDisc - cashDisc)
+        return {
+          _id: uid(),
+          product_id: it.product_id || null,
+          product_name: it.product_name || '',
+          hsn_code: it.hsn_code || '',
+          unit: it.unit || 'pcs',
+          quantity: it.quantity ?? 1,
+          rate: it.rate ?? 0,
+          mrp: it.mrp ?? 0,
+          gst_rate: it.gst_rate ?? 0,
+          sch_disc_pct: it.sch_disc_pct ?? '',
+          sch_disc_amount: it.sch_disc_amount ?? 0,
+          cash_disc_pct: it.cash_disc_pct ?? '',
+          cash_disc_amount: it.cash_disc_amount ?? 0,
+          // Keep the supplier's printed taxable figure when the rounded rate
+          // cannot reproduce it, so reopening a bill never shifts its total.
+          taxable_override: storedTaxable > 0 && storedTaxable !== computedTaxable ? String(storedTaxable) : '',
+          taxable_amount: it.taxable_amount ?? 0,
+          base_amount: (Number(it.total || 0) - Number(it.gst_amount || 0)),
+          gst_amount: it.gst_amount ?? 0,
+          cgst_amount: it.cgst_amount ?? 0,
+          sgst_amount: it.sgst_amount ?? 0,
+          igst_amount: it.igst_amount ?? 0,
+          total: it.total ?? 0,
+        }
+      })
+      setItems(loaded.length ? loaded.map(withRateFromTaxable) : [emptyItem()])
       setActiveRow(0)
     }
 
@@ -347,34 +374,48 @@ export default function NewPurchasePage() {
 
   function recalc(item) {
     if (!item.product_id && !item.product_name) return item
+    const source = withRateFromTaxable(item)
     const c = calcPurchaseItem(
-      parseFloat(item.rate) || 0,
-      parseFloat(item.quantity) || 0,
-      parseFloat(item.gst_rate) || 0,
-      parseFloat(item.sch_disc_amount) || 0,
-      parseFloat(item.cash_disc_amount) || 0,
+      parseFloat(source.rate) || 0,
+      parseFloat(source.quantity) || 0,
+      parseFloat(source.gst_rate) || 0,
+      parseFloat(source.sch_disc_amount) || 0,
+      parseFloat(source.cash_disc_amount) || 0,
       isInterstate,
-      item.taxable_override,
+      source.taxable_override,
     )
-    return { ...item, ...c }
+    return { ...source, ...c }
   }
 
   function updateItem(i, field, value) {
-    setItems(prev => { const n = [...prev]; n[i] = recalc({ ...n[i], [field]: value }); return n })
+    setItems(prev => {
+      const n = [...prev]
+      const next = { ...n[i], [field]: value }
+      // Base Rate and Taxable Amt describe the same line two ways, so the field
+      // the user just typed in wins: typing a rate drops an earlier override.
+      if (field === 'rate') next.taxable_override = ''
+      n[i] = recalc(next)
+      return n
+    })
   }
 
   const openSearch = useCallback((idx) => { setActiveRow(idx); setSearchOpen(true) }, [])
 
   function handleProductSelect(product) {
-    const rate = product.purchase_price || product.mrp || 0
-    const mrp = product.mrp || rate
+    const gstRate = product.gst_rate || 0
+    // products.purchase_price is the GST-inclusive landing cost, but Base Rate
+    // on a supplier invoice is GST-exclusive — prefilling it raw inflated the
+    // line by the GST rate.
+    const rate = basePrice(product.purchase_price || product.mrp || 0, gstRate)
+    const mrp = product.mrp || product.purchase_price || 0
     setItems(prev => {
       const n = [...prev]
       n[activeRow] = recalc({
         ...n[activeRow],
         product_id: product.id, product_name: product.name,
         hsn_code: product.hsn_code || '', unit: product.unit || 'pcs',
-        rate, mrp, gst_rate: product.gst_rate || 0, quantity: 1,
+        rate, mrp, gst_rate: gstRate, quantity: 1,
+        taxable_override: '',
       })
       return n
     })
@@ -511,9 +552,12 @@ export default function NewPurchasePage() {
           product = hsnGroups[hsnCode][0]
           hsnFallbackCount += 1
         }
-        const rate = parseFloat(row.base_rate || row.rate || row.purchase_price || product?.purchase_price || 0) || 0
         const quantity = parseFloat(row.quantity || row.qty || 1) || 1
         const gstRate = parseFloat(row.gst_rate || row.gst || product?.gst_rate || 0) || 0
+        const csvRate = parseFloat(row.base_rate || row.rate || row.purchase_price || 0) || 0
+        // The CSV already carries a GST-exclusive base rate; the product master
+        // fallback is GST-inclusive and has to be converted.
+        const rate = csvRate || basePrice(product?.purchase_price || 0, gstRate)
         const schDisc = parseFloat(row.scheme_discount || row.sch_disc_amount || 0) || 0
         const cashDisc = parseFloat(row.cash_discount || row.cash_disc_amount || 0) || 0
         const taxableOverride = row.taxable_amount || ''
@@ -558,7 +602,12 @@ export default function NewPurchasePage() {
     }
   }
 
-  const filledItems = items.filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
+  // Normalise here rather than only in recalc(): rows loaded for editing (or
+  // pushed in by an importer) never pass through recalc, so without this the
+  // save would persist the stale typed rate alongside the printed Taxable Amt.
+  const filledItems = items
+    .map(withRateFromTaxable)
+    .filter(i => i.product_id || (i.product_name && parseFloat(i.rate) > 0))
   const totals = calcBillTotals(filledItems)
   const roundOffAmount = parseFloat(roundOff) || 0
   const grandTotal = Math.round((totals.total + roundOffAmount) * 100) / 100
@@ -678,14 +727,20 @@ export default function NewPurchasePage() {
       if (!no) throw new Error('Purchase number could not be generated')
       setBillNo(no)
       let oldImpactMap = {}
+      const previousMrpStamps = new Map()
       if (editPurchaseId) {
         const { data: oldItems, error: oldItemsErr } = await supabase
           .from('purchase_bill_items')
-          .select('product_id,quantity')
+          .select('product_id,quantity,mrp,created_at')
           .eq('purchase_bill_id', editPurchaseId)
           .eq('shop_id', shop.id)
         if (oldItemsErr) throw oldItemsErr
         oldImpactMap = buildQuantityMap(oldItems || [])
+        for (const row of oldItems || []) {
+          if (row.product_id && !previousMrpStamps.has(row.product_id)) {
+            previousMrpStamps.set(row.product_id, { mrp: Number(row.mrp || 0), created_at: row.created_at })
+          }
+        }
       }
 
       const validSuppId = suppId && supplierIds.has(suppId) ? suppId : null
@@ -734,7 +789,14 @@ export default function NewPurchasePage() {
       }
 
       const { error: itemErr } = await supabase.from('purchase_bill_items').insert(
-        filledItems.map((item, i) => ({
+        filledItems.map((item, i) => {
+          const lineMrp = parseFloat(item.mrp) || 0
+          // Editing a bill deletes and re-inserts its lines. Without this the new
+          // row would look freshly priced, so an unrelated edit (fixing a rate)
+          // would outrank — and silently revert — a newer manual MRP correction.
+          const previous = previousMrpStamps.get(item.product_id)
+          const keptStamp = previous && previous.mrp === lineMrp ? previous.created_at : null
+          return {
           shop_id:         shop.id,
           purchase_bill_id: purchaseId,
           product_id: item.product_id,
@@ -744,7 +806,7 @@ export default function NewPurchasePage() {
           unit: item.unit,
           quantity: parseFloat(item.quantity) || 1,
           rate: parseFloat(item.rate) || 0,
-          mrp: parseFloat(item.mrp) || 0,
+          mrp: lineMrp,
           base_rate: parseFloat(item.rate) || 0,
           gst_rate: item.gst_rate || 0,
           sch_disc_pct: parseFloat(item.sch_disc_pct) || 0,
@@ -757,7 +819,9 @@ export default function NewPurchasePage() {
           sgst_amount: item.sgst_amount || 0,
           igst_amount: item.igst_amount || 0,
           total: item.total || 0,
-        }))
+          ...(keptStamp ? { created_at: keptStamp } : {}),
+          }
+        })
       )
       if (itemErr) throw itemErr
 
@@ -910,16 +974,17 @@ export default function NewPurchasePage() {
                 setIsInterstate(next)
                 setItems(prev => prev.map(item => {
                   if (!item.product_id && !item.product_name) return item
+                  const source = withRateFromTaxable(item)
                   const c = calcPurchaseItem(
-                    parseFloat(item.rate) || 0,
-                    parseFloat(item.quantity) || 0,
-                    parseFloat(item.gst_rate) || 0,
-                    parseFloat(item.sch_disc_amount) || 0,
-                    parseFloat(item.cash_disc_amount) || 0,
+                    parseFloat(source.rate) || 0,
+                    parseFloat(source.quantity) || 0,
+                    parseFloat(source.gst_rate) || 0,
+                    parseFloat(source.sch_disc_amount) || 0,
+                    parseFloat(source.cash_disc_amount) || 0,
                     next,
-                    item.taxable_override,
+                    source.taxable_override,
                   )
-                  return { ...item, ...c }
+                  return { ...source, ...c }
                 }))
               }}
             />

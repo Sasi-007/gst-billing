@@ -358,15 +358,11 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose, showSu
     } else if (e.key === 'Escape') { onClose() }
   }
 
+  // Purchase hints are shown as context only. The product master already carries
+  // the synced cost/MRP plus any later manual correction, so overriding it here
+  // would push a superseded purchase MRP back into a fresh bill.
   function resolveSelectedProduct(product) {
-    const hint = purchaseHints[product?.id]
-    if (!hint) return product
-
-    return {
-      ...product,
-      purchase_price: hint.rate ?? product.purchase_price,
-      mrp: hint.mrp ?? product.mrp,
-    }
+    return product
   }
 
   function parseStockQty(value) {

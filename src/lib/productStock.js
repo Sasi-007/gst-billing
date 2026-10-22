@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase'
 import { applyLocalStockDeltaMap } from '@/lib/offlineBilling'
 import { clearPageCacheByPrefix } from '@/lib/pageCache'
+import { fetchAllRowsByIds } from '@/lib/supabaseBatch'
 
 export function buildQuantityMap(items) {
   return (items || []).reduce((map, item) => {
@@ -51,6 +52,38 @@ function isRowNewer(nextRow, currentRow, billMap) {
   return nextCreatedAt > currentCreatedAt
 }
 
+// Rate changes made outside a purchase bill. When one of these is the product's
+// most recent price change it reflects a deliberate correction by the shop, so
+// re-syncing an older purchase must not overwrite it.
+const MANUAL_PRICE_SOURCES = new Set(['manual', 'bulk', 'price-check', 'import'])
+
+async function fetchLatestPriceChangeByProduct(shopId, productIds) {
+  try {
+    const rows = await fetchAllRowsByIds(
+      () => supabase
+        .from('product_price_history')
+        .select('product_id,source,created_at')
+        .eq('shop_id', shopId),
+      'product_id',
+      productIds
+    )
+
+    const latest = new Map()
+    for (const row of rows) {
+      const current = latest.get(row.product_id)
+      if (!current || new Date(row.created_at || 0) > new Date(current.created_at || 0)) {
+        latest.set(row.product_id, row)
+      }
+    }
+    return latest
+  } catch (error) {
+    // Rate history is optional (the migration may not be applied yet) — without
+    // it we simply fall back to always syncing from the latest purchase.
+    console.warn('Could not read product rate history:', error)
+    return new Map()
+  }
+}
+
 export async function syncProductPricingFromLatestPurchases(shopId, productIds) {
   const uniqueProductIds = [...new Set((productIds || []).filter(Boolean))]
   if (!shopId || uniqueProductIds.length === 0) return
@@ -79,9 +112,17 @@ export async function syncProductPricingFromLatestPurchases(shopId, productIds) 
     }
   })
 
+  const latestChangeByProduct = await fetchLatestPriceChangeByProduct(shopId, uniqueProductIds)
+
   for (const productId of uniqueProductIds) {
     const latestRow = latestByProduct.get(productId)
     if (!latestRow) continue
+
+    const latestChange = latestChangeByProduct.get(productId)
+    const manualIsNewer = latestChange
+      && MANUAL_PRICE_SOURCES.has(latestChange.source)
+      && new Date(latestChange.created_at || 0) > new Date(latestRow.created_at || 0)
+    if (manualIsNewer) continue
 
     // True per-unit purchase price = net amount (post-discount, GST-inclusive) ÷ quantity,
     // i.e. what was actually paid per piece on the supplier's invoice — not just the base rate.
@@ -89,13 +130,18 @@ export async function syncProductPricingFromLatestPurchases(shopId, productIds) 
     const netTotal = Number(latestRow.total || 0)
     const netPerUnit = qty > 0 ? netTotal / qty : Number(latestRow.rate || 0)
 
+    const purchaseMrp = Number(latestRow.mrp || 0)
+    const update = {
+      purchase_price: Math.round(netPerUnit * 100) / 100,
+      last_price_source: 'purchase',
+    }
+    // A purchase line with no MRP carries no information — keep the master MRP
+    // rather than wiping it to zero.
+    if (purchaseMrp > 0) update.mrp = purchaseMrp
+
     const { error: updateErr } = await supabase
       .from('products')
-      .update({
-        purchase_price: Math.round(netPerUnit * 100) / 100,
-        mrp: Number(latestRow.mrp || 0),
-        last_price_source: 'purchase',
-      })
+      .update(update)
       .eq('id', productId)
       .eq('shop_id', shopId)
     if (updateErr) throw updateErr

@@ -825,6 +825,45 @@ export default function InventoryPage() {
     const to = from + INVENTORY_LIST_LIMIT - 1
     const seq = ++loadSeq.current
     const sortColumn = INVENTORY_SORT_COLUMNS.find((col) => col.key === sortKey)
+
+    // "Low stock" compares two columns, which PostgREST cannot express, so it is
+    // applied in JS. A server-side count/range would therefore describe the
+    // pre-filter set — overstating the total and paging past the real rows — so
+    // this filter is resolved over the whole matching set and paged here.
+    if (filter === 'low') {
+      let lowRows
+      try {
+        lowRows = await fetchAllMatchingProducts(LIST_SELECT)
+      } catch (lowError) {
+        if (sortColumn?.referenced) {
+          try {
+            lowRows = await fetchAllMatchingProducts(LIST_SELECT, { orderColumn: 'name' })
+            if (seq === loadSeq.current) setSortFallback(sortColumn.label)
+          } catch (retryError) {
+            lowError = retryError
+          }
+        }
+        if (!lowRows) {
+          if (seq !== loadSeq.current) return
+          setQueryError(lowError.message)
+          setProducts([])
+          setTotalCount(0)
+          setLoading(false)
+          return
+        }
+      }
+
+      if (seq !== loadSeq.current) return
+      if (!sortColumn?.referenced) setSortFallback('')
+      setQueryError('')
+      const pageRows = lowRows.slice(from, from + INVENTORY_LIST_LIMIT)
+      setProducts(pageRows)
+      setTotalCount(lowRows.length)
+      writePageCache(cacheKey, { products: pageRows, totalCount: lowRows.length })
+      setLoading(false)
+      return
+    }
+
     let { data, count, error } = await buildProductsQuery({
       select: LIST_SELECT,
       count: 'exact',
@@ -853,8 +892,7 @@ export default function InventoryPage() {
       return
     }
     setQueryError('')
-    let rows = data || []
-    if (filter === 'low') rows = rows.filter(p => p.stock_qty <= p.min_stock)
+    const rows = data || []
     setProducts(rows)
     setTotalCount(typeof count === 'number' ? count : null)
     writePageCache(cacheKey, { products: rows, totalCount: count })

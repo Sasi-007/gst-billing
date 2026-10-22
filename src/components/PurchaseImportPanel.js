@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from '@/lib/supabase'
-import { calcPurchaseItem, calcBillTotals } from '@/lib/gst'
+import { calcPurchaseItem, calcBillTotals, round2 } from '@/lib/gst'
 import { csvHeaders, csvRowsToObjects, parseCsvDate } from '@/lib/csv'
 import { invalidatePurchaseImpactCache, syncProductPricingFromLatestPurchases } from '@/lib/productStock'
 import { syncPurchaseCreditEntry } from '@/lib/purchaseCredit'
@@ -325,8 +325,16 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
 
       const calculated = lines.map((line) => {
         const quantity = num(line.quantity) || 1
-        const rate = num(line.base_rate)
         const gstRate = num(line.gst_rate)
+        const taxableOverride = line.taxable_amount === '' ? null : line.taxable_amount
+        // The printed Taxable Amt wins over a rounded rate, so derive the base
+        // rate back from it — otherwise the stored base_rate contradicts the
+        // line's own taxable amount and the per-unit cost it implies.
+        const typedRate = num(line.base_rate)
+        const parsedTaxable = taxableOverride === null ? NaN : parseFloat(taxableOverride)
+        const rate = (Number.isFinite(parsedTaxable) && quantity > 0)
+          ? round2((parsedTaxable + num(line.scheme_discount) + num(line.cash_discount)) / quantity)
+          : typedRate
         const amounts = calcPurchaseItem(
           rate,
           quantity,
@@ -334,7 +342,7 @@ export default function PurchaseImportPanel({ shopId, onClose, onImported }) {
           num(line.scheme_discount),
           num(line.cash_discount),
           false,
-          line.taxable_amount === '' ? null : line.taxable_amount,
+          taxableOverride,
         )
         const nameKey = lower(line.product_name)
         const hsnKey = lower(line.hsn_code)
