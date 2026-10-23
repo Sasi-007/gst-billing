@@ -661,3 +661,89 @@ body {
   -moz-appearance: textfield;
   appearance: textfield;
 }
+
+/* ── Error / not-found page animations ──────────── */
+
+@keyframes err-swing {
+  0%, 100% { transform: rotate(-5deg); }
+  50%      { transform: rotate(5deg); }
+}
+
+@keyframes err-bob {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-7px); }
+}
+
+@keyframes err-dash {
+  to { stroke-dashoffset: -120; }
+}
+
+@keyframes err-flicker {
+  0%, 100%   { opacity: 1; transform: scale(1); }
+  40%        { opacity: 0.35; transform: scale(0.88); }
+  60%        { opacity: 1; transform: scale(1.08); }
+}
+
+@keyframes err-rise {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes err-pulse-ring {
+  0%   { opacity: 0.55; transform: scale(0.85); }
+  70%  { opacity: 0;    transform: scale(1.3); }
+  100% { opacity: 0;    transform: scale(1.3); }
+}
+
+/* transform-box/origin keep SVG group rotations pivoting on their own centre
+   rather than the viewBox origin. */
+.err-swing {
+  transform-box: fill-box;
+  transform-origin: 50% 0%;
+  animation: err-swing 3.2s ease-in-out infinite;
+}
+
+.err-bob {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: err-bob 2.6s ease-in-out infinite;
+}
+
+.err-bob-delayed {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: err-bob 2.6s ease-in-out 0.8s infinite;
+}
+
+.err-dash {
+  stroke-dasharray: 6 8;
+  animation: err-dash 2.4s linear infinite;
+}
+
+.err-flicker {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: err-flicker 1.5s ease-in-out infinite;
+}
+
+.err-rise {
+  animation: err-rise 0.45s ease-out both;
+}
+
+.err-pulse-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: err-pulse-ring 2.2s ease-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .err-swing,
+  .err-bob,
+  .err-bob-delayed,
+  .err-dash,
+  .err-flicker,
+  .err-rise,
+  .err-pulse-ring {
+    animation: none;
+  }
+}
