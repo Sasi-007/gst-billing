@@ -274,6 +274,15 @@ export const COMMANDS = [
     keywords: ['bank', 'banking', 'account', 'ledger', 'cash book', 'deposit', 'withdraw'],
   },
   {
+    id: 'card-planner',
+    label: 'Card Planner',
+    hint: 'Credit card payment plan for a better score',
+    href: '/smart',
+    icon: '💳',
+    group: 'Money',
+    keywords: ['credit card', 'card', 'cc', 'cibil', 'credit score', 'utilisation', 'utilization', 'statement', 'due date', 'smart'],
+  },
+  {
     id: 'expenses',
     label: 'Expenses',
     hint: 'All recorded expenses',

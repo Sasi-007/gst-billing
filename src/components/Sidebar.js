@@ -26,6 +26,7 @@ const NAV = [
   { href: '/investments', icon: '🏦', label: 'Investments', key: 'n' },
   { href: '/drawings',  icon: '↗️', label: 'Drawings',   key: 'g' },
   { href: '/banking',   icon: '🏛️', label: 'Banking',    key: 'l' },
+  { href: '/smart',     icon: '💳', label: 'Card Planner', key: null },
   { href: '/summary',   icon: '🧮', label: 'Summary',    key: 'm' },
   { href: '/reports',   icon: '📈', label: 'Reports',    key: 't' },
   { href: '/extracts',  icon: '📤', label: 'Extracts',   key: null },
@@ -41,11 +42,11 @@ const NAV_SECTIONS = [
   },
   {
     title: 'Finance',
-    items: NAV.slice(13, 21),
+    items: NAV.slice(13, 22),
   },
   {
     title: 'System',
-    items: NAV.slice(21),
+    items: NAV.slice(22),
   },
 ]
 
