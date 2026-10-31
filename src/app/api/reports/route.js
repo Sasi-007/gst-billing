@@ -11,7 +11,7 @@ function getAdminClient() {
   return createClient(url, key, { auth: { persistSession: false } })
 }
 
-async function getClientForUser(userToken) {
+function getClientForUser(userToken) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
   if (!url || !key) return null
@@ -21,22 +21,27 @@ async function getClientForUser(userToken) {
   })
 }
 
-function decodeToken(request) {
+// The token must be validated by Supabase. A JWT payload is only base64, so
+// decoding it locally would let anyone forge a user id and read another shop's
+// reports through the service-role client.
+async function verifyToken(request) {
   const authHeader = request.headers.get('authorization') || ''
   const token = authHeader.replace('Bearer ', '').trim()
   if (!token) return { ok: false, reason: 'Missing auth token' }
 
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (!url || !anonKey) return { ok: false, reason: 'Supabase not configured' }
+
   try {
-    const parts = token.split('.')
-    if (parts.length < 2) return { ok: false, reason: 'Invalid auth token format' }
-    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
-    const payload = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'))
-    const now = Math.floor(Date.now() / 1000)
-    if (!payload?.exp || payload.exp <= now) return { ok: false, reason: 'Session expired' }
-    if (!payload?.sub) return { ok: false, reason: 'Invalid user token' }
-    return { ok: true, userId: payload.sub }
-  } catch {
-    return { ok: false, reason: 'Invalid auth token payload' }
+    const authClient = createClient(url, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    })
+    const { data, error } = await authClient.auth.getUser(token)
+    if (error || !data?.user) return { ok: false, reason: 'Session expired or invalid token' }
+    return { ok: true, userId: data.user.id }
+  } catch (err) {
+    return { ok: false, reason: 'Could not verify session' }
   }
 }
 
@@ -290,7 +295,7 @@ export async function GET(request) {
     const authHeader = request.headers.get('authorization') || ''
     const userToken = authHeader.replace('Bearer ', '').trim()
 
-    const auth = decodeToken(request)
+    const auth = await verifyToken(request)
     if (!auth.ok) return NextResponse.json({ error: auth.reason }, { status: 401 })
 
     const admin = getAdminClient()

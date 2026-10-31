@@ -6,6 +6,8 @@ import { useEffect, useState } from 'react'
 import { usePageLoading } from '@/context/PageLoadingContext'
 import { recordPageVisit } from '@/lib/pageVisits'
 import { useShop } from '@/context/ShopContext'
+import { useConfirm } from '@/context/ConfirmDialogContext'
+import { listPendingActions } from '@/lib/offlineBilling'
 
 const NAV = [
   { href: '/',          icon: '📊', label: 'Dashboard',  key: 'h' },
@@ -66,6 +68,7 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
   const router   = useRouter()
   const { isPageLoading } = usePageLoading()
   const { shop, user, allShops, loading, switchShop, signOut } = useShop()
+  const { confirm } = useConfirm()
   const [showShops, setShowShops] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const isCollapsed = mode === 'collapsed'
@@ -88,6 +91,36 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
   function openPalette() {
     setMenuOpen(false)
     window.dispatchEvent(new Event('open-command-palette'))
+  }
+
+  // Signing back in requires internet, so make the consequences explicit before
+  // signing out while offline — especially if bills are still waiting to sync.
+  async function handleSignOut() {
+    setMenuOpen(false)
+
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      let pending = 0
+      try {
+        if (shop?.id) pending = (await listPendingActions(shop.id)).length
+      } catch (error) {
+        console.warn('Could not read offline queue before sign out:', error)
+      }
+
+      const ok = await confirm({
+        title: 'Sign out while offline?',
+        message: 'You need internet to sign in again, so you will not be able to use the app until the connection returns.',
+        details: pending > 0
+          ? `${pending} unsynced change${pending === 1 ? '' : 's'} will be lost.`
+          : '',
+        confirmLabel: 'Sign out anyway',
+        cancelLabel: 'Stay signed in',
+        tone: 'danger',
+      })
+
+      if (!ok) return
+    }
+
+    signOut()
   }
 
   useEffect(() => {
@@ -245,7 +278,7 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
 
         <div className="px-2 py-2 border-t border-gray-700 space-y-1">
           {!isCollapsed && <div className="px-3 text-xs text-gray-600">Use Ctrl+letter shortcuts (avoid Ctrl+C / Ctrl+V / Ctrl+R)</div>}
-          <button onClick={signOut}
+          <button onClick={handleSignOut}
             title={isCollapsed ? 'Sign out' : undefined}
             className={`w-full ${isCollapsed ? 'flex items-center justify-center px-2' : 'text-left px-3'} py-1.5 text-xs text-gray-500 hover:text-red-400 hover:bg-gray-800 rounded-lg`}>
             {isCollapsed ? '↩' : '↩ Sign out'}
@@ -360,7 +393,7 @@ export default function Sidebar({ mode = 'expanded', onSetMode }) {
 
             <div className="border-t border-gray-700 px-2 py-3"
               style={{ paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))' }}>
-              <button onClick={() => { setMenuOpen(false); signOut() }}
+              <button onClick={handleSignOut}
                 className="w-full rounded-lg px-3 py-2.5 text-left text-sm text-red-400 hover:bg-gray-800">
                 ↩ Sign out
               </button>

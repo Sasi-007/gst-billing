@@ -34,6 +34,11 @@ export default function PwaBootstrap() {
     const register = async () => {
       if (!('serviceWorker' in navigator)) return
       await navigator.serviceWorker.register('/sw.js')
+
+      // Ask the worker to rebuild the shell cache if it was evicted.
+      const ready = await navigator.serviceWorker.ready
+      const worker = ready.active || navigator.serviceWorker.controller
+      if (worker && window.navigator.onLine) worker.postMessage('ensure-shell-cache')
     }
 
     register().catch((error) => {
@@ -85,7 +90,7 @@ export default function PwaBootstrap() {
   if (isOnline && pendingCount === 0) return null
 
   return (
-    <div className="fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900 px-4 py-2 text-center text-sm font-medium text-white shadow-lg max-w-[92vw] md:bottom-3">
+    <div className="pointer-events-none fixed bottom-20 left-1/2 z-50 -translate-x-1/2 rounded-full bg-slate-900 px-4 py-2 text-center text-sm font-medium text-white shadow-lg max-w-[92vw] md:bottom-3">
       {!isOnline
         ? 'Offline mode active — saved work will sync when internet returns.'
         : `${pendingCount} queued change${pendingCount === 1 ? '' : 's'} waiting to sync`}

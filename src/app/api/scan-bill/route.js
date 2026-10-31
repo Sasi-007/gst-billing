@@ -1,7 +1,30 @@
 import { NextResponse } from 'next/server'
+import { createClient } from '@supabase/supabase-js'
 
 const ALLOWED_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'])
 const MAX_BYTES = 5 * 1024 * 1024  // 5 MB
+
+// This route spends paid OpenAI credits, so it must only run for signed-in users.
+async function verifyUser(request) {
+  const authHeader = request.headers.get('authorization') || ''
+  const token = authHeader.replace('Bearer ', '').trim()
+  if (!token) return { ok: false, reason: 'Missing auth token' }
+
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (!url || !anonKey) return { ok: false, reason: 'Supabase not configured' }
+
+  try {
+    const authClient = createClient(url, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    })
+    const { data, error } = await authClient.auth.getUser(token)
+    if (error || !data?.user) return { ok: false, reason: 'Session expired or invalid token' }
+    return { ok: true, userId: data.user.id }
+  } catch (err) {
+    return { ok: false, reason: 'Could not verify session' }
+  }
+}
 
 const EXTRACT_PROMPT = `You are an expert at reading Indian supplier/vendor purchase invoices.
 
@@ -38,6 +61,9 @@ Rules:
 - Do NOT include any text outside the JSON object.`
 
 export async function POST(request) {
+  const auth = await verifyUser(request)
+  if (!auth.ok) return NextResponse.json({ error: auth.reason }, { status: 401 })
+
   // ── Config check ────────────────────────────────────────────
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) {

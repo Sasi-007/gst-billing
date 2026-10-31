@@ -9,8 +9,9 @@ export default function OfflinePage() {
         <p className="text-sm font-semibold uppercase tracking-wide text-slate-500">GST Billing</p>
         <h1 className="mt-2 text-2xl font-bold text-slate-900">You are offline</h1>
         <p className="mt-3 text-sm leading-6 text-slate-600">
-          The app shell is available, and any saved bills will sync once internet comes back.
-          If you already opened pages before, they may still load from cache.
+          This page was not saved for offline use. Main pages like billing, inventory and
+          customers still open without internet, and any bills you save will sync once the
+          connection returns.
         </p>
         <a
           href="/"

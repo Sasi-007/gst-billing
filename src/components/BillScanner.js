@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useRef, useCallback } from 'react'
+import { supabase } from '@/lib/supabase'
 
 const ACCEPTED = 'image/jpeg,image/jpg,image/png,image/webp'
 const MAX_MB   = 5
@@ -63,7 +64,17 @@ export default function BillScanner({ onApply }) {
       const body = new FormData()
       body.append('file', file)
 
-      const res = await fetch('/api/scan-bill', { method: 'POST', body })
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session?.access_token) {
+        setError('Your session has expired. Please sign in again.')
+        return
+      }
+
+      const res = await fetch('/api/scan-bill', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${session.access_token}` },
+        body,
+      })
       const json = await res.json()
 
       if (!res.ok) {

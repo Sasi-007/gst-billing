@@ -16,29 +16,37 @@ async function verifySuperadmin(request) {
   const token = authHeader.replace('Bearer ', '').trim()
   if (!token) return { ok: false, reason: 'Missing auth token' }
 
-  // Decode JWT payload locally (avoids network/TLS dependency for this check)
-  let payload
+  // The token must be validated by Supabase. A JWT payload is only base64, so
+  // decoding it locally would let anyone forge a superadmin email and reach the
+  // service-role client below, bypassing every RLS policy.
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+  if (!url || !anonKey) return { ok: false, reason: 'Supabase not configured' }
+
+  let user
   try {
-    const parts = token.split('.')
-    if (parts.length < 2) return { ok: false, reason: 'Invalid auth token format' }
-    const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/')
-    payload = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'))
-  } catch {
-    return { ok: false, reason: 'Invalid auth token payload' }
+    const authClient = createClient(url, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+    })
+    const { data, error } = await authClient.auth.getUser(token)
+    if (error || !data?.user) return { ok: false, reason: 'Session expired or invalid token' }
+    user = data.user
+  } catch (err) {
+    return { ok: false, reason: 'Could not verify session' }
   }
 
-  const now = Math.floor(Date.now() / 1000)
-  if (!payload?.exp || payload.exp <= now) {
-    return { ok: false, reason: 'Session expired or invalid token' }
-  }
-  const email = payload?.email
+  const email = user.email
   if (!email) return { ok: false, reason: 'Token missing email claim' }
 
-  const allowed = (process.env.NEXT_PUBLIC_SUPERADMIN_EMAILS || '').split(',').map(e => e.trim())
-  if (!allowed.includes(email)) {
-    return { ok: false, reason: `User ${email} is not in NEXT_PUBLIC_SUPERADMIN_EMAILS` }
+  const allowed = (process.env.NEXT_PUBLIC_SUPERADMIN_EMAILS || '')
+    .split(',')
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean)
+
+  if (!allowed.includes(email.toLowerCase())) {
+    return { ok: false, reason: 'User is not a superadmin' }
   }
-  return { ok: true, user: { email } }
+  return { ok: true, user: { id: user.id, email } }
 }
 
 function mapAdminError(err) {

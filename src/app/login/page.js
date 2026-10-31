@@ -20,6 +20,11 @@ export default function LoginPage() {
     setLoading(true)
 
     try {
+      // Fail fast instead of waiting on a request that cannot succeed.
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+        throw new Error('offline')
+      }
+
       let result
       if (mode === 'login') {
         result = await supabase.auth.signInWithPassword({ email, password })
@@ -42,7 +47,16 @@ export default function LoginPage() {
       // Small delay so the context can load shops before redirecting.
       setTimeout(() => setLoading(false), 2000)
     } catch (err) {
-      setError(err.message || 'Something went wrong. Please try again.')
+      const isNetworkError =
+        err?.message === 'Failed to fetch' ||
+        err?.name === 'AuthRetryableFetchError' ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false)
+
+      setError(
+        isNetworkError
+          ? 'Cannot reach the server. Signing in needs internet — please check your connection and try again.'
+          : err.message || 'Something went wrong. Please try again.',
+      )
       setLoading(false)
     }
   }
