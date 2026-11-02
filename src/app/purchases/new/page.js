@@ -1092,28 +1092,28 @@ export default function NewPurchasePage() {
                       onChange={e => updateItem(i, 'rate', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`mrp-${i}`) } }}
-                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" />
+                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="1" />
                   </td>
                   <td className="px-1 py-1">
                     <input id={`mrp-${i}`} type="number" value={item.mrp}
                       onChange={e => updateItem(i, 'mrp', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`schdisc-${i}`) } }}
-                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="0.01" />
+                      className="w-full border rounded px-1 py-0.5 text-right" min="0" step="1" />
                   </td>
                   <td className="px-1 py-1">
                     <input id={`schdisc-${i}`} type="number" value={item.sch_disc_amount}
                       onChange={e => updateItem(i, 'sch_disc_amount', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); focusId(`cashdisc-${i}`) } }}
-                      className="w-full border rounded px-1 py-0.5 text-center" min="0" step="0.01" placeholder="0" />
+                      className="w-full border rounded px-1 py-0.5 text-center" min="0" step="1" placeholder="0" />
                   </td>
                   <td className="px-1 py-1">
                     <input id={`cashdisc-${i}`} type="number" value={item.cash_disc_amount}
                       onChange={e => updateItem(i, 'cash_disc_amount', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
                       onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addRow() } }}
-                      className="w-full border rounded px-1 py-0.5 text-center" min="0" step="0.01" placeholder="0" />
+                      className="w-full border rounded px-1 py-0.5 text-center" min="0" step="1" placeholder="0" />
                   </td>
                   <td className="px-1 py-1">
                     <select value={item.gst_rate} onChange={e => updateItem(i, 'gst_rate', parseFloat(e.target.value))}
@@ -1126,7 +1126,7 @@ export default function NewPurchasePage() {
                       onChange={e => updateItem(i, 'taxable_override', e.target.value)}
                       onFocus={e => { setActiveRow(i); e.target.select() }}
                       className="w-full border rounded px-1 py-0.5 text-right"
-                      min="0" step="0.01"
+                      min="0" step="1"
                       placeholder={item.taxable_amount > 0 ? fmt(item.taxable_amount) : '0'}
                       title="Auto-calculated from Rate×Qty−Discounts. Type here only if the paper invoice's Taxable Amt differs (due to supplier's rounded rate)." />
                   </td>
@@ -1204,7 +1204,7 @@ export default function NewPurchasePage() {
                   onClick={() => setRoundOff(String(Math.round(-(totals.total - Math.round(totals.total)) * 100) / 100))}
                   className="text-[10px] px-1 py-0.5 border rounded text-gray-400 hover:text-gray-600">auto</button>
                 <input type="number" value={roundOff} onChange={e => setRoundOff(e.target.value)}
-                  placeholder="0.00" step="0.01"
+                  placeholder="0.00" step="1"
                   className="border rounded px-1 py-0.5 text-right w-16 text-sm" />
               </div>
             </div>
