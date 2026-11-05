@@ -13,6 +13,20 @@ function isOffline() {
   return typeof navigator !== 'undefined' && navigator.onLine === false
 }
 
+// supabase-js serialises auth work behind a navigator.locks lock. If that lock
+// is never released (another tab, a restored bfcache page, an interrupted
+// refresh) the auth promise neither resolves nor rejects, which would leave the
+// app on "Loading workspace…" forever. Always race it against a timeout.
+const AUTH_TIMEOUT_MS = 8000
+
+function withTimeout(promise, ms = AUTH_TIMEOUT_MS) {
+  let timer
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ __timedOut: true }), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
 function readCachedUser() {
   if (typeof window === 'undefined') return null
   try {
@@ -98,7 +112,11 @@ export function ShopProvider({ children }) {
 
         if (currentUserIdRef.current !== session.user.id) {
           currentUserIdRef.current = session.user.id
-          loadShops(session.user.id)
+          // supabase-js invokes this callback while holding its auth lock, so
+          // querying here would deadlock. Defer until the lock is released.
+          setTimeout(() => {
+            if (mounted) loadShops(session.user.id)
+          }, 0)
         }
       } else {
         currentUserIdRef.current = null
@@ -197,9 +215,29 @@ export function ShopProvider({ children }) {
     }
 
     try {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession()
+      const result = await withTimeout(supabase.auth.getSession())
+
+      if (result?.__timedOut) {
+        // The auth lock never released. Fall back to the cached workspace so the
+        // app stays usable instead of hanging on "Loading workspace…".
+        console.warn('Auth session check timed out — using cached workspace')
+        const cachedShops = readCachedShops()
+        const cachedUser = readCachedUser()
+        if (cachedUser && cachedShops.length > 0) {
+          currentUserIdRef.current = cachedUser.id || null
+          setUser(cachedUser)
+          applyShops(cachedShops, { fromCache: true })
+        } else {
+          currentUserIdRef.current = null
+          setUser(null)
+          setShop(null)
+          setAllShops([])
+        }
+        setLoading(false)
+        return
+      }
+
+      const session = result?.data?.session
 
       if (session?.user) {
         currentUserIdRef.current = session.user.id
@@ -257,10 +295,20 @@ export function ShopProvider({ children }) {
     }
 
     try {
-      const { data, error } = await supabase
-        .from('user_shops')
-        .select('role, shops(*)')
-        .eq('user_id', userId)
+      const result = await withTimeout(
+        supabase
+          .from('user_shops')
+          .select('role, shops(*)')
+          .eq('user_id', userId),
+      )
+
+      if (result?.__timedOut) {
+        console.warn('Shop load timed out — using cached shops')
+        applyShops(readCachedShops(), { fromCache: true })
+        return
+      }
+
+      const { data, error } = result
 
       if (error) {
         console.error('Error loading shops:', error)
@@ -318,9 +366,9 @@ export function ShopProvider({ children }) {
 
   // Call after onboarding creates a new shop
   async function refreshShops() {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession()
+    const result = await withTimeout(supabase.auth.getSession())
+    if (result?.__timedOut) return
+    const session = result?.data?.session
 
     if (session?.user) {
       await loadShops(session.user.id)

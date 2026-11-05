@@ -71,6 +71,13 @@ export default function AppShell({ children }) {
     }
   }
 
+  // Login / Onboarding / Store — full-screen, no sidebar, no bottom nav.
+  // Checked before the loading gate: public pages don't need the shop/auth
+  // context, so they must never be blocked by auth initialisation.
+  if (isPublic) {
+    return <>{children}</>
+  }
+
   // Full-screen spinner during auth init — prevents content flash before redirect
   if (loading) {
     return (
@@ -78,11 +85,6 @@ export default function AppShell({ children }) {
         <LoadingPlaceholder label="Loading workspace" rows={4} fullPage />
       </div>
     )
-  }
-
-  // Login / Onboarding — full-screen, no sidebar, no bottom nav
-  if (isPublic) {
-    return <>{children}</>
   }
 
   // Authenticated app pages

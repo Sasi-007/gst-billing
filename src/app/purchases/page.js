@@ -84,9 +84,31 @@ function isOnline() {
   return typeof navigator !== 'undefined' ? navigator.onLine : true
 }
 
+// Supabase `.or()` treats commas/parens as syntax, so strip them from user input.
+function sanitizeForOrFilter(term) {
+  return String(term).replace(/[,()]/g, ' ').trim()
+}
+
 async function fetchPurchasesDirect(shopId, dateFrom, dateTo, search) {
   let q = supabase.from('purchase_bills').select('*, suppliers(name,phone,gstin)').eq('shop_id', shopId).gte('date', dateFrom).lte('date', dateTo).order('date', { ascending: false }).order('created_at', { ascending: false }).limit(200)
-  if (search) q = q.ilike('bill_no', `%${search}%`)
+  const term = sanitizeForOrFilter(search || '')
+  if (term) {
+    // Supplier name lives on a joined table, so resolve matching ids first and
+    // match them alongside the bill's own text columns.
+    const { data: matchedSuppliers } = await supabase
+      .from('suppliers')
+      .select('id')
+      .eq('shop_id', shopId)
+      .ilike('name', `%${term}%`)
+      .limit(200)
+    const supplierIds = (matchedSuppliers || []).map((s) => s.id)
+    const clauses = [
+      `bill_no.ilike.%${term}%`,
+      `supplier_invoice_no.ilike.%${term}%`,
+    ]
+    if (supplierIds.length) clauses.push(`supplier_id.in.(${supplierIds.join(',')})`)
+    q = q.or(clauses.join(','))
+  }
   const { data } = await q
   return { bills: data || [] }
 }
@@ -191,6 +213,19 @@ export default function PurchasesPage() {
   const totalAmt = bills.reduce((s, b) => s + (b.total || 0), 0)
   const unpaidAmt = bills.filter(b => b.payment_status !== 'paid').reduce((s, b) => s + ((b.total || 0) - (b.paid_amount || 0)), 0)
 
+  // Derive which quick range is active from the dates themselves, so the
+  // highlight stays correct when the user edits a date box directly.
+  const activeRange = useMemo(() => {
+    if (dateFrom === monthStartStr() && dateTo === todayStr()) return 'this'
+    const { from, to } = lastMonthRange()
+    if (dateFrom === from && dateTo === to) return 'last'
+    return 'custom'
+  }, [dateFrom, dateTo])
+
+  const rangeButtonClass = (isActive) => (isActive
+    ? 'px-3 py-2 rounded-lg border border-blue-600 bg-blue-600 text-white text-sm font-medium whitespace-nowrap'
+    : 'px-3 py-2 rounded-lg border bg-white text-gray-700 text-sm font-medium hover:bg-gray-50 whitespace-nowrap')
+
   const sortedBills = useMemo(() => {
     const column = SORT_COLUMNS.find((col) => col.key === sortKey)
     if (!column) return bills
@@ -230,7 +265,6 @@ export default function PurchasesPage() {
     setDateFrom(from)
     setDateTo(to)
   }
-
   function handleToggleBillSelection(billId, checked) {
     setSelectedBillIds((prev) => (checked
       ? (prev.includes(billId) ? prev : [...prev, billId])
@@ -671,7 +705,7 @@ export default function PurchasesPage() {
       {/* Filters */}
       <div className="flex flex-wrap gap-2 mb-3">
         <input value={search} onChange={e => setSearch(e.target.value)}
-          placeholder="🔍 Search bill no…"
+          placeholder="🔍 Search bill no or dealer…"
           className="border rounded-lg px-3 py-2 text-sm w-full sm:w-48" />
         {search !== debouncedSearch && (
           <span className="self-center text-xs text-blue-600">Searching…</span>
@@ -681,12 +715,12 @@ export default function PurchasesPage() {
         <span className="self-center text-gray-400 text-sm">to</span>
         <input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)}
           className="border rounded-lg px-3 py-2 text-sm min-w-0 flex-1 sm:flex-none" />
-        <button type="button" onClick={handleThisMonth}
-          className="px-3 py-2 rounded-lg border bg-white text-gray-700 text-sm font-medium hover:bg-gray-50 whitespace-nowrap">
+        <button type="button" onClick={handleThisMonth} aria-pressed={activeRange === 'this'}
+          className={rangeButtonClass(activeRange === 'this')}>
           This Month
         </button>
-        <button type="button" onClick={handleLastMonth}
-          className="px-3 py-2 rounded-lg border bg-white text-gray-700 text-sm font-medium hover:bg-gray-50 whitespace-nowrap">
+        <button type="button" onClick={handleLastMonth} aria-pressed={activeRange === 'last'}
+          className={rangeButtonClass(activeRange === 'last')}>
           Last Month
         </button>
         <button

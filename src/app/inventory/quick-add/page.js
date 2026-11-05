@@ -7,6 +7,7 @@ import { supabase } from '@/lib/supabase'
 import { GST_RATES } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
 import { clearPageCacheByPrefix } from '@/lib/pageCache'
+import BrandInput from '@/components/BrandInput'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'dozen', 'box', 'pack', 'bottle', 'roll', 'strip', 'pair']
 
@@ -73,34 +74,38 @@ function focusCell(rowId, field) {
   }, 30)
 }
 
-function NewRefInput({ kind, placeholder, value, onChange, onKeyDown, onSave, onPick, options, saving, error, cellClass }) {
+function NewRefInput({ placeholder, value, onChange, onKeyDown, onSave, onPick, options, saving, error, cellClass }) {
+  const inputRef = useRef(null)
   const typed = value.trim().toLowerCase()
   const exactMatch = typed ? options.find((item) => item.name.trim().toLowerCase() === typed) : null
-  const nearMatches = typed && !exactMatch
-    ? options.filter((item) => item.name.toLowerCase().includes(typed)).slice(0, 4)
-    : []
+  const suggestions = exactMatch
+    ? []
+    : (typed
+      ? options.filter((item) => item.name.toLowerCase().includes(typed))
+      : options
+    ).slice(0, 6)
+
+  useEffect(() => { inputRef.current?.focus() }, [])
 
   return (
     <div className="mt-1">
-      <div className="flex gap-1">
+      <div className="flex items-stretch gap-1">
         <input
+          ref={inputRef}
           id="qa-new-ref"
-          list={`qa-ref-options-${kind}`}
           value={value}
           onChange={(e) => onChange(e.target.value.toUpperCase())}
           onKeyDown={onKeyDown}
           placeholder={placeholder}
           autoComplete="off"
-          className={cellClass}
+          enterKeyHint="done"
+          className={`min-w-0 flex-1 ${cellClass}`}
         />
-        <datalist id={`qa-ref-options-${kind}`}>
-          {options.map((item) => <option key={item.id} value={item.name} />)}
-        </datalist>
         <button
           type="button"
           onClick={onSave}
           disabled={saving || !value.trim()}
-          className="shrink-0 rounded bg-blue-600 px-2 py-1 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
+          className="shrink-0 rounded bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-60"
         >
           {saving ? '…' : exactMatch ? 'Use' : 'Add'}
         </button>
@@ -114,16 +119,18 @@ function NewRefInput({ kind, placeholder, value, onChange, onKeyDown, onSave, on
         </p>
       )}
 
-      {!error && !exactMatch && nearMatches.length > 0 && (
+      {!error && suggestions.length > 0 && (
         <div className="mt-1">
-          <p className="text-[11px] text-gray-500">Similar already exists — tap to use:</p>
+          <p className="text-[11px] text-gray-500">
+            {typed ? 'Similar already exists — tap to use:' : 'Existing — tap to use:'}
+          </p>
           <div className="mt-0.5 flex flex-wrap gap-1">
-            {nearMatches.map((item) => (
+            {suggestions.map((item) => (
               <button
                 key={item.id}
                 type="button"
                 onClick={() => onPick(item)}
-                className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 text-[11px] text-amber-800 hover:bg-amber-100"
+                className="rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-800 hover:bg-amber-100"
               >
                 {item.name}
               </button>
@@ -132,9 +139,9 @@ function NewRefInput({ kind, placeholder, value, onChange, onKeyDown, onSave, on
         </div>
       )}
 
-      {!error && !exactMatch && nearMatches.length === 0 && (
+      {!error && !exactMatch && suggestions.length === 0 && (
         <p className="mt-1 text-[11px] text-gray-400">
-          {typed ? 'New — Enter to create' : 'Enter to save · Esc to cancel'}
+          {typed ? 'New — tap Add to create' : 'Type a name, then tap Add'}
         </p>
       )}
     </div>
@@ -297,7 +304,6 @@ export default function QuickAddInventoryPage() {
     setCreatingKind(kind)
     setNewRefName('')
     setRefError('')
-    setTimeout(() => document.getElementById('qa-new-ref')?.focus(), 30)
   }
 
   function cancelCreateRef() {
@@ -572,14 +578,13 @@ export default function QuickAddInventoryPage() {
             <button
               type="button"
               onClick={() => (creatingKind === 'supplier' ? cancelCreateRef() : startCreateRef('supplier'))}
-              className="text-[11px] font-semibold text-blue-600 hover:text-blue-800"
+              className="-mr-1 shrink-0 rounded px-2 py-1.5 text-[11px] font-semibold text-blue-600 hover:bg-blue-50 hover:text-blue-800"
             >
               {creatingKind === 'supplier' ? 'Cancel' : '+ New'}
             </button>
           </span>
           {creatingKind === 'supplier' ? (
             <NewRefInput
-              kind="supplier"
               placeholder="Type to search or add"
               value={newRefName}
               onChange={setNewRefName}
@@ -604,14 +609,13 @@ export default function QuickAddInventoryPage() {
             <button
               type="button"
               onClick={() => (creatingKind === 'category' ? cancelCreateRef() : startCreateRef('category'))}
-              className="text-[11px] font-semibold text-blue-600 hover:text-blue-800"
+              className="-mr-1 shrink-0 rounded px-2 py-1.5 text-[11px] font-semibold text-blue-600 hover:bg-blue-50 hover:text-blue-800"
             >
               {creatingKind === 'category' ? 'Cancel' : '+ New'}
             </button>
           </span>
           {creatingKind === 'category' ? (
             <NewRefInput
-              kind="category"
               placeholder="Type to search or add"
               value={newRefName}
               onChange={setNewRefName}
@@ -632,16 +636,16 @@ export default function QuickAddInventoryPage() {
         </div>
         <label className="text-xs font-medium text-gray-600">
           Brand
-          <input
-            list="quick-add-brands"
+          <BrandInput
             value={defaultBrand}
-            onChange={(e) => setDefaultBrand(e.target.value.toUpperCase())}
+            onChange={setDefaultBrand}
+            brands={brands}
             placeholder="Pick or type new"
-            className={`mt-1 ${cellClass}`}
+            className="mt-1"
+            inputClassName={cellClass}
+            showNewHint={false}
+            compact
           />
-          <datalist id="quick-add-brands">
-            {brands.map((brand) => <option key={brand} value={brand} />)}
-          </datalist>
         </label>
         <label className="text-xs font-medium text-gray-600">
           Unit
@@ -709,12 +713,14 @@ export default function QuickAddInventoryPage() {
                     <input value={row.local_name} onChange={(e) => updateRow(row._id, 'local_name', e.target.value)} className={cellClass} />
                   </td>
                   <td className="px-2 py-1 min-w-[120px]">
-                    <input
-                      list="quick-add-brands"
+                    <BrandInput
                       value={row.brand}
-                      onChange={(e) => updateRow(row._id, 'brand', e.target.value)}
+                      onChange={(next) => updateRow(row._id, 'brand', next)}
+                      brands={brands}
                       placeholder={defaultBrand || 'Brand'}
-                      className={cellClass}
+                      inputClassName={cellClass}
+                      showNewHint={false}
+                      compact
                     />
                   </td>
                   <td className="px-2 py-1 min-w-[88px]">

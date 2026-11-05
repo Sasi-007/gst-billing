@@ -117,6 +117,16 @@ export function fmt(amount) {
 }
 
 // Amount in words (for print)
+// Quantities are unit counts, not money — keep decimals only when they exist.
+export function formatQty(qty) {
+  if (qty === null || qty === undefined || Number.isNaN(Number(qty))) return '0'
+  const n = Number(qty)
+  return n.toLocaleString('en-IN', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: Number.isInteger(n) ? 0 : 3,
+  })
+}
+
 export function numToWords(num) {
   const ones = [
     '', 'One','Two','Three','Four','Five','Six','Seven','Eight','Nine',

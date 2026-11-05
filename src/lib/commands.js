@@ -87,6 +87,15 @@ export const COMMANDS = [
     group: 'Create',
     keywords: ['add category', 'new category', 'categories', 'group', 'department'],
   },
+  {
+    id: 'manage-brands',
+    label: 'Manage Brands',
+    hint: 'Merge duplicate or misspelled brands',
+    href: '/brands',
+    icon: '🔖',
+    group: 'Create',
+    keywords: ['brand', 'brands', 'duplicate brand', 'merge brand', 'rename brand', 'spelling'],
+  },
 
   // ── Find ────────────────────────────────────────────────────
   {
@@ -252,6 +261,15 @@ export const COMMANDS = [
     icon: '🧮',
     group: 'Reports',
     keywords: ['summary', 'profit', 'p&l', 'profit and loss', 'overview', 'business summary', 'net profit'],
+  },
+  {
+    id: 'balance-sheet',
+    label: 'Balance Sheet',
+    hint: 'Month-wise sales, purchase and remaining stock',
+    href: '/balance-sheet',
+    icon: '📘',
+    group: 'Reports',
+    keywords: ['balance sheet', 'monthly', 'month wise', 'audit', 'closing stock', 'remaining stock', 'sales vs purchase'],
   },
 
   // ── Money ───────────────────────────────────────────────────

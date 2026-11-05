@@ -155,6 +155,13 @@ function supplierFilterTree(supplierId) {
   return makeGroup('and', [rule])
 }
 
+function brandFilterTree(brand) {
+  const rule = makeRule('brand')
+  rule.op = 'eq'
+  rule.value = brand
+  return makeGroup('and', [rule])
+}
+
 // Stock worth of a set of product rows: cost side uses the purchase price, retail
 // side uses selling price (falling back to MRP).
 // Only products actually holding stock carry value. Zero-stock rows would add
@@ -683,15 +690,18 @@ export default function InventoryPage() {
   const { shop } = useShop()
   const searchParams = useSearchParams()
   const supplierParam = searchParams?.get('supplier') || ''
+  const brandParam = searchParams?.get('brand') || ''
   const [search,   setSearch]   = useState('')
   const [filter,   setFilter]   = useState('all')
   const [catId,    setCatId]    = useState('')
   const [page,     setPage]     = useState(0)
-  // Seeded on the first render so a ?supplier= deep link never fetches unfiltered.
-  const [advTree,  setAdvTree]  = useState(() => (
-    supplierParam ? supplierFilterTree(supplierParam) : emptyFilterTree()
-  ))
-  const [showAdvanced, setShowAdvanced] = useState(Boolean(supplierParam))
+  // Seeded on the first render so a ?supplier= / ?brand= deep link never fetches unfiltered.
+  const [advTree,  setAdvTree]  = useState(() => {
+    if (supplierParam) return supplierFilterTree(supplierParam)
+    if (brandParam) return brandFilterTree(brandParam)
+    return emptyFilterTree()
+  })
+  const [showAdvanced, setShowAdvanced] = useState(Boolean(supplierParam || brandParam))
   const [queryError, setQueryError] = useState('')
   const [selected, setSelected] = useState(() => new Map())
   const [sortKey, setSortKey] = useState('name')
@@ -755,6 +765,16 @@ export default function InventoryPage() {
     setAdvTree(supplierFilterTree(supplierParam))
     setShowAdvanced(true)
   }, [supplierParam])
+
+  // Deep link: /inventory?brand=<name> pre-applies a brand condition.
+  const appliedBrandParam = useRef(brandParam)
+  useEffect(() => {
+    if (appliedBrandParam.current === brandParam) return
+    appliedBrandParam.current = brandParam
+    if (!brandParam) return
+    setAdvTree(brandFilterTree(brandParam))
+    setShowAdvanced(true)
+  }, [brandParam])
 
   useEffect(() => {
     if (!shop?.id) return
@@ -1357,6 +1377,12 @@ export default function InventoryPage() {
             className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium"
           >
             Categories
+          </Link>
+          <Link
+            href="/brands"
+            className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200 text-sm font-medium"
+          >
+            Brands
           </Link>
           <Link
             href="/inventory/quick-add"

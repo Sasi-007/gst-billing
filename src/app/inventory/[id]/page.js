@@ -9,6 +9,7 @@ import { findProductNameSuggestions, saveProductNameSuggestion } from '@/lib/pro
 import { suggestGstRateForHsn } from '@/lib/hsnGstReference'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import RateHistoryPanel from '@/components/RateHistoryPanel'
+import BrandInput from '@/components/BrandInput'
 
 const UNITS = ['pcs', 'kg', 'g', 'L', 'mL', 'dozen', 'box', 'pack', 'bottle', 'roll', 'strip', 'pair']
 
@@ -501,11 +502,11 @@ export default function ProductFormPage() {
 
       {error && <div className="mb-3 p-3 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>}
 
-      <form onSubmit={submit} className="bg-white rounded-xl border p-6">
-        <div className="grid grid-cols-2 gap-4">
+      <form onSubmit={submit} className="bg-white rounded-xl border p-4 sm:p-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
 
           {/* Name (full width) */}
-          <div className="col-span-2">
+          <div className="col-span-1 sm:col-span-2">
             <label className="block text-xs font-medium text-gray-600 mb-1">Product Name *</label>
             <input autoFocus required value={form.name}
               onChange={e => { setDismissedSimilar(false); set('name', e.target.value) }}
@@ -549,7 +550,7 @@ export default function ProductFormPage() {
             )}
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-1 sm:col-span-2">
             <label className="block text-xs font-medium text-gray-600 mb-1">Tamil / Local Name</label>
             <input value={form.local_name || ''} onChange={e => set('local_name', e.target.value)}
               placeholder="Tamil name shown on search/bill if enabled"
@@ -589,7 +590,7 @@ export default function ProductFormPage() {
             )}
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-1 sm:col-span-2">
             <label className="block text-xs font-medium text-gray-600 mb-1">Tanglish Search Aliases</label>
             <input value={form.search_aliases || ''} onChange={e => set('search_aliases', e.target.value)}
               placeholder="e.g. thuvaram paruppu, thuravam paruppu, toor paruppu"
@@ -599,7 +600,7 @@ export default function ProductFormPage() {
             </p>
           </div>
 
-          <div className="col-span-2">
+          <div className="col-span-1 sm:col-span-2">
             <label className="block text-xs font-medium text-gray-600 mb-1">Bill Display Name</label>
             <select value={form.bill_name_mode || 'english'} onChange={e => set('bill_name_mode', e.target.value)}
               className="w-full border rounded-lg px-3 py-2 text-sm">
@@ -613,19 +614,11 @@ export default function ProductFormPage() {
           {/* Brand — pick an existing brand or type a new one */}
           <div>
             <label className="block text-xs font-medium text-gray-600 mb-1">Brand</label>
-            <input
-              list="product-brand-options"
+            <BrandInput
               value={form.brand ?? ''}
-              onChange={e => set('brand', e.target.value)}
-              placeholder="Pick existing or type new"
-              className="w-full border rounded-lg px-3 py-2 text-sm"
+              onChange={(next) => set('brand', next)}
+              brands={brands}
             />
-            <datalist id="product-brand-options">
-              {brands.map((brand) => <option key={brand} value={brand} />)}
-            </datalist>
-            {form.brand && !brands.some((brand) => brand.toLowerCase() === String(form.brand).toLowerCase()) && (
-              <p className="mt-1 text-xs text-blue-600">New brand — will be created when saved.</p>
-            )}
           </div>
 
           {/* Category */}
@@ -633,17 +626,17 @@ export default function ProductFormPage() {
             <label className="block text-xs font-medium text-gray-600 mb-1">Category</label>
             <div className="flex gap-1">
               <select value={form.category_id} onChange={e => set('category_id', e.target.value)}
-                className="flex-1 border rounded-lg px-3 py-2 text-sm">
+                className="min-w-0 flex-1 border rounded-lg px-3 py-2 text-sm">
                 <option value="">— Select —</option>
                 {cats.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
               </select>
               <button
                 type="button"
                 onClick={() => setShowAddCat(v => !v)}
-                className="px-3 py-2 rounded-lg border bg-gray-50 text-xs text-gray-700 whitespace-nowrap hover:bg-gray-100"
+                className="shrink-0 px-3 py-2 rounded-lg border bg-gray-50 text-xs text-gray-700 whitespace-nowrap hover:bg-gray-100"
                 title="Add a new category without leaving this page"
               >
-                + New
+                {showAddCat ? 'Cancel' : '+ New'}
               </button>
             </div>
             {showAddCat && (
@@ -654,13 +647,14 @@ export default function ProductFormPage() {
                   onChange={e => setNewCatName(e.target.value.toUpperCase())}
                   onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCategoryInline() } }}
                   placeholder="New category name"
-                  className="flex-1 border rounded-lg px-3 py-2 text-sm"
+                  enterKeyHint="done"
+                  className="min-w-0 flex-1 border rounded-lg px-3 py-2 text-sm"
                 />
                 <button
                   type="button"
                   onClick={addCategoryInline}
                   disabled={addingCat || !newCatName.trim()}
-                  className="px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
+                  className="shrink-0 px-3 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50"
                 >
                   {addingCat ? 'Adding…' : 'Add'}
                 </button>
@@ -678,7 +672,7 @@ export default function ProductFormPage() {
           </div>
 
           {/* Tags */}
-          <div className="col-span-2">
+          <div className="col-span-1 sm:col-span-2">
             {field('Tags (comma-separated)', 'tags', { placeholder:'e.g. salt, cooking, daily' })}
           </div>
 
@@ -733,7 +727,7 @@ export default function ProductFormPage() {
           </div>
 
           {!isNew && (
-            <div className="col-span-2">
+            <div className="col-span-1 sm:col-span-2">
               <label className="block text-xs font-medium text-gray-600 mb-1">
                 Reason for rate change <span className="text-gray-400">(optional)</span>
               </label>
@@ -749,7 +743,7 @@ export default function ProductFormPage() {
             </div>
           )}
 
-          <div className="col-span-2 rounded-xl border border-amber-200 bg-amber-50/70 p-4">
+          <div className="col-span-1 sm:col-span-2 rounded-xl border border-amber-200 bg-amber-50/70 p-4">
             <label className="flex items-center gap-2 text-sm font-medium text-amber-900">
               <input
                 type="checkbox"
@@ -776,7 +770,7 @@ export default function ProductFormPage() {
                     placeholder="0.00"
                   />
                 </div>
-                <div className="sm:col-span-2 rounded-lg bg-white/80 border border-amber-100 px-3 py-2">
+                <div className="col-span-1 sm:col-span-2 rounded-lg bg-white/80 border border-amber-100 px-3 py-2">
                   <div className="text-xs text-gray-500">Auto selling price</div>
                   <div className="text-lg font-semibold text-amber-900">
                     {form.selling_price ? fmt(parseAmount(form.selling_price)) : '—'}
@@ -828,7 +822,7 @@ export default function ProductFormPage() {
           </div>
 
           {!isNew && (
-            <div className="col-span-2 rounded-xl border bg-gray-50 p-4">
+            <div className="col-span-1 sm:col-span-2 rounded-xl border bg-gray-50 p-4">
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <h2 className="text-sm font-semibold text-gray-900">Recent purchase history</h2>
