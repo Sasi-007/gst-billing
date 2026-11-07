@@ -83,15 +83,22 @@ let _uid = 0
 function uid() { return ++_uid }
 
 // Rate derived from the purchase price: empty markup means rate == cost,
-// 5 means cost + 5%. Returns null when there is no usable purchase price so
-// callers keep whatever rate they already had.
-function markupRateFromCost(purchasePrice, markupPct) {
+// 5 means cost + 5%. The marked-up rate is rounded up to the next whole rupee
+// so rows stay free of paise, and it is never allowed to cross the row's MRP.
+// Returns null when there is no usable purchase price so callers keep whatever
+// rate they already had.
+function markupRateFromCost(purchasePrice, markupPct, mrp) {
   const base = parseFloat(purchasePrice)
   if (!Number.isFinite(base) || base <= 0) return null
   const pct = parseFloat(markupPct)
   const safePct = Number.isFinite(pct) ? pct : 0
   if (safePct <= -100) return null
-  return round2(base * (1 + safePct / 100))
+  const marked = base * (1 + safePct / 100)
+  // Only the markup is rounded up; a zero markup keeps the cost as-is.
+  const rate = safePct === 0 ? round2(marked) : Math.ceil(round2(marked))
+  const cap = parseFloat(mrp)
+  if (Number.isFinite(cap) && cap > 0 && rate > cap) return round2(cap)
+  return round2(rate)
 }
 
 function emptyItem() {
@@ -630,6 +637,9 @@ export default function BillingPage() {
   const [isOffline, setIsOffline] = useState(false)
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0)
   const draftLoadedRef = useRef(false)
+  // Tracks which saved bill is already loaded in the form, so query-string
+  // changes do not re-fetch it and wipe edits in progress.
+  const loadedBillSourceRef = useRef('')
   const syncInProgressRef = useRef(false)
   const customerParamAppliedRef = useRef('')
   const debouncedCustomerPickerSearch = useDebouncedValue(customerPickerSearch, 200)
@@ -710,6 +720,17 @@ export default function BillingPage() {
     } else {
       params.delete('view')
     }
+    const query = params.toString()
+    router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
+  }, [pathname, router, searchParams])
+
+  // Drops ?editId / ?convertFrom once the form leaves that bill, so a refresh or
+  // a new bill does not silently reload the old one.
+  const clearBillSourceParams = useCallback(() => {
+    if (!searchParams.get('editId') && !searchParams.get('convertFrom')) return
+    const params = new URLSearchParams(searchParams.toString())
+    params.delete('editId')
+    params.delete('convertFrom')
     const query = params.toString()
     router.replace(query ? `${pathname}?${query}` : pathname, { scroll: false })
   }, [pathname, router, searchParams])
@@ -825,6 +846,9 @@ export default function BillingPage() {
 
   useEffect(() => {
     if (!shop?.id || !draftLoadedRef.current) return
+    // An already-saved bill opened for editing must not overwrite the unsaved
+    // new-bill draft — that draft would later be restored as a duplicate bill.
+    if (editBillId) return
     saveBillingDraft(shop.id, {
       items,
       customer,
@@ -841,7 +865,7 @@ export default function BillingPage() {
       rateMarkupPct,
       conversionSource,
     })
-  }, [shop?.id, items, customer, billDate, billNo, billType, payMode, paidAmt, notes, placeOfSupply, reverseCharge, roundOffEnabled, rateFromCost, rateMarkupPct, conversionSource])
+  }, [shop?.id, editBillId, items, customer, billDate, billNo, billType, payMode, paidAmt, notes, placeOfSupply, reverseCharge, roundOffEnabled, rateFromCost, rateMarkupPct, conversionSource])
 
   useEffect(() => {
     if (!shop?.id || !mounted) return
@@ -1128,8 +1152,11 @@ export default function BillingPage() {
   useEffect(() => {
     const id = searchParams.get('editId')
     if (!id || !shop?.id) return
+    if (loadedBillSourceRef.current === `edit:${id}`) return
+    loadedBillSourceRef.current = `edit:${id}`
 
     let cancelled = false
+    let loadFinished = false
     async function loadForEdit() {
       const [{ data: b, error: bErr }, { data: lines, error: lErr }] = await Promise.all([
         supabase
@@ -1183,6 +1210,10 @@ export default function BillingPage() {
       setNotes(b.notes || '')
       setPlaceOfSupply(b.place_of_supply || shop?.state || '')
       setReverseCharge(!!b.reverse_charge)
+      // Saved lines carry their own agreed rates, so the cost-markup control
+      // starts off here instead of inheriting the previous bill's setting.
+      setRateFromCost(false)
+      setRateMarkupPct('')
 
       const loaded = (lines || []).map((it) => {
         const product = it.product_id ? productPricingMap.get(it.product_id) : null
@@ -1209,18 +1240,26 @@ export default function BillingPage() {
       })
       setItems(loaded.length ? loaded : [emptyItem()])
       setActiveRow(0)
+      loadFinished = true
     }
 
     loadForEdit()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      // A load that never finished must be retried by the next effect run.
+      if (!loadFinished) loadedBillSourceRef.current = ''
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, shop?.id])
 
   useEffect(() => {
     const id = searchParams.get('convertFrom')
     if (!id || !shop?.id) return
+    if (loadedBillSourceRef.current === `convert:${id}`) return
+    loadedBillSourceRef.current = `convert:${id}`
 
     let cancelled = false
+    let loadFinished = false
     async function loadForConvert() {
       const [{ data: b, error: bErr }, { data: lines, error: lErr }] = await Promise.all([
         supabase
@@ -1260,6 +1299,8 @@ export default function BillingPage() {
       })
       setPayMode('Cash')
       setPaidAmt('')
+      setRateFromCost(false)
+      setRateMarkupPct('')
       setNotes(b.notes ? `${b.notes} | Converted from ${b.bill_no}` : `Converted from ${b.bill_no}`)
 
       const loaded = (lines || []).map((it) => ({
@@ -1282,10 +1323,14 @@ export default function BillingPage() {
       }))
       setItems(loaded.length ? loaded : [emptyItem()])
       setActiveRow(0)
+      loadFinished = true
     }
 
     loadForConvert()
-    return () => { cancelled = true }
+    return () => {
+      cancelled = true
+      if (!loadFinished) loadedBillSourceRef.current = ''
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams, shop?.id])
 
@@ -1395,13 +1440,13 @@ export default function BillingPage() {
         // Typing a rate pins the row; clearing the box hands it back to the % control.
         row.rate_manual = String(value ?? '').trim() !== ''
         if (!row.rate_manual && rateFromCost) {
-          const derived = markupRateFromCost(row.purchase_price, rateMarkupPct)
+          const derived = markupRateFromCost(row.purchase_price, rateMarkupPct, row.mrp)
           if (derived !== null) row.rate = derived
         }
       }
 
-      if (field === 'purchase_price' && rateFromCost && !row.rate_manual) {
-        const derived = markupRateFromCost(value, rateMarkupPct)
+      if ((field === 'purchase_price' || field === 'mrp') && rateFromCost && !row.rate_manual) {
+        const derived = markupRateFromCost(row.purchase_price, rateMarkupPct, row.mrp)
         if (derived !== null) row.rate = derived
       }
 
@@ -1417,7 +1462,7 @@ export default function BillingPage() {
       let changed = false
       const next = prev.map(item => {
         if (item.rate_manual) return item
-        const derived = markupRateFromCost(item.purchase_price, rateMarkupPct)
+        const derived = markupRateFromCost(item.purchase_price, rateMarkupPct, item.mrp)
         if (derived === null || Number(item.rate) === derived) return item
         changed = true
         return recalc({ ...item, rate: derived })
@@ -1434,10 +1479,12 @@ export default function BillingPage() {
   const totals      = applyBillRoundOff(rawTotals, roundOffEnabled)
   const profitSummary = getBillProfitSummary(filledItems)
   const manualRateCount = items.filter(i => i.rate_manual && (i.product_id || i.product_name)).length
-  // Rows the cost-markup control cannot price, and rows whose markup pushed the
-  // rate above the printed MRP — both need to be visible before saving.
+  // Rows the cost-markup control cannot price, and rows whose markup had to be
+  // held down to the printed MRP — both need to be visible before saving.
   const costMarkupIssues = useMemo(() => {
-    if (!rateFromCost) return { missingCost: 0, aboveMrp: 0 }
+    if (!rateFromCost) return { missingCost: 0, cappedAtMrp: 0 }
+    const pct = parseFloat(rateMarkupPct)
+    const safePct = Number.isFinite(pct) ? pct : 0
     return items.reduce((acc, item) => {
       if (!item.product_id && !item.product_name) return acc
       const cost = parseFloat(item.purchase_price)
@@ -1446,13 +1493,15 @@ export default function BillingPage() {
         return acc
       }
       const mrp = parseFloat(item.mrp)
-      const rate = parseFloat(item.rate)
-      if (!item.rate_manual && Number.isFinite(mrp) && mrp > 0 && Number.isFinite(rate) && rate > mrp) {
-        acc.aboveMrp += 1
+      const uncapped = safePct === 0
+        ? round2(cost)
+        : Math.ceil(round2(cost * (1 + safePct / 100)))
+      if (!item.rate_manual && Number.isFinite(mrp) && mrp > 0 && uncapped > mrp) {
+        acc.cappedAtMrp += 1
       }
       return acc
-    }, { missingCost: 0, aboveMrp: 0 })
-  }, [items, rateFromCost])
+    }, { missingCost: 0, cappedAtMrp: 0 })
+  }, [items, rateFromCost, rateMarkupPct])
   const filteredCustomerDirectory = useMemo(
     () => customerDirectory.filter((entry) => matchesCustomerSearch(entry, debouncedCustomerPickerSearch)),
     [customerDirectory, debouncedCustomerPickerSearch]
@@ -1812,7 +1861,9 @@ export default function BillingPage() {
 
   // ── Product selected from modal ───────────────────────────────────────────
   function handleProductSelect(product) {
-    const derived = rateFromCost ? markupRateFromCost(product.purchase_price, rateMarkupPct) : null
+    const derived = rateFromCost
+      ? markupRateFromCost(product.purchase_price, rateMarkupPct, product.mrp || product.selling_price || 0)
+      : null
     const rate = derived !== null ? derived : (product.selling_price || product.mrp || 0)
     setItems(prev => {
       const next = [...prev]
@@ -1882,6 +1933,7 @@ export default function BillingPage() {
 
   function resetBillForm() {
     setEditBillId(null)
+    loadedBillSourceRef.current = ''
     setItems([emptyItem()])
     setCustomer(emptyCustomer())
     setCustomerPickerOpen(false)
@@ -1900,6 +1952,7 @@ export default function BillingPage() {
     setRateMarkupPct('')
     setSearchOpen(false)
     setConversionSource(null)
+    clearBillSourceParams()
   }
 
   // ── New bill ───────────────────────────────────────────────────────────────
@@ -2925,18 +2978,18 @@ export default function BillingPage() {
                       placeholder="0"
                       step="0.5"
                       className="w-20 rounded border px-2 py-1 text-right text-sm"
-                      title="Empty = Rate is the same as the purchase price. 5 = cost + 5%."
+                      title="Empty = Rate is the same as the purchase price. 5 = cost + 5%, rounded up to the next rupee and never above MRP."
                     />
                     <span className="text-sm text-gray-500">% over cost</span>
                   </div>
                   <span className="text-xs text-gray-500">
                     {parseFloat(rateMarkupPct)
-                      ? `Rate = purchase price + ${parseFloat(rateMarkupPct)}%`
+                      ? `Rate = purchase price + ${parseFloat(rateMarkupPct)}% (rounded up, max MRP)`
                       : 'Rate = purchase price (no margin)'}
                   </span>
-                  {costMarkupIssues.aboveMrp > 0 && (
+                  {costMarkupIssues.cappedAtMrp > 0 && (
                     <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800">
-                      {costMarkupIssues.aboveMrp} row{costMarkupIssues.aboveMrp > 1 ? 's' : ''} above MRP
+                      {costMarkupIssues.cappedAtMrp} row{costMarkupIssues.cappedAtMrp > 1 ? 's' : ''} capped at MRP
                     </span>
                   )}
                   {costMarkupIssues.missingCost > 0 && (
@@ -2949,7 +3002,7 @@ export default function BillingPage() {
                       type="button"
                       onClick={() => setItems(prev => prev.map(item => {
                         if (!item.rate_manual) return item
-                        const derived = markupRateFromCost(item.purchase_price, rateMarkupPct)
+                        const derived = markupRateFromCost(item.purchase_price, rateMarkupPct, item.mrp)
                         return recalc({ ...item, rate_manual: false, rate: derived === null ? item.rate : derived })
                       }))}
                       className="text-xs text-blue-600 hover:underline"
