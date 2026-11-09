@@ -23,12 +23,6 @@ kbd {
     font-size: 11px;
   }
 
-  .billing-table th,
-  .billing-table td {
-    padding-left: 6px;
-    padding-right: 6px;
-  }
-
   /* Hide row number and unit on very small screens */
   .billing-table th:nth-child(1),
   .billing-table td:nth-child(1),
@@ -46,6 +40,66 @@ kbd {
   /* Hide Discount % column */
   .billing-table th:nth-child(9),
   .billing-table td:nth-child(9) {
+    display: none;
+  }
+
+  /* The remaining columns (product, qty, MRP, rate, GST%, amount) should fit
+     the phone width instead of forcing a wide horizontal scroll. */
+  .billing-table {
+    min-width: 0;
+  }
+
+  .billing-table th,
+  .billing-table td {
+    padding-left: 3px;
+    padding-right: 3px;
+  }
+
+  .billing-table th:nth-child(4),
+  .billing-table th:nth-child(6),
+  .billing-table th:nth-child(7),
+  .billing-table th:nth-child(8),
+  .billing-table th:nth-child(10) {
+    width: auto;
+  }
+
+  .billing-table input,
+  .billing-table select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .billing-table td:nth-child(4) input {
+    width: 30px;
+  }
+
+  .billing-table td:nth-child(6) input,
+  .billing-table td:nth-child(7) input {
+    width: 48px;
+  }
+
+  .billing-table td:nth-child(8) select {
+    width: 42px;
+    padding-left: 2px;
+    padding-right: 0;
+  }
+
+  /* Let the per-line profit chip wrap instead of stretching the Amount column */
+  .billing-table th:nth-child(10),
+  .billing-table td:nth-child(10) {
+    width: 74px;
+    max-width: 74px;
+  }
+
+  .billing-table td:nth-child(10) > div {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 1px 3px;
+  }
+
+  /* The "·" separator is meaningless once the chip wraps onto several lines */
+  .billing-table td:nth-child(10) > div > span:nth-child(3) {
     display: none;
   }
 }

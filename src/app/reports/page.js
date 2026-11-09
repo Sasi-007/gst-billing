@@ -16,6 +16,8 @@ import {
 } from '../../lib/gstRegisters'
 import { readPageCache, writePageCache } from '../../lib/pageCache'
 import LoadingPlaceholder from '../../components/LoadingPlaceholder'
+import GstReconReport from '../../components/GstReconReport'
+import ProfitSlabReport from '../../components/ProfitSlabReport'
 import { usePageLoadingState } from '../../context/PageLoadingContext'
 import { useShop } from '@/context/ShopContext'
 
@@ -757,6 +759,8 @@ const TABS = [
   { key:'sales',       label:'Sales Report' },
   { key:'gst',         label:'GST Summary' },
   { key:'auditor',     label:'GST Auditor' },
+  { key:'recon',       label:'GST Recon' },
+  { key:'profitslab',  label:'Profit by Slab' },
   { key:'stockcheck',  label:'Stock Check' },
   { key:'purchases',   label:'Purchase Report' },
   { key:'credits',     label:'Credit Report' },
@@ -958,6 +962,64 @@ async function fetchReportsDirect({ shopId, tab, dateFrom, dateTo }) {  if (tab 
       stockValuation,
     }
   }
+  if (tab === 'profitslab') {
+    const { data: bills } = await supabase
+      .from('bills')
+      .select('id,bill_no,date,customer_name,total,payment_mode,payment_status')
+      .eq('shop_id', shopId)
+      .eq('bill_type', 'invoice')
+      .gte('date', dateFrom)
+      .lte('date', dateTo)
+      .order('date')
+    const billIds = (bills || []).map(b => b.id)
+    const items = billIds.length
+      ? await fetchItemsForBillIds('bill_items', 'bill_id', billIds, 'id,bill_id,product_id,product_name,quantity,gst_rate,gst_amount,cost_price,total')
+      : []
+    return { bills: bills || [], items }
+  }
+  if (tab === 'recon') {
+    const { data: bills } = await supabase
+      .from('bills')
+      .select('id,bill_no,date,customer_name,total,igst_amount')
+      .eq('shop_id', shopId)
+      .eq('bill_type', 'invoice')
+      .gte('date', dateFrom)
+      .lte('date', dateTo)
+      .order('date')
+    const billIds = (bills || []).map(b => b.id)
+    const items = billIds.length
+      ? await fetchItemsForBillIds('bill_items', 'bill_id', billIds, 'id,bill_id,product_id,product_name,hsn_code,quantity,gst_rate,gst_amount,cost_price,total')
+      : []
+
+    const productIds = [...new Set(items.map(item => item.product_id).filter(Boolean))]
+    if (!productIds.length) {
+      return { bills: bills || [], items, products: [], purchaseItems: [], purchaseBills: [], priceHistory: [], productSalesItems: [] }
+    }
+
+    // Evidence for the expected rate is deliberately not limited to the report
+    // period — a product may have last been purchased or billed months ago.
+    const [products, purchaseItems, productSalesItems] = await Promise.all([
+      fetchItemsForBillIds('products', 'id', productIds, 'id,name,hsn_code,gst_rate,stock_qty,selling_price'),
+      fetchItemsForBillIds('purchase_bill_items', 'product_id', productIds, 'product_id,purchase_bill_id,gst_rate,created_at'),
+      fetchItemsForBillIds('bill_items', 'product_id', productIds, 'product_id,gst_rate,created_at'),
+    ])
+
+    const purchaseBillIds = [...new Set(purchaseItems.map(item => item.purchase_bill_id).filter(Boolean))]
+    const purchaseBills = purchaseBillIds.length
+      ? await fetchItemsForBillIds('purchase_bills', 'id', purchaseBillIds, 'id,date')
+      : []
+
+    // Rate history is an optional migration, so a missing table must not break
+    // the whole report — the other two evidence trails still work.
+    let priceHistory = []
+    try {
+      priceHistory = await fetchItemsForBillIds('product_price_history', 'product_id', productIds, 'product_id,gst_rate,effective_date,created_at')
+    } catch {
+      priceHistory = []
+    }
+
+    return { bills: bills || [], items, products, purchaseItems, purchaseBills, priceHistory, productSalesItems }
+  }
   if (tab === 'topproducts') {
     const { data: bills } = await supabase.from('bills').select('id').eq('shop_id', shopId).eq('bill_type', 'invoice').gte('date', dateFrom).lte('date', dateTo)
     const billIds = (bills || []).map(b => b.id)
@@ -978,6 +1040,8 @@ function emptyDataForTab(tab) {
   if (tab === 'auditor') return { salesBills: [], purchaseBills: [], salesItems: [], purchaseItems: [], expenses: [], stockValuation: null }
   if (tab === 'stockcheck') return { purchaseItems: [], invoiceItems: [], otherItems: [], products: [] }
   if (tab === 'credits') return { accounts: [], allEntries: [], periodEntries: [] }
+  if (tab === 'profitslab') return { bills: [], items: [] }
+  if (tab === 'recon') return { bills: [], items: [], products: [], purchaseItems: [], purchaseBills: [], priceHistory: [], productSalesItems: [] }
   return []
 }
 
@@ -1105,7 +1169,7 @@ export default function ReportsPage() {
         ))}
       </div>
 
-      {(tab === 'sales' || tab === 'purchases' || tab === 'credits') && (
+      {(tab === 'sales' || tab === 'purchases' || tab === 'credits' || tab === 'profitslab') && (
         <div className="mb-4">
           <input
             value={search}
@@ -1115,7 +1179,9 @@ export default function ReportsPage() {
                 ? 'Search invoice by bill no or customer'
                 : tab === 'purchases'
                   ? 'Search purchase by bill no or supplier'
-                  : 'Search credit account by party or phone'
+                  : tab === 'profitslab'
+                    ? 'Search invoice by bill no or customer'
+                    : 'Search credit account by party or phone'
             }
             className="w-full max-w-md border rounded-lg px-3 py-2 text-sm"
           />
@@ -1129,6 +1195,16 @@ export default function ReportsPage() {
           {tab === 'sales'       && <SalesSummary data={data} searchTerm={search} />}
           {tab === 'gst'         && <GSTSummary data={data} />}
           {tab === 'auditor'     && <GSTAuditorReport data={data} dateFrom={dateFrom} dateTo={dateTo} />}
+          {tab === 'recon'       && (
+            <GstReconReport
+              data={data}
+              dateFrom={dateFrom}
+              dateTo={dateTo}
+              shopId={shop?.id}
+              onChanged={() => setLiveTick((tick) => tick + 1)}
+            />
+          )}
+          {tab === 'profitslab'  && <ProfitSlabReport data={data} dateFrom={dateFrom} dateTo={dateTo} searchTerm={search} />}
           {tab === 'stockcheck'  && <StockReconciliation data={data} dateFrom={dateFrom} dateTo={dateTo} />}
           {tab === 'purchases'   && <PurchaseSummary data={data} searchTerm={search} />}
           {tab === 'credits'     && <CreditSummary data={data} searchTerm={search} />}

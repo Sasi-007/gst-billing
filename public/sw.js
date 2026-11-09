@@ -1,4 +1,4 @@
-const VERSION = 'v4'
+const VERSION = 'v5'
 const SHELL_CACHE = `gst-shell-${VERSION}`
 const RUNTIME_CACHE = `gst-runtime-${VERSION}`
 
@@ -194,6 +194,13 @@ async function networkFirst(request) {
   }
 }
 
+// Authenticated API responses carry one shop's private data (bills, customers,
+// reports). Writing them to Cache Storage would leave that data readable on
+// disk, so these requests always go straight to the network.
+async function networkOnly(request) {
+  return fetch(request)
+}
+
 async function cacheFirst(request) {
   const cached = await caches.match(request)
   if (cached) return cached
@@ -222,6 +229,10 @@ self.addEventListener('fetch', (event) => {
   }
 
   if (url.pathname.startsWith('/api/')) {
+    if (request.headers.has('authorization')) {
+      event.respondWith(networkOnly(request))
+      return
+    }
     event.respondWith(networkFirst(request))
     return
   }

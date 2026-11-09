@@ -72,6 +72,19 @@ export async function clearBillingDraft(shopId) {
   await withStore(DRAFTS_STORE, 'readwrite', (store) => store.delete(shopId))
 }
 
+// Wipes locally cached business data on sign-out so the next person to use a
+// shared counter machine cannot read the previous shop's bills or price list.
+// The pending-bill queue is deliberately kept: those are unsent bills, and
+// dropping them would destroy work the user has not synced yet.
+export async function purgeCachedShopData() {
+  try {
+    await withStore(DRAFTS_STORE, 'readwrite', (store) => store.clear())
+    await withStore(PRODUCTS_STORE, 'readwrite', (store) => store.clear())
+  } catch (err) {
+    // Storage may be unavailable (private mode, blocked); sign-out must still finish.
+  }
+}
+
 export async function saveProductSnapshot(shopId, products) {
   if (!shopId) return
   await withStore(PRODUCTS_STORE, 'readwrite', (store) => {

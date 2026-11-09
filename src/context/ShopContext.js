@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '../lib/supabase'
+import { purgeCachedShopData } from '../lib/offlineBilling'
 
 const ShopContext = createContext(null)
 
@@ -400,6 +401,23 @@ export function ShopProvider({ children }) {
       localStorage.removeItem('activeShopId')
       localStorage.removeItem(SHOPS_CACHE_KEY)
       localStorage.removeItem(USER_CACHE_KEY)
+
+      // Signing out must leave no readable business data behind on the device.
+      // sessionStorage holds page caches and in-progress drafts, and the
+      // service worker's Cache Storage holds rendered pages and API responses
+      // for every visited route — both survive sign-out otherwise.
+      try { window.sessionStorage.clear() } catch (err) { /* storage unavailable */ }
+
+      try {
+        if (window.caches) {
+          const keys = await window.caches.keys()
+          await Promise.all(keys.map((key) => window.caches.delete(key)))
+        }
+      } catch (err) {
+        console.warn('Failed to clear offline page cache on sign out:', err)
+      }
+
+      await purgeCachedShopData()
     }
 
     currentUserIdRef.current = null

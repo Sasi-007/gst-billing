@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import Link from 'next/link'
 import { usePathname, useRouter, useSearchParams } from 'next/navigation'
@@ -34,6 +34,16 @@ import {
   updatePendingBill,
 } from '@/lib/offlineBilling'
 import { getBillProductName } from '@/lib/productNames'
+import {
+  GST_SLABS,
+  advancedFiltersNeedItems,
+  emptyAdvancedFilters,
+  evaluateBillAgainstFilters,
+  groupItemsByBillId,
+  isAdvancedFilterActive,
+  itemProfit,
+  slabKey,
+} from '@/lib/salesAnalysis'
 
 const PAYMENT_MODES = ['Cash', 'UPI', 'Card', 'Credit', 'Cheque']
 const AUTO_INVOICE_CREDIT_TAG_PREFIX = '[AUTO-INVOICE:'
@@ -633,6 +643,11 @@ export default function BillingPage() {
   const [historyPrintingBillId, setHistoryPrintingBillId] = useState(null)
   const [historySortKey, setHistorySortKey] = useState('date')
   const [historySortDir, setHistorySortDir] = useState('asc')
+  const [historyFiltersOpen, setHistoryFiltersOpen] = useState(false)
+  const [historyFilters, setHistoryFilters] = useState(emptyAdvancedFilters)
+  const [historyItemsByBillId, setHistoryItemsByBillId] = useState(() => new Map())
+  const [historyItemsLoading, setHistoryItemsLoading] = useState(false)
+  const [historyExpandedBillIds, setHistoryExpandedBillIds] = useState([])
   const [conversionSource, setConversionSource] = useState(null)
   const [isOffline, setIsOffline] = useState(false)
   const [historyRefreshKey, setHistoryRefreshKey] = useState(0)
@@ -644,26 +659,97 @@ export default function BillingPage() {
   const customerParamAppliedRef = useRef('')
   const debouncedCustomerPickerSearch = useDebouncedValue(customerPickerSearch, 200)
   const debouncedHistorySearch = useDebouncedValue(historySearch, 250)
+  const debouncedHistoryFilters = useDebouncedValue(historyFilters, 250)
+  const historyFiltersActive = useMemo(
+    () => isAdvancedFilterActive(debouncedHistoryFilters),
+    [debouncedHistoryFilters]
+  )
+  const historyNeedsItems = useMemo(
+    () => advancedFiltersNeedItems(debouncedHistoryFilters),
+    [debouncedHistoryFilters]
+  )
+
+  // Line items back both the item-level filters and the row-wise expansion, so
+  // they are pulled once for whatever bills the history query returned.
+  const historyBillIdsKey = useMemo(
+    () => historyBills.map((bill) => bill.id).join(','),
+    [historyBills]
+  )
+
+  const historyFilterResults = useMemo(() => {
+    if (!historyFiltersActive) {
+      return { bills: historyBills, matchedItemIdsByBillId: new Map() }
+    }
+    const bills = []
+    const matchedItemIdsByBillId = new Map()
+    for (const bill of historyBills) {
+      const items = historyItemsByBillId.get(bill.id) || []
+      const { matched, matchedItems } = evaluateBillAgainstFilters(bill, items, debouncedHistoryFilters)
+      if (!matched) continue
+      bills.push(bill)
+      matchedItemIdsByBillId.set(bill.id, new Set(matchedItems.map((item) => item.id)))
+    }
+    return { bills, matchedItemIdsByBillId }
+  }, [historyBills, historyItemsByBillId, debouncedHistoryFilters, historyFiltersActive])
+
+  const filteredHistoryBills = historyFilterResults.bills
 
   const sortedHistoryBills = useMemo(() => {
     const column = HISTORY_SORT_COLUMNS.find((col) => col.key === historySortKey)
-    if (!column) return historyBills
+    if (!column) return filteredHistoryBills
     const direction = historySortDir === 'asc' ? 1 : -1
-    return [...historyBills].sort((a, b) => {
+    return [...filteredHistoryBills].sort((a, b) => {
       const left = column.value(a)
       const right = column.value(b)
       if (typeof left === 'number' && typeof right === 'number') return (left - right) * direction
       return String(left).localeCompare(String(right), 'en', { numeric: true, sensitivity: 'base' }) * direction
     })
-  }, [historyBills, historySortDir, historySortKey])
+  }, [filteredHistoryBills, historySortDir, historySortKey])
 
   const historyTotals = useMemo(() => sortedHistoryBills.reduce((acc, bill) => {
     acc.count += 1
     acc.total += Number(bill.total || 0)
     acc.paid += Number(bill.paid_amount || 0)
     acc.due += historyDueAmount(bill)
+    const items = historyItemsByBillId.get(bill.id)
+    if (items?.length) {
+      acc.profit += items.reduce((sum, item) => sum + itemProfit(item), 0)
+      acc.hasProfitData = true
+    }
     return acc
-  }, { count: 0, total: 0, paid: 0, due: 0 }), [sortedHistoryBills])
+  }, { count: 0, total: 0, paid: 0, due: 0, profit: 0, hasProfitData: false }), [sortedHistoryBills, historyItemsByBillId])
+
+  function getHistoryBillProfit(billId) {
+    const items = historyItemsByBillId.get(billId)
+    if (!items?.length) return null
+    if (!items.some((item) => Number(item.cost_price || 0) > 0)) return null
+    return items.reduce((sum, item) => sum + itemProfit(item), 0)
+  }
+
+  function updateHistoryFilter(patch) {
+    setHistoryFilters((prev) => ({ ...prev, ...patch }))
+  }
+
+  function handleToggleHistoryGstRate(rate) {
+    setHistoryFilters((prev) => {
+      const current = prev.gstRates || []
+      const key = slabKey(rate)
+      const next = current.map(slabKey).includes(key)
+        ? current.filter((entry) => slabKey(entry) !== key)
+        : [...current, Number(rate)]
+      return { ...prev, gstRates: next }
+    })
+  }
+
+  function handleResetHistoryFilters() {
+    setHistoryFilters(emptyAdvancedFilters())
+  }
+
+  function handleToggleHistoryRowExpansion(billId) {
+    setHistoryExpandedBillIds((prev) => (
+      prev.includes(billId) ? prev.filter((id) => id !== billId) : [...prev, billId]
+    ))
+  }
 
   function handleHistoryPeriod(period) {
     setHistoryPeriod(period)
@@ -705,6 +791,45 @@ export default function BillingPage() {
 
   const { confirm } = useConfirm()
   const customerDirectoryCacheKey = shop?.id ? `customers-directory:${shop.id}` : ''
+
+  // Line items back both the item-level history filters and the row-wise
+  // expansion, so they are pulled once for whatever bills the history query
+  // returned. Declared after `shop` because the dependency array reads it.
+  useEffect(() => {
+    if (view !== 'history' || !shop?.id) return
+    const billIds = historyBillIdsKey ? historyBillIdsKey.split(',') : []
+    if (!billIds.length) {
+      setHistoryItemsByBillId(new Map())
+      return
+    }
+
+    let cancelled = false
+    async function loadHistoryItems() {
+      setHistoryItemsLoading(true)
+      const collected = []
+      for (let index = 0; index < billIds.length; index += 150) {
+        const batch = billIds.slice(index, index + 150)
+        const { data, error } = await supabase
+          .from('bill_items')
+          .select('id,bill_id,product_id,sl_no,product_name,hsn_code,quantity,unit,rate,gst_rate,gst_amount,cost_price,discount_amount,total')
+          .eq('shop_id', shop.id)
+          .in('bill_id', batch)
+          .order('sl_no')
+        if (cancelled) return
+        if (error) {
+          setHistoryItemsLoading(false)
+          return
+        }
+        collected.push(...(data || []))
+      }
+      if (cancelled) return
+      setHistoryItemsByBillId(groupItemsByBillId(collected))
+      setHistoryItemsLoading(false)
+    }
+
+    loadHistoryItems()
+    return () => { cancelled = true }
+  }, [view, shop?.id, historyBillIdsKey])
 
   // Default place of supply to the shop's own registered state (most common case)
   useEffect(() => {
@@ -1002,7 +1127,7 @@ export default function BillingPage() {
         .eq('bill_type', billType)
         .order('date', { ascending: false })
         .order('created_at', { ascending: false })
-        .limit(debouncedHistorySearch.trim() ? 200 : 50)
+        .limit(historyFiltersActive ? 1000 : debouncedHistorySearch.trim() ? 200 : 50)
 
       if (historyFrom) q = q.gte('date', historyFrom)
       if (historyTo) q = q.lte('date', historyTo)
@@ -1146,7 +1271,7 @@ export default function BillingPage() {
 
     loadHistoryBills()
     return () => { cancelled = true }
-  }, [view, billType, debouncedHistorySearch, historyRefreshKey, historyFrom, historyTo, shop?.id])
+  }, [view, billType, debouncedHistorySearch, historyFiltersActive, historyRefreshKey, historyFrom, historyTo, shop?.id])
 
   // ── Load existing bill into form when ?editId= is provided ───────────────────
   useEffect(() => {
@@ -1725,28 +1850,38 @@ export default function BillingPage() {
 
   function handleExportHistoryCsv() {
     const exportBills = getHistoryExportBills()
-    const rows = exportBills.map((bill) => ({
-      Date: formatDate(bill.date),
-      'Bill No': bill.bill_no,
-      Type: bill.bill_type || '',
-      Customer: bill.customer_name || '',
-      Phone: bill.customer_phone || '',
-      GSTIN: bill.customer_gstin || '',
-      'Taxable Value': Number(bill.subtotal || 0),
-      CGST: Number(bill.cgst_amount || 0),
-      SGST: Number(bill.sgst_amount || 0),
-      IGST: Number(bill.igst_amount || 0),
-      GST: Number(bill.gst_amount || 0),
-      Discount: Number(bill.discount_amount || 0),
-      Total: Number(bill.total || 0),
-      Paid: Number(bill.paid_amount || 0),
-      Due: getHistoryDueAmount(bill),
-      'Payment Mode': bill.payment_mode || '',
-      Status: bill.payment_status || '',
-      Notes: bill.notes || '',
-    }))
+    const rows = exportBills.map((bill) => {
+      const items = historyItemsByBillId.get(bill.id) || []
+      const slabs = [...new Set(items.map((item) => slabKey(item.gst_rate)))]
+        .sort((left, right) => parseFloat(left) - parseFloat(right))
+      const profit = items.some((item) => Number(item.cost_price || 0) > 0)
+        ? items.reduce((sum, item) => sum + itemProfit(item), 0)
+        : ''
+      return {
+        Date: formatDate(bill.date),
+        'Bill No': bill.bill_no,
+        Type: bill.bill_type || '',
+        Customer: bill.customer_name || '',
+        Phone: bill.customer_phone || '',
+        GSTIN: bill.customer_gstin || '',
+        'Taxable Value': Number(bill.subtotal || 0),
+        CGST: Number(bill.cgst_amount || 0),
+        SGST: Number(bill.sgst_amount || 0),
+        IGST: Number(bill.igst_amount || 0),
+        GST: Number(bill.gst_amount || 0),
+        Discount: Number(bill.discount_amount || 0),
+        Total: Number(bill.total || 0),
+        Paid: Number(bill.paid_amount || 0),
+        Due: getHistoryDueAmount(bill),
+        'GST Slabs': slabs.map((slab) => `${slab}%`).join(' / '),
+        Profit: profit === '' ? '' : Number(profit.toFixed(2)),
+        'Payment Mode': bill.payment_mode || '',
+        Status: bill.payment_status || '',
+        Notes: bill.notes || '',
+      }
+    })
     downloadCsv(`${billType}-export.csv`, Object.keys(rows[0] || {
-      Date: '', 'Bill No': '', Type: '', Customer: '', Phone: '', GSTIN: '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', GST: '', Discount: '', Total: '', Paid: '', Due: '', 'Payment Mode': '', Status: '', Notes: '',
+      Date: '', 'Bill No': '', Type: '', Customer: '', Phone: '', GSTIN: '', 'Taxable Value': '', CGST: '', SGST: '', IGST: '', GST: '', Discount: '', Total: '', Paid: '', Due: '', 'GST Slabs': '', Profit: '', 'Payment Mode': '', Status: '', Notes: '',
     }), rows)
   }
 
@@ -2470,6 +2605,18 @@ export default function BillingPage() {
               />
               <button
                 type="button"
+                onClick={() => setHistoryFiltersOpen((open) => !open)}
+                className={`px-3 py-2 rounded-lg text-sm font-medium border ${
+                  historyFiltersActive
+                    ? 'bg-amber-100 border-amber-300 text-amber-800'
+                    : 'bg-white text-gray-700 hover:bg-gray-50'
+                }`}
+              >
+                {historyFiltersOpen ? 'Hide Filters' : 'Advanced Filters'}
+                {historyFiltersActive ? ' •' : ''}
+              </button>
+              <button
+                type="button"
                 onClick={handleMoveSelectedHistoryBillsToNumberUpdater}
                 disabled={historySelectedBillIds.length === 0}
                 className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 disabled:opacity-60"
@@ -2479,12 +2626,12 @@ export default function BillingPage() {
               <button
                 type="button"
                 onClick={handleExportHistoryCsv}
-                disabled={historyBills.length === 0}
+                disabled={filteredHistoryBills.length === 0}
                 className="px-3 py-2 rounded-lg border bg-white text-gray-700 text-sm font-medium hover:bg-gray-50 disabled:opacity-60"
               >
                 Export CSV{historySelectedBillIds.length ? ` (${historySelectedBillIds.length})` : ''}
               </button>
-              {billType === 'invoice' && historyBills.length > 0 && (
+              {billType === 'invoice' && filteredHistoryBills.length > 0 && (
                 <Link
                   href={getHistoryInvoicePackHref()}
                   className="px-3 py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700"
@@ -2501,16 +2648,180 @@ export default function BillingPage() {
                 {historyDeleting ? 'Deleting…' : `Delete Selected${historySelectedBillIds.length ? ` (${historySelectedBillIds.length})` : ''}`}
               </button>
             </div>
+            {historyFiltersOpen && (
+              <div className="mb-3 rounded-xl border bg-white p-3 space-y-3">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium text-gray-600">GST slab in bill</span>
+                    <select
+                      value={historyFilters.gstMode}
+                      onChange={(e) => updateHistoryFilter({ gstMode: e.target.value })}
+                      className="border rounded px-2 py-1 text-xs"
+                    >
+                      <option value="any">Has any item at</option>
+                      <option value="all">All items at</option>
+                      <option value="none">Has no item at</option>
+                    </select>
+                    {GST_SLABS.map((rate) => {
+                      const active = (historyFilters.gstRates || []).map(slabKey).includes(slabKey(rate))
+                      return (
+                        <button
+                          key={rate}
+                          type="button"
+                          onClick={() => handleToggleHistoryGstRate(rate)}
+                          className={`px-2.5 py-1 rounded-full text-xs font-medium border ${
+                            active
+                              ? 'bg-blue-600 border-blue-600 text-white'
+                              : 'bg-white text-gray-600 hover:bg-gray-50'
+                          }`}
+                        >
+                          {rate}%
+                        </button>
+                      )
+                    })}
+                    <label className="flex items-center gap-1.5 text-xs text-gray-600 ml-2">
+                      <input
+                        type="checkbox"
+                        checked={historyFilters.mixedRatesOnly}
+                        onChange={(e) => updateHistoryFilter({ mixedRatesOnly: e.target.checked })}
+                      />
+                      Mixed-rate bills only
+                    </label>
+                  </div>
+                  <p className="mt-1 text-[11px] text-gray-400">
+                    Example: pick 0% with “Has any item at” to list every bill carrying a 0% line — matching rows are shown under each bill.
+                  </p>
+                </div>
+
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <label className="text-xs text-gray-600">
+                    Item / HSN contains
+                    <input
+                      value={historyFilters.itemSearch}
+                      onChange={(e) => updateHistoryFilter({ itemSearch: e.target.value })}
+                      placeholder="e.g. bingo"
+                      className="mt-1 w-full border rounded px-2 py-1.5 text-sm"
+                    />
+                  </label>
+                  <label className="text-xs text-gray-600">
+                    Payment mode
+                    <select
+                      value={historyFilters.paymentMode}
+                      onChange={(e) => updateHistoryFilter({ paymentMode: e.target.value })}
+                      className="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-white"
+                    >
+                      <option value="">Any</option>
+                      {PAYMENT_MODES.map((mode) => (
+                        <option key={mode} value={mode.toLowerCase()}>{mode}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-xs text-gray-600">
+                    Payment status
+                    <select
+                      value={historyFilters.paymentStatus}
+                      onChange={(e) => updateHistoryFilter({ paymentStatus: e.target.value })}
+                      className="mt-1 w-full border rounded px-2 py-1.5 text-sm bg-white"
+                    >
+                      <option value="">Any</option>
+                      <option value="paid">Paid</option>
+                      <option value="partial">Partial</option>
+                      <option value="unpaid">Unpaid</option>
+                    </select>
+                  </label>
+                  <div className="flex items-end gap-2">
+                    <label className="text-xs text-gray-600 flex-1">
+                      Total ≥
+                      <input
+                        type="number"
+                        value={historyFilters.minTotal}
+                        onChange={(e) => updateHistoryFilter({ minTotal: e.target.value })}
+                        className="mt-1 w-full border rounded px-2 py-1.5 text-sm"
+                      />
+                    </label>
+                    <label className="text-xs text-gray-600 flex-1">
+                      Total ≤
+                      <input
+                        type="number"
+                        value={historyFilters.maxTotal}
+                        onChange={(e) => updateHistoryFilter({ maxTotal: e.target.value })}
+                        className="mt-1 w-full border rounded px-2 py-1.5 text-sm"
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-end gap-2">
+                  <label className="text-xs text-gray-600">
+                    Profit ≥
+                    <input
+                      type="number"
+                      value={historyFilters.minProfit}
+                      onChange={(e) => updateHistoryFilter({ minProfit: e.target.value })}
+                      className="mt-1 w-28 border rounded px-2 py-1.5 text-sm"
+                    />
+                  </label>
+                  <label className="text-xs text-gray-600">
+                    Profit ≤
+                    <input
+                      type="number"
+                      value={historyFilters.maxProfit}
+                      onChange={(e) => updateHistoryFilter({ maxProfit: e.target.value })}
+                      className="mt-1 w-28 border rounded px-2 py-1.5 text-sm"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-600 pb-2">
+                    <input
+                      type="checkbox"
+                      checked={historyFilters.lossOnly}
+                      onChange={(e) => updateHistoryFilter({ lossOnly: e.target.checked })}
+                    />
+                    Loss-making bills only
+                  </label>
+                  <label className="flex items-center gap-1.5 text-xs text-gray-600 pb-2">
+                    <input
+                      type="checkbox"
+                      checked={historyFilters.hasDueOnly}
+                      onChange={(e) => updateHistoryFilter({ hasDueOnly: e.target.checked })}
+                    />
+                    With pending due only
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleResetHistoryFilters}
+                    className="ml-auto px-3 py-2 rounded-lg border bg-white text-gray-700 text-xs font-medium hover:bg-gray-50"
+                  >
+                    Reset filters
+                  </button>
+                  <Link
+                    href="/reports?tab=recon"
+                    className="px-3 py-2 rounded-lg bg-amber-600 text-white text-xs font-medium hover:bg-amber-700"
+                  >
+                    Open GST Recon
+                  </Link>
+                </div>
+
+                {historyFiltersActive && (
+                  <div className="text-xs text-gray-500">
+                    {historyItemsLoading && historyNeedsItems
+                      ? 'Loading line items…'
+                      : `${filteredHistoryBills.length} of ${historyBills.length} loaded ${billType}s match`}
+                  </div>
+                )}
+              </div>
+            )}
             {historyLoading ? (
               <div className="text-center text-gray-400 py-10">Loading…</div>
-            ) : historyBills.length === 0 ? (
+            ) : filteredHistoryBills.length === 0 ? (
               <div className="text-center text-gray-400 py-10">
                 No {billType}s found
-                {historyFrom || historyTo ? ' for the selected dates' : ''}
+                {historyFiltersActive
+                  ? ' matching the advanced filters'
+                  : historyFrom || historyTo ? ' for the selected dates' : ''}
               </div>
             ) : (
               <>
-              <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
                 <div className="rounded-lg border bg-white px-3 py-2">
                   <div className="text-[11px] text-gray-500">{billType === 'invoice' ? 'Total Sales' : 'Total Amount'}</div>
                   <div className="text-lg font-bold text-blue-700">₹{historyTotals.total.toFixed(2)}</div>
@@ -2527,6 +2838,12 @@ export default function BillingPage() {
                   <div className="text-[11px] text-gray-500">Bills Listed</div>
                   <div className="text-lg font-bold text-gray-800">{historyTotals.count}</div>
                 </div>
+                <div className="rounded-lg border bg-white px-3 py-2">
+                  <div className="text-[11px] text-gray-500">Gross Profit</div>
+                  <div className={`text-lg font-bold ${historyTotals.profit < 0 ? 'text-red-700' : 'text-emerald-700'}`}>
+                    {historyTotals.hasProfitData ? `₹${historyTotals.profit.toFixed(2)}` : '—'}
+                  </div>
+                </div>
               </div>
               <div className="bg-white rounded-xl border overflow-x-auto">
                 <table className="w-full text-sm">
@@ -2535,11 +2852,12 @@ export default function BillingPage() {
                       <th className="px-3 py-2 text-left">
                         <input
                           type="checkbox"
-                          checked={historyBills.length > 0 && historySelectedBillIds.length === historyBills.length}
+                          checked={filteredHistoryBills.length > 0 && historySelectedBillIds.length === filteredHistoryBills.length}
                           onChange={(e) => handleToggleSelectAllHistoryBills(e.target.checked)}
                           aria-label="Select all invoices in history list"
                         />
                       </th>
+                      <th className="px-2 py-2 text-left" aria-label="Expand line items" />
                       {HISTORY_SORT_COLUMNS.map(col => (
                         <th key={col.key} className="px-3 py-2 text-left whitespace-nowrap">
                           <button
@@ -2559,8 +2877,16 @@ export default function BillingPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {sortedHistoryBills.map(b => (
-                      <tr key={b.id} className="border-b hover:bg-gray-50">
+                    {sortedHistoryBills.map(b => {
+                      const billItems = historyItemsByBillId.get(b.id) || []
+                      const matchedItemIds = historyFilterResults.matchedItemIdsByBillId.get(b.id)
+                      const expanded = historyExpandedBillIds.includes(b.id)
+                      const billProfit = getHistoryBillProfit(b.id)
+                      const billSlabs = [...new Set(billItems.map((item) => slabKey(item.gst_rate)))]
+                        .sort((left, right) => parseFloat(left) - parseFloat(right))
+                      return (
+                      <Fragment key={b.id}>
+                      <tr className="border-b hover:bg-gray-50">
                         <td className="px-3 py-2">
                           <input
                             type="checkbox"
@@ -2569,13 +2895,50 @@ export default function BillingPage() {
                             aria-label={`Select invoice ${b.bill_no}`}
                           />
                         </td>
-                        <td className="px-3 py-2">{new Date(b.date+'T00:00:00').toLocaleDateString('en-IN')}</td>
+                        <td className="px-2 py-2">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleHistoryRowExpansion(b.id)}
+                            disabled={billItems.length === 0}
+                            className="text-gray-400 hover:text-blue-700 disabled:opacity-40"
+                            title={billItems.length ? 'Show line items' : 'Line items not loaded'}
+                            aria-label={`Show line items of ${b.bill_no}`}
+                          >
+                            {expanded ? '▾' : '▸'}
+                          </button>
+                        </td>
+                        <td className="px-3 py-2">
+                          <div>{new Date(b.date+'T00:00:00').toLocaleDateString('en-IN')}</div>
+                          {billSlabs.length > 0 && (
+                            <div className="flex flex-wrap gap-1 mt-0.5">
+                              {billSlabs.map((slab) => (
+                                <span
+                                  key={slab}
+                                  className={`px-1 rounded text-[10px] font-medium ${
+                                    matchedItemIds && (historyFilters.gstRates || []).map(slabKey).includes(slab)
+                                      ? 'bg-amber-200 text-amber-900'
+                                      : 'bg-gray-100 text-gray-500'
+                                  }`}
+                                >
+                                  {slab}%
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </td>
                         <td className="px-3 py-2 font-mono font-medium">
                           <Link href={`/billing/${b.id}`} className="text-blue-700 hover:underline">
                             {b.bill_no}
                           </Link>
                         </td>
-                        <td className="px-3 py-2 text-gray-600">{b.customer_name || '—'}</td>
+                        <td className="px-3 py-2 text-gray-600">
+                          <div>{b.customer_name || '—'}</div>
+                          {billProfit !== null && (
+                            <div className={`text-[10px] ${billProfit < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                              Profit ₹{billProfit.toFixed(2)}
+                            </div>
+                          )}
+                        </td>
                         <td className="px-3 py-2 font-medium text-right">₹{Number(b.total).toFixed(2)}</td>
                         <td className="px-3 py-2 font-medium text-right">₹{Number(b.paid_amount || 0).toFixed(2)}</td>
                         <td className="px-3 py-2 text-right">₹{getHistoryDueAmount(b).toFixed(2)}</td>
@@ -2649,11 +3012,55 @@ export default function BillingPage() {
                           </div>
                         </td>
                       </tr>
-                    ))}
+                      {expanded && billItems.length > 0 && (
+                        <tr className="border-b bg-gray-50/70">
+                          <td className="px-3 py-2" colSpan={11}>
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="text-[11px] text-gray-500">
+                                  <th className="px-2 py-1 text-left">Item</th>
+                                  <th className="px-2 py-1 text-left">HSN</th>
+                                  <th className="px-2 py-1 text-right">Qty</th>
+                                  <th className="px-2 py-1 text-right">Rate</th>
+                                  <th className="px-2 py-1 text-right">GST %</th>
+                                  <th className="px-2 py-1 text-right">GST Amt</th>
+                                  <th className="px-2 py-1 text-right">Total</th>
+                                  <th className="px-2 py-1 text-right">Profit</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {billItems.map((item) => {
+                                  const highlighted = matchedItemIds ? matchedItemIds.has(item.id) : false
+                                  const lineProfit = Number(item.cost_price || 0) > 0 ? itemProfit(item) : null
+                                  return (
+                                    <tr key={item.id} className={highlighted ? 'bg-amber-100' : ''}>
+                                      <td className="px-2 py-1">{item.product_name}</td>
+                                      <td className="px-2 py-1 text-gray-500">{item.hsn_code || '—'}</td>
+                                      <td className="px-2 py-1 text-right">{Number(item.quantity || 0)}</td>
+                                      <td className="px-2 py-1 text-right">₹{Number(item.rate || 0).toFixed(2)}</td>
+                                      <td className={`px-2 py-1 text-right font-medium ${Number(item.gst_rate || 0) === 0 ? 'text-red-600' : 'text-gray-700'}`}>
+                                        {slabKey(item.gst_rate)}%
+                                      </td>
+                                      <td className="px-2 py-1 text-right">₹{Number(item.gst_amount || 0).toFixed(2)}</td>
+                                      <td className="px-2 py-1 text-right font-medium">₹{Number(item.total || 0).toFixed(2)}</td>
+                                      <td className={`px-2 py-1 text-right ${lineProfit !== null && lineProfit < 0 ? 'text-red-600' : 'text-emerald-700'}`}>
+                                        {lineProfit === null ? '—' : `₹${lineProfit.toFixed(2)}`}
+                                      </td>
+                                    </tr>
+                                  )
+                                })}
+                              </tbody>
+                            </table>
+                          </td>
+                        </tr>
+                      )}
+                      </Fragment>
+                      )
+                    })}
                   </tbody>
                   <tfoot>
                     <tr className="bg-gray-50 border-t-2 font-semibold text-gray-800">
-                      <td className="px-3 py-2" />
+                      <td className="px-3 py-2" colSpan={2} />
                       <td className="px-3 py-2 text-xs text-gray-500" colSpan={3}>
                         Total of {historyTotals.count} {billType}{historyTotals.count === 1 ? '' : 's'} listed
                       </td>
@@ -2692,7 +3099,7 @@ export default function BillingPage() {
             >
               Select
             </button>
-            <Link href="/customers" className="shrink-0 whitespace-nowrap text-xs text-gray-500 hover:text-blue-600 hover:underline">
+            <Link href="/customers" className="hidden shrink-0 whitespace-nowrap text-xs text-gray-500 hover:text-blue-600 hover:underline sm:inline">
               Customers
             </Link>
           </div>
@@ -2718,7 +3125,7 @@ export default function BillingPage() {
         {/* ── Bill items table ─────────────────────────────────────────── */}
         <div className="flex-1 md:overflow-y-auto px-4 pt-3 min-h-[45vh] md:min-h-0">
           <div className="table-scroll">
-          <table className="w-full min-w-[640px] md:min-w-[720px] bg-white border rounded-lg text-sm border-collapse billing-table">
+          <table className="w-full md:min-w-[720px] bg-white border rounded-lg text-sm border-collapse billing-table">
             <thead>
               <tr className="bg-gray-100 text-gray-600 text-xs">
                 <th className="px-2 py-2 text-left w-8">#</th>
