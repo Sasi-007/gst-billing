@@ -17,6 +17,7 @@ import {
   normalizeCustomerPhone,
 } from '@/lib/customers'
 import ProductSearch from '@/components/ProductSearch'
+import AutoBillModal from '@/components/AutoBillModal'
 import PrintTemplate from '@/components/PrintTemplate'
 import { useShop } from '@/context/ShopContext'
 import { useConfirm } from '@/context/ConfirmDialogContext'
@@ -608,6 +609,7 @@ export default function BillingPage() {
   const [customerDirectoryLoading, setCustomerDirectoryLoading] = useState(false)
 
   const [searchOpen,  setSearchOpen]  = useState(false)
+  const [autoFillOpen, setAutoFillOpen] = useState(false)
   const [activeRow,   setActiveRow]   = useState(0)
   const [printData,   setPrintData]   = useState(null)
   // `null` = follow the shop's default print template from Settings.
@@ -2025,6 +2027,46 @@ export default function BillingPage() {
     focusId(`qty-${activeRow}`)
   }
 
+  // ── Auto fill the bill to an approximate value ───────────────────────────
+  // Rate a row would get for a product, so the generated plan matches the
+  // totals the bill will actually show.
+  const autoFillRateFor = useCallback((product) => {
+    const derived = rateFromCost
+      ? markupRateFromCost(product.purchase_price, rateMarkupPct, product.mrp || product.selling_price || 0)
+      : null
+    return derived !== null ? derived : (product.selling_price || product.mrp || 0)
+  }, [rateFromCost, rateMarkupPct])
+
+  function applyAutoFill(lines) {
+    if (!lines?.length) return
+    const newRows = lines.map(line => recalc({
+      ...emptyItem(),
+      product_id:     line.product.id,
+      product_name:   getBillProductName(line.product),
+      hsn_code:       line.product.hsn_code || '',
+      unit:           line.product.unit     || 'pcs',
+      mrp:            line.product.mrp      || line.product.selling_price || 0,
+      purchase_price: line.product.purchase_price || 0,
+      rate:           line.rate,
+      rate_manual:    false,
+      gst_rate:       line.product.gst_rate || 0,
+      quantity:       line.quantity,
+      discount_pct:   '',
+      stock_qty:      line.product.stock_qty,
+      min_stock:      line.product.min_stock || 0,
+    }))
+
+    setItems(prev => {
+      // Blank starter rows are dropped so auto-filled lines sit at the top.
+      const kept = prev.filter(row => row.product_id || String(row.product_name || '').trim())
+      const next = [...kept, ...newRows]
+      setActiveRow(next.length - 1)
+      return next
+    })
+    setAutoFillOpen(false)
+    showToast(`Added ${newRows.length} item${newRows.length > 1 ? 's' : ''} — verify qty and rate before saving`)
+  }
+
   // ── Free-text item (not in inventory) ────────────────────────────────────
   function handleFreeTextItem(name) {
     const capitalizedName = name ? name.charAt(0).toUpperCase() + name.slice(1) : name
@@ -2073,6 +2115,7 @@ export default function BillingPage() {
     setCustomer(emptyCustomer())
     setCustomerPickerOpen(false)
     setCustomerPickerSearch('')
+    setAutoFillOpen(false)
     setBillDate(todayStr())
     setBillNo('')
     setPaidAmt('')
@@ -2367,6 +2410,7 @@ export default function BillingPage() {
         return
       }
       if (searchOpen) return
+      if (autoFillOpen) return
 
       switch (e.key) {
         case 'F2':  e.preventDefault(); handleNewBill();        break
@@ -2390,7 +2434,7 @@ export default function BillingPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customerPickerOpen, searchOpen, activeRow])
+  }, [customerPickerOpen, searchOpen, autoFillOpen, activeRow])
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -2408,6 +2452,14 @@ export default function BillingPage() {
           onAddFreeText={handleFreeTextItem}
           onClose={() => setSearchOpen(false)}
           showSuggestions
+        />
+      )}
+
+      {autoFillOpen && (
+        <AutoBillModal
+          rateFor={autoFillRateFor}
+          onApply={applyAutoFill}
+          onClose={() => setAutoFillOpen(false)}
         />
       )}
 
@@ -3352,6 +3404,15 @@ export default function BillingPage() {
               className="text-sm text-blue-600 hover:text-blue-800 hover:underline"
             >
               + Add Row &nbsp;<kbd className="hidden md:inline text-xs">F4</kbd>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setAutoFillOpen(true)}
+              className="rounded border border-purple-300 bg-purple-50 px-2 py-1 text-xs font-semibold text-purple-700 hover:bg-purple-100"
+              title="Fill the bill with suggested items for an approximate amount"
+            >
+              ✨ Auto fill by amount
             </button>
 
             {/* Rate from cost: off = normal selling price, on = purchase price + markup % */}

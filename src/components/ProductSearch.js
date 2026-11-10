@@ -7,8 +7,13 @@ import { useShop } from '@/context/ShopContext'
 import { loadProductSnapshot, saveProductSnapshot } from '@/lib/offlineBilling'
 import { useDebouncedValue } from '@/lib/useDebouncedValue'
 import { getProductSubtitle } from '@/lib/productNames'
+import {
+  SUGGESTION_PRODUCT_COLUMNS,
+  buildSuggestionQuery,
+  fetchRecentlyBilledProductIds,
+} from '@/lib/billSuggestions'
 
-const PRODUCT_SEARCH_COLUMNS = 'id,name,local_name,search_aliases,bill_name_mode,brand,barcode,unit,mrp,purchase_price,selling_price,gst_rate,stock_qty,min_stock,hsn_code,supplier_id,is_active,search_text'
+const PRODUCT_SEARCH_COLUMNS = SUGGESTION_PRODUCT_COLUMNS
 const PRODUCT_SEARCH_LIMIT = 50
 
 function tokenizeProductSearch(product) {
@@ -89,35 +94,9 @@ export default function ProductSearch({ onSelect, onAddFreeText, onClose, showSu
       try {
         // Items billed on the last 2 invoices are skipped so the shortcut keeps
         // surfacing products the counter has not just sold.
-        const { data: recentBills } = await supabase
-          .from('bills')
-          .select('id')
-          .eq('shop_id', shop.id)
-          .eq('bill_type', 'invoice')
-          .order('created_at', { ascending: false })
-          .limit(2)
+        const excludedIds = await fetchRecentlyBilledProductIds(shop.id)
 
-        const recentBillIds = (recentBills || []).map((bill) => bill.id).filter(Boolean)
-        let excludedIds = []
-        if (recentBillIds.length) {
-          const { data: recentItems } = await supabase
-            .from('bill_items')
-            .select('product_id')
-            .eq('shop_id', shop.id)
-            .in('bill_id', recentBillIds)
-          excludedIds = [...new Set((recentItems || []).map((item) => item.product_id).filter(Boolean))]
-        }
-
-        const buildQuery = (selectArgs) => {
-          let q = supabase
-            .from('products')
-            .select(...selectArgs)
-            .eq('shop_id', shop.id)
-            .eq('is_active', true)
-            .gt('stock_qty', 0)
-          if (excludedIds.length) q = q.not('id', 'in', `(${excludedIds.join(',')})`)
-          return q
-        }
+        const buildQuery = (selectArgs) => buildSuggestionQuery(shop.id, excludedIds, selectArgs)
 
         const { count, error: countErr } = await buildQuery([ 'id', { count: 'exact', head: true } ])
         if (countErr) throw countErr
