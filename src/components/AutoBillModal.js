@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from 'react'
 import { fmt } from '@/lib/gst'
 import { useShop } from '@/context/ShopContext'
 import { getBillProductName } from '@/lib/productNames'
-import { fetchSuggestionCandidates, buildAutoFillPlan, MAX_VARIANCE_PCT } from '@/lib/billSuggestions'
+import { fetchSuggestionCandidates, buildAutoFillPlanWithFallback, MAX_VARIANCE_PCT } from '@/lib/billSuggestions'
 
 /**
  * Auto-fill a bill to an approximate value.
@@ -48,17 +48,17 @@ export default function AutoBillModal({ rateFor, onApply, onClose }) {
     setLoading(true)
     setError('')
     try {
-      if (!candidatesRef.current?.length) {
+      if (!candidatesRef.current?.pool?.length) {
         candidatesRef.current = await fetchSuggestionCandidates(shop.id)
       }
       const candidates = candidatesRef.current
-      if (!candidates.length) {
+      if (!candidates.pool.length) {
         setPlan(null)
-        setError('No suggestion-eligible items — everything in stock was billed on the last 2 invoices')
+        setError('No items in stock to bill — add stock first')
         return
       }
 
-      const built = buildAutoFillPlan(candidates, target, {
+      const built = buildAutoFillPlanWithFallback(candidates, target, {
         rateFor,
         maxLines: Math.max(1, Number(maxLines) || 8),
       })
@@ -183,9 +183,17 @@ export default function AutoBillModal({ rateFor, onApply, onClose }) {
               </table>
             </div>
 
+            {plan.relaxed && plan.tier?.note && (
+              <div className="shrink-0 border-t bg-sky-50 px-4 py-2 text-xs text-sky-800">
+                Fresh items ran out — this bill {plan.tier.note} to reach the amount.
+              </div>
+            )}
+
             {shortOfStock && (
               <div className="shrink-0 border-t bg-amber-50 px-4 py-2 text-xs text-amber-800">
-                Eligible stock can only reach about {fmt(plan.maxPossible)} — restock or lower the target to bill {fmt(plan.target)}.
+                {plan.poolCeiling > plan.maxPossible && plan.poolCeiling >= plan.target
+                  ? <>Only {plan.lines.length} items fit this bill — raise “Max items” to reach {fmt(plan.target)}.</>
+                  : <>Stock on hand only reaches about {fmt(plan.poolCeiling || plan.maxPossible)} at realistic quantities — restock or lower the target to bill {fmt(plan.target)}.</>}
               </div>
             )}
 
